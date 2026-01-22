@@ -1,0 +1,10 @@
+name: cem_occ
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.13
+  - numpy
+  - scipy
+  - matplotlib
+  - pythonocc-core=7.9.0
