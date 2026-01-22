@@ -1,6 +1,55 @@
 import numpy as np
 from physics.constants import ETA0, C0
 
+
+def detect_degenerate_edge(surface, threshold_ratio=0.001):
+    """
+    检测曲面的退化边（三角形面）
+
+    返回:
+        None: 四边形面（无退化）
+        'u_min': u=0 边退化
+        'u_max': u=1 边退化
+        'v_min': v=0 边退化
+        'v_max': v=1 边退化
+    """
+    u_min, u_max = surface.u_domain
+    v_min, v_max = surface.v_domain
+
+    # 检查四个角的 Jacobian
+    corners = [
+        (u_min, v_min),  # (0,0)
+        (u_max, v_min),  # (1,0)
+        (u_min, v_max),  # (0,1)
+        (u_max, v_max),  # (1,1)
+    ]
+
+    jac_values = []
+    for u, v in corners:
+        _, _, jac = surface.get_data(np.array([[u]]), np.array([[v]]))
+        jac_values.append(jac[0, 0])
+
+    max_jac = max(jac_values)
+    if max_jac < 1e-10:  # 整个面都退化
+        return 'degenerate'
+
+    threshold = max_jac * threshold_ratio
+    is_degenerate = [j < threshold for j in jac_values]
+
+    # 判断哪条边退化
+    # corners: (0,0), (1,0), (0,1), (1,1)
+    if is_degenerate[0] and is_degenerate[2]:  # u_min 边 (0,0)-(0,1)
+        return 'u_min'
+    if is_degenerate[1] and is_degenerate[3]:  # u_max 边 (1,0)-(1,1)
+        return 'u_max'
+    if is_degenerate[0] and is_degenerate[1]:  # v_min 边 (0,0)-(1,0)
+        return 'v_min'
+    if is_degenerate[2] and is_degenerate[3]:  # v_max 边 (0,1)-(1,1)
+        return 'v_max'
+
+    return None  # 四边形
+
+
 class RibbonIntegrator:
     """
     使用 Ribbon 方法进行物理光学 (PO) 积分
@@ -53,63 +102,164 @@ class RibbonIntegrator:
 
     def integrate_surface(self, surface, wave, samples_per_lambda=None):
         """
-        计算散射积分
-        
+        计算散射积分，自动检测并处理三角形面
+
         参数:
         surface: 几何表面对象
         wave: 入射波对象
         samples_per_lambda: (可选) 本次计算的采样密度。如果不提供，使用默认值。
         """
-        # 确定本次使用的采样率
+        # 检测退化边
+        degen_edge = detect_degenerate_edge(surface)
+
+        if degen_edge == 'degenerate':
+            # 整个面退化，跳过
+            return 0j
+        elif degen_edge is not None:
+            # 三角形面，使用条带状积分
+            return self._integrate_triangle(surface, wave, samples_per_lambda, degen_edge)
+        else:
+            # 四边形面，使用标准矩形积分
+            return self._integrate_quad(surface, wave, samples_per_lambda)
+
+    def _integrate_quad(self, surface, wave, samples_per_lambda=None):
+        """四边形面的标准矩形网格积分"""
         spl = samples_per_lambda if samples_per_lambda is not None else self.default_samples_per_lambda
-        
-        # 1. 自动决定网格密度
+
         nu, nv = self._estimate_mesh_density(surface, wave.wavelength, spl)
-        
+
         u_min, u_max = surface.u_domain
         v_min, v_max = surface.v_domain
-        
+
         du = (u_max - u_min) / nu
         dv = (v_max - v_min) / nv
-        
+
         u_centers = np.linspace(u_min + du/2, u_max - du/2, nu)
         v_centers = np.linspace(v_min + dv/2, v_max - dv/2, nv)
-        
+
         uu, vv = np.meshgrid(u_centers, v_centers)
-        
-        # 2. 获取几何数据
-        points, normals, jacobians = surface.get_data(uu, vv)
-        
-        # 3. 准备波动参数
+
+        return self._compute_integral(surface, wave, uu, vv, du, dv)
+
+    def _integrate_triangle(self, surface, wave, samples_per_lambda, degen_edge):
+        """
+        三角形面的条带状积分
+
+        策略：沿非退化方向分条带，每条带的宽度根据位置变化
+        """
+        spl = samples_per_lambda if samples_per_lambda is not None else self.default_samples_per_lambda
+
+        nu, nv = self._estimate_mesh_density(surface, wave.wavelength, spl)
+
+        u_min, u_max = surface.u_domain
+        v_min, v_max = surface.v_domain
+
+        total_I = 0j
+
+        if degen_edge == 'u_min':
+            # u=0 边退化，沿 v 分条带，u 从小到大
+            # 三角形：从 (u_min, v_min)-(u_min, v_max) 这个点延伸到 (u_max, v_min)-(u_max, v_max) 边
+            dv = (v_max - v_min) / nv
+            for j in range(nv):
+                v_center = v_min + (j + 0.5) * dv
+                # 条带在 u 方向从 u_min 到 u_max，但跳过靠近退化边的区域
+                u_start = u_min + (u_max - u_min) * 0.02  # 跳过前 2%
+                du = (u_max - u_start) / nu
+                u_centers = np.linspace(u_start + du/2, u_max - du/2, nu)
+                v_arr = np.full_like(u_centers, v_center)
+                total_I += self._compute_integral_1d(surface, wave, u_centers, v_arr, du, dv)
+
+        elif degen_edge == 'u_max':
+            # u=1 边退化
+            dv = (v_max - v_min) / nv
+            for j in range(nv):
+                v_center = v_min + (j + 0.5) * dv
+                u_end = u_max - (u_max - u_min) * 0.02
+                du = (u_end - u_min) / nu
+                u_centers = np.linspace(u_min + du/2, u_end - du/2, nu)
+                v_arr = np.full_like(u_centers, v_center)
+                total_I += self._compute_integral_1d(surface, wave, u_centers, v_arr, du, dv)
+
+        elif degen_edge == 'v_min':
+            # v=0 边退化，沿 u 分条带
+            du = (u_max - u_min) / nu
+            for i in range(nu):
+                u_center = u_min + (i + 0.5) * du
+                v_start = v_min + (v_max - v_min) * 0.02
+                dv = (v_max - v_start) / nv
+                v_centers = np.linspace(v_start + dv/2, v_max - dv/2, nv)
+                u_arr = np.full_like(v_centers, u_center)
+                total_I += self._compute_integral_1d(surface, wave, u_arr, v_centers, du, dv)
+
+        elif degen_edge == 'v_max':
+            # v=1 边退化
+            du = (u_max - u_min) / nu
+            for i in range(nu):
+                u_center = u_min + (i + 0.5) * du
+                v_end = v_max - (v_max - v_min) * 0.02
+                dv = (v_end - v_min) / nv
+                v_centers = np.linspace(v_min + dv/2, v_end - dv/2, nv)
+                u_arr = np.full_like(v_centers, u_center)
+                total_I += self._compute_integral_1d(surface, wave, u_arr, v_centers, du, dv)
+
+        return total_I
+
+    def _compute_integral_1d(self, surface, wave, u_arr, v_arr, du, dv):
+        """计算一维条带的积分贡献"""
+        points, normals, jacobians = surface.get_data(u_arr, v_arr)
+
         k_vec = wave.k_vector
         k_dir = wave.k_dir
-        
-        # 4. 相位及梯度
+
         phase = 2.0 * np.sum(points * k_vec, axis=-1)
-        
-        # 数值差分算 alpha (d_phase/du)
+
+        # 相位梯度
+        eps = du * 1e-4
+        p_plus = surface.evaluate(u_arr + eps, v_arr)
+        p_minus = surface.evaluate(u_arr - eps, v_arr)
+        phi_plus = 2.0 * np.sum(p_plus * k_vec, axis=-1)
+        phi_minus = 2.0 * np.sum(p_minus * k_vec, axis=-1)
+        alpha = (phi_plus - phi_minus) / (2 * eps)
+
+        n_dot_k = np.sum(normals * k_dir, axis=-1)
+        lit_mask = n_dot_k < 0
+        illumination_factor = -n_dot_k
+
+        sinc_term = np.sinc(alpha * du / (2.0 * np.pi))
+
+        # 过滤 Jacobian 过小的点
+        jac_mask = jacobians > jacobians.max() * 0.001 if jacobians.max() > 0 else np.ones_like(jacobians, dtype=bool)
+        valid_mask = lit_mask & jac_mask
+
+        contributions = (illumination_factor * jacobians *
+                        np.exp(1j * phase) *
+                        sinc_term *
+                        du * dv)
+
+        return np.sum(contributions[valid_mask])
+
+    def _compute_integral(self, surface, wave, uu, vv, du, dv):
+        """计算二维网格的积分"""
+        points, normals, jacobians = surface.get_data(uu, vv)
+
+        k_vec = wave.k_vector
+        k_dir = wave.k_dir
+
+        phase = 2.0 * np.sum(points * k_vec, axis=-1)
+
         eps = du * 1e-4
         p_plus = surface.evaluate(uu + eps, vv)
         p_minus = surface.evaluate(uu - eps, vv)
         phi_plus = 2.0 * np.sum(p_plus * k_vec, axis=-1)
         phi_minus = 2.0 * np.sum(p_minus * k_vec, axis=-1)
         alpha = (phi_plus - phi_minus) / (2 * eps)
-        
-        # 5. PO 电流与掩码
-        # n_dot_k = n · k_dir，其中 k_dir 指向原点（传播方向）
-        # 对于被照亮的表面：法向量朝向源，所以 n_dot_k < 0
+
         n_dot_k = np.sum(normals * k_dir, axis=-1)
         lit_mask = n_dot_k < 0
-
-        # 照射因子：取负值使其为正，物理意义是 |cos(入射角)|
-        # 这样 illumination_factor > 0 对于被照亮区域
         illumination_factor = -n_dot_k
 
-        # 6. Ribbon 积分 (Sinc)
-        # sinc(x) = sin(πx)/(πx)，用于解析处理 u 方向的相位振荡
         sinc_term = np.sinc(alpha * du / (2.0 * np.pi))
 
-        # PO积分贡献：照射因子 × 面积元 × 相位 × sinc修正
         contributions = (illumination_factor * jacobians *
                         np.exp(1j * phase) *
                         sinc_term *

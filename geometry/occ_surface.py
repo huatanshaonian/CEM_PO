@@ -1,6 +1,11 @@
 import numpy as np
 from OCC.Core.Geom import Geom_Surface
 from OCC.Core.GeomLProp import GeomLProp_SLProps
+from OCC.Core.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
+from OCC.Core.BRepLProp import BRepLProp_SLProps
+from OCC.Core.TopoDS import TopoDS_Face, topods
+from OCC.Core.TopExp import TopExp_Explorer
+from OCC.Core.TopAbs import TopAbs_EDGE
 from .surface import Surface
 
 class OCCSurface(Surface):
@@ -92,5 +97,136 @@ class OCCSurface(Surface):
         points = np.array(points).reshape(shape + (3,))
         normals = np.array(normals).reshape(shape + (3,))
         jacobians = np.array(jacobians).reshape(shape)
-        
+
         return points, normals, jacobians
+
+
+class OCCFaceSurface(Surface):
+    """
+    基于 TopoDS_Face 的曲面，正确处理 trimming 边界。
+    使用 BRepAdaptor_Surface 获取实际的参数域。
+    """
+
+    def __init__(self, face: TopoDS_Face):
+        """
+        face: OCC 的 TopoDS_Face 对象
+        """
+        self.face = face
+        self.adaptor = BRepAdaptor_Surface(face)
+
+        # 获取实际的参数边界（考虑 trimming）
+        self.u_min = self.adaptor.FirstUParameter()
+        self.u_max = self.adaptor.LastUParameter()
+        self.v_min = self.adaptor.FirstVParameter()
+        self.v_max = self.adaptor.LastVParameter()
+
+    @property
+    def u_domain(self):
+        return (self.u_min, self.u_max)
+
+    @property
+    def v_domain(self):
+        return (self.v_min, self.v_max)
+
+    def evaluate(self, u, v):
+        u, v = np.broadcast_arrays(u, v)
+        shape = u.shape
+        u_flat = u.ravel()
+        v_flat = v.ravel()
+
+        points = []
+        from OCC.Core.gp import gp_Pnt
+
+        for ui, vi in zip(u_flat, v_flat):
+            pnt = self.adaptor.Value(ui, vi)
+            points.append([pnt.X(), pnt.Y(), pnt.Z()])
+
+        return np.array(points).reshape(shape + (3,))
+
+    def get_normal(self, u, v):
+        return self.get_data(u, v)[1]
+
+    def get_jacobian(self, u, v):
+        return self.get_data(u, v)[2]
+
+    def get_data(self, u_grid, v_grid):
+        """
+        使用 BRepLProp_SLProps 获取点、法线和 Jacobian。
+        """
+        u, v = np.broadcast_arrays(u_grid, v_grid)
+        shape = u.shape
+        u_flat = u.ravel()
+        v_flat = v.ravel()
+
+        points = []
+        normals = []
+        jacobians = []
+
+        # BRepLProp_SLProps 用于 BRepAdaptor_Surface
+        props = BRepLProp_SLProps(self.adaptor, 2, 1e-7)
+
+        for ui, vi in zip(u_flat, v_flat):
+            props.SetParameters(ui, vi)
+
+            # 1. 获取坐标点
+            pnt = props.Value()
+            points.append([pnt.X(), pnt.Y(), pnt.Z()])
+
+            # 2. 获取法线
+            if props.IsNormalDefined():
+                n_dir = props.Normal()
+                normals.append([n_dir.X(), n_dir.Y(), n_dir.Z()])
+            else:
+                normals.append([0.0, 0.0, 0.0])
+
+            # 3. 计算 Jacobian |Du x Dv|
+            du = props.D1U()
+            dv = props.D1V()
+            du_vec = np.array([du.X(), du.Y(), du.Z()])
+            dv_vec = np.array([dv.X(), dv.Y(), dv.Z()])
+            cross_prod = np.cross(du_vec, dv_vec)
+            jacobians.append(np.linalg.norm(cross_prod))
+
+        points = np.array(points).reshape(shape + (3,))
+        normals = np.array(normals).reshape(shape + (3,))
+        jacobians = np.array(jacobians).reshape(shape)
+
+        return points, normals, jacobians
+
+    def get_edges(self, n_samples=20):
+        """
+        获取面的所有边界边，返回每条边的采样点和中点。
+
+        返回:
+            list of dict: 每条边的信息，包含:
+                - 'points': (n_samples, 3) 边上的采样点
+                - 'midpoint': (3,) 边的中点坐标
+        """
+        edges_data = []
+
+        exp = TopExp_Explorer(self.face, TopAbs_EDGE)
+        while exp.More():
+            edge = topods.Edge(exp.Current())
+            curve = BRepAdaptor_Curve(edge)
+
+            t_min = curve.FirstParameter()
+            t_max = curve.LastParameter()
+
+            # 采样边上的点
+            t_vals = np.linspace(t_min, t_max, n_samples)
+            points = []
+            for t in t_vals:
+                pnt = curve.Value(t)
+                points.append([pnt.X(), pnt.Y(), pnt.Z()])
+
+            points = np.array(points)
+            midpoint = points[n_samples // 2]
+
+            edges_data.append({
+                'points': points,
+                'midpoint': midpoint
+            })
+
+            exp.Next()
+
+        return edges_data

@@ -206,6 +206,16 @@ class GeminiPOGUI:
             btn.pack(fill=tk.X, pady=5)
             self.step_label = ttk.Label(self.geo_params_frame, text="未选择文件", foreground="#888888", wraplength=200)
             self.step_label.pack(fill=tk.X)
+            # STEP 预览按钮
+            btn_preview = ttk.Button(self.geo_params_frame, text="👁 预览全部", command=self.preview_step)
+            btn_preview.pack(fill=tk.X, pady=(5, 0))
+            # 单面预览
+            face_frame = ttk.Frame(self.geo_params_frame, style="Card.TFrame")
+            face_frame.pack(fill=tk.X, pady=(5, 0))
+            ttk.Label(face_frame, text="面索引:").pack(side=tk.LEFT)
+            self.step_face_idx = tk.IntVar(value=0)
+            ttk.Entry(face_frame, textvariable=self.step_face_idx, width=5).pack(side=tk.LEFT, padx=5)
+            ttk.Button(face_frame, text="👁 预览单面", command=self.preview_step_single).pack(side=tk.LEFT)
 
     def add_param_input(self, label, var_name, default):
         frame = ttk.Frame(self.geo_params_frame, style="Card.TFrame")
@@ -221,6 +231,249 @@ class GeminiPOGUI:
             self.step_file_path = filename
             self.step_label.config(text=os.path.basename(filename))
             self.log(f"Selected STEP file: {filename}")
+
+    def preview_step_single(self):
+        """预览 STEP 模型的单个面，显示网格、边和编号"""
+        if not self.step_file_path:
+            messagebox.showwarning("Warning", "请先选择 STEP 文件")
+            return
+
+        try:
+            from solver.ribbon_solver import detect_degenerate_edge
+
+            surfaces = load_step_file(self.step_file_path)
+            face_idx = self.step_face_idx.get()
+
+            if face_idx < 0 or face_idx >= len(surfaces):
+                messagebox.showwarning("Warning", f"面索引超出范围 (0-{len(surfaces)-1})")
+                return
+
+            surf = surfaces[face_idx]
+            degen_edge = detect_degenerate_edge(surf)
+
+            face_type = "四边形" if degen_edge is None else f"三角形({degen_edge}退化)" if degen_edge != 'degenerate' else "完全退化"
+            self.log(f"Preview face {face_idx}: {face_type}, u=[{surf.u_min:.2f},{surf.u_max:.2f}], v=[{surf.v_min:.2f},{surf.v_max:.2f}]")
+
+            nu, nv = 40, 40
+
+            # 根据面类型生成不同的网格
+            if degen_edge == 'u_min':
+                u_start = surf.u_min + (surf.u_max - surf.u_min) * 0.02
+                u = np.linspace(u_start, surf.u_max, nu)
+                v = np.linspace(surf.v_min, surf.v_max, nv)
+            elif degen_edge == 'u_max':
+                u_end = surf.u_max - (surf.u_max - surf.u_min) * 0.02
+                u = np.linspace(surf.u_min, u_end, nu)
+                v = np.linspace(surf.v_min, surf.v_max, nv)
+            elif degen_edge == 'v_min':
+                u = np.linspace(surf.u_min, surf.u_max, nu)
+                v_start = surf.v_min + (surf.v_max - surf.v_min) * 0.02
+                v = np.linspace(v_start, surf.v_max, nv)
+            elif degen_edge == 'v_max':
+                u = np.linspace(surf.u_min, surf.u_max, nu)
+                v_end = surf.v_max - (surf.v_max - surf.v_min) * 0.02
+                v = np.linspace(surf.v_min, v_end, nv)
+            else:
+                u = np.linspace(surf.u_min, surf.u_max, nu)
+                v = np.linspace(surf.v_min, surf.v_max, nv)
+
+            uu, vv = np.meshgrid(u, v)
+            points, normals, jacobians = surf.get_data(uu, vv)
+
+            # 获取边界边
+            edges_data = surf.get_edges(n_samples=30)
+            n_edges = len(edges_data)
+            self.log(f"  Face {face_idx} has {n_edges} edges")
+
+            # 边的颜色
+            edge_colors = plt.cm.Set1(np.linspace(0, 1, max(n_edges, 1)))
+
+            # 绘图
+            fig = plt.figure(figsize=(14, 5))
+
+            # 左图：3D 网格 + 边
+            ax1 = fig.add_subplot(121, projection='3d')
+            X, Y, Z = points[..., 0], points[..., 1], points[..., 2]
+            ax1.plot_wireframe(X, Y, Z, color='#007ACC', linewidth=0.3, rstride=2, cstride=2, alpha=0.5)
+
+            # 绘制边并标注编号
+            for edge_idx, edge in enumerate(edges_data):
+                ep = edge['points']
+                color = edge_colors[edge_idx % len(edge_colors)]
+                ax1.plot(ep[:, 0], ep[:, 1], ep[:, 2], color=color, linewidth=2.5)
+                # 在边中点标注编号
+                mp = edge['midpoint']
+                ax1.text(mp[0], mp[1], mp[2], f' E{edge_idx}', fontsize=9, fontweight='bold',
+                         color='white', backgroundcolor=color)
+
+            ax1.set_title(f'Face {face_idx} ({face_type}) - {n_edges} edges')
+            ax1.set_xlabel('X')
+            ax1.set_ylabel('Y')
+            ax1.set_zlabel('Z')
+            self._add_scroll_zoom(ax1, fig)
+
+            # 右图：参数域网格和 Jacobian
+            ax2 = fig.add_subplot(122)
+            U, V = np.meshgrid(u, v)
+            c = ax2.pcolormesh(U, V, jacobians, cmap='viridis', shading='auto')
+            plt.colorbar(c, ax=ax2, label='Jacobian')
+            for i in range(0, nv, 4):
+                ax2.plot(U[i, :], V[i, :], 'k-', linewidth=0.3, alpha=0.5)
+            for j in range(0, nu, 4):
+                ax2.plot(U[:, j], V[:, j], 'k-', linewidth=0.3, alpha=0.5)
+            ax2.set_title(f'参数域 (u,v) - {face_type}')
+            ax2.set_xlabel('u')
+            ax2.set_ylabel('v')
+
+            plt.tight_layout()
+            plt.show()
+
+        except Exception as e:
+            self.log(f"Single face preview error: {e}")
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Error", str(e))
+
+    def preview_step(self):
+        """预览 STEP 模型（使用参数曲面采样，非三角化）"""
+        if not self.step_file_path:
+            messagebox.showwarning("Warning", "请先选择 STEP 文件")
+            return
+
+        self.log(f"Loading STEP file for preview...")
+
+        try:
+            surfaces = load_step_file(self.step_file_path)
+            self.log(f"Loaded {len(surfaces)} valid surfaces")
+
+            if len(surfaces) == 0:
+                messagebox.showwarning("Warning", "STEP 文件中没有有效的曲面")
+                return
+
+            # 使用固定的预览参数（较粗的网格用于快速预览）
+            preview_samples = 5  # samples/lambda，预览用粗网格
+            preview_freq = 300e6  # 假设频率，只影响网格密度
+
+            # 启动后台线程
+            t = threading.Thread(
+                target=self._preview_step_thread,
+                args=(surfaces, preview_freq, preview_samples),
+                daemon=True
+            )
+            t.start()
+
+        except Exception as e:
+            self.log(f"STEP Load Error: {e}")
+            messagebox.showerror("Error", str(e))
+
+    def _preview_step_thread(self, surfaces, freq, samples):
+        """后台线程：计算 STEP 预览网格数据"""
+        try:
+            from physics.wave import IncidentWave
+            solver = RibbonIntegrator()
+            wave = IncidentWave(freq, 0, 0)
+
+            mesh_data_list = []
+            total_points = 0
+
+            for i, surf in enumerate(surfaces):
+                try:
+                    # 对每个曲面使用固定采样数（预览用）
+                    nu, nv = 30, 30  # 固定网格密度用于预览
+                    u_min, u_max = surf.u_domain
+                    v_min, v_max = surf.v_domain
+
+                    u = np.linspace(u_min, u_max, nu)
+                    v = np.linspace(v_min, v_max, nv)
+                    uu, vv = np.meshgrid(u, v)
+
+                    points, normals, jacobians = surf.get_data(uu, vv)
+                    total_points += nu * nv
+
+                    mesh_data_list.append({
+                        'points': points,
+                        'normals': normals,
+                        'jacobians': jacobians,
+                        'nu': nu,
+                        'nv': nv
+                    })
+                except Exception as e:
+                    self.root.after(0, lambda e=e, i=i: self.log(f"Surface {i} error: {e}"))
+
+            self.root.after(0, lambda: self._do_step_preview_plot(mesh_data_list, total_points))
+
+        except Exception as e:
+            self.root.after(0, lambda: self.log(f"Preview Error: {e}"))
+
+    def _add_scroll_zoom(self, ax, fig):
+        """为 3D 图添加滚轮缩放功能"""
+        def on_scroll(event):
+            if event.inaxes != ax:
+                return
+            scale = 1.15 if event.button == 'down' else 1/1.15
+            # 获取当前范围
+            xlim = ax.get_xlim()
+            ylim = ax.get_ylim()
+            zlim = ax.get_zlim()
+            # 计算中心和新范围
+            xmid, ymid, zmid = (xlim[0]+xlim[1])/2, (ylim[0]+ylim[1])/2, (zlim[0]+zlim[1])/2
+            xhalf = (xlim[1]-xlim[0])/2 * scale
+            yhalf = (ylim[1]-ylim[0])/2 * scale
+            zhalf = (zlim[1]-zlim[0])/2 * scale
+            ax.set_xlim(xmid - xhalf, xmid + xhalf)
+            ax.set_ylim(ymid - yhalf, ymid + yhalf)
+            ax.set_zlim(zmid - zhalf, zmid + zhalf)
+            fig.canvas.draw_idle()
+        fig.canvas.mpl_connect('scroll_event', on_scroll)
+
+    def _do_step_preview_plot(self, mesh_data_list, total_points):
+        """主线程：绘制 STEP 预览，带面编号标注"""
+        try:
+            fig = plt.figure(figsize=(10, 8))
+            ax = fig.add_subplot(111, projection='3d')
+
+            colors = plt.cm.tab10(np.linspace(0, 1, min(len(mesh_data_list), 10)))
+
+            for idx, data in enumerate(mesh_data_list):
+                points = data['points']
+                nu, nv = data['nu'], data['nv']
+
+                X = points[..., 0]
+                Y = points[..., 1]
+                Z = points[..., 2]
+
+                color = colors[idx % len(colors)]
+                ax.plot_wireframe(X, Y, Z, color=color, linewidth=0.5,
+                                  rstride=2, cstride=2, alpha=0.7)
+
+                # 在面中心添加编号标注
+                center_i, center_j = nv // 2, nu // 2
+                cx, cy, cz = X[center_i, center_j], Y[center_i, center_j], Z[center_i, center_j]
+                ax.text(cx, cy, cz, f' {idx}', fontsize=10, fontweight='bold',
+                        color='black', backgroundcolor=color, alpha=0.9)
+
+            # 自动设置坐标轴范围
+            all_points = np.vstack([d['points'].reshape(-1, 3) for d in mesh_data_list])
+            max_range = (all_points.max(axis=0) - all_points.min(axis=0)).max() / 2
+            mid = (all_points.max(axis=0) + all_points.min(axis=0)) / 2
+            ax.set_xlim(mid[0] - max_range, mid[0] + max_range)
+            ax.set_ylim(mid[1] - max_range, mid[1] + max_range)
+            ax.set_zlim(mid[2] - max_range, mid[2] + max_range)
+
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+            ax.set_title(f'STEP Preview ({len(mesh_data_list)} surfaces, {total_points} points)')
+
+            # 添加滚轮缩放
+            self._add_scroll_zoom(ax, fig)
+
+            self.log(f"STEP Preview: {len(mesh_data_list)} surfaces, {total_points} points")
+            plt.tight_layout()
+            plt.show()
+
+        except Exception as e:
+            self.log(f"Plot Error: {e}")
 
     def create_action_widgets(self, parent):
         ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=20)
@@ -346,8 +599,9 @@ class GeminiPOGUI:
         self.log("Generating mesh for visualization...")
         
         try:
-            # 启动线程避免界面冻结
-            threading.Thread(target=self.plot_multi_surface_mesh, args=(surfaces, freq, samples)).start()
+            # 启动守护线程避免界面冻结（关闭窗口时自动终止）
+            t = threading.Thread(target=self.plot_multi_surface_mesh, args=(surfaces, freq, samples), daemon=True)
+            t.start()
         except Exception as e:
             self.log(f"Visualization Error: {e}")
 
@@ -409,6 +663,10 @@ class GeminiPOGUI:
                               length=wavelength/8, color='#FF5555', alpha=0.6)
 
             ax.set_title(f"Mesh Visualization ({n_surfaces} surfaces)")
+
+            # 添加滚轮缩放
+            self._add_scroll_zoom(ax, fig)
+
             self.log(f"Visualization complete. Total vertices: {total_points}")
             plt.show()
 
@@ -450,16 +708,20 @@ class GeminiPOGUI:
 
         if is_2d:
             self.log(f"Starting 2D scan: {n_theta}×{n_phi} angles, {freq/1e6} MHz...")
-            threading.Thread(
+            t = threading.Thread(
                 target=self._calc_thread_2d,
-                args=(geo, freq, theta_rad, theta_deg, phi_rad, phi_deg, samples, geo_type, geo_params)
-            ).start()
+                args=(geo, freq, theta_rad, theta_deg, phi_rad, phi_deg, samples, geo_type, geo_params),
+                daemon=True
+            )
+            t.start()
         else:
             self.log(f"Starting 1D scan: {n_theta} angles, {freq/1e6} MHz...")
-            threading.Thread(
+            t = threading.Thread(
                 target=self._calc_thread,
-                args=(geo, freq, theta_rad, theta_deg, samples, geo_type, geo_params, phi_rad[0])
-            ).start()
+                args=(geo, freq, theta_rad, theta_deg, samples, geo_type, geo_params, phi_rad[0]),
+                daemon=True
+            )
+            t.start()
 
     def _get_geometry_params(self):
         """获取当前几何参数"""
