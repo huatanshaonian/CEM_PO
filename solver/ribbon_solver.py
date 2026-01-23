@@ -512,6 +512,7 @@ class RCSAnalyzer:
 
     def compute_monostatic_rcs_2d(self, geometry, frequency, theta_array, phi_array,
                                    samples_per_lambda=None,
+                                   parallel=False, n_workers=None,
                                    show_progress=True,
                                    progress_callback=None):
         """
@@ -523,6 +524,8 @@ class RCSAnalyzer:
         theta_array: theta 角度数组 (弧度)
         phi_array: phi 角度数组 (弧度)
         samples_per_lambda: 采样密度 (可选)
+        parallel: 是否启用并行计算
+        n_workers: 并行进程数
         show_progress: 是否显示进度
         progress_callback: 进度回调函数 callback(current, total, message)
 
@@ -550,6 +553,12 @@ class RCSAnalyzer:
             print(info_msg)
         if progress_callback:
             progress_callback(0, total_points, info_msg)
+
+        if parallel:
+            return self._compute_parallel_2d(
+                surfaces, frequency, theta_array, phi_array, samples_per_lambda,
+                k_mag, n_workers, show_progress, progress_callback
+            )
 
         # 初始化结果数组
         rcs_2d = np.zeros((n_theta, n_phi))
@@ -589,3 +598,78 @@ class RCSAnalyzer:
             progress_callback(total_points, total_points, done_msg)
 
         return rcs_2d
+
+    def _compute_parallel_2d(self, surfaces, frequency, theta_array, phi_array,
+                             samples_per_lambda, k_mag, n_workers,
+                             show_progress, progress_callback=None):
+        """并行计算 2D 扫描"""
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        import os
+
+        if n_workers is None:
+            n_workers = os.cpu_count() or 4
+
+        n_theta = len(theta_array)
+        n_phi = len(phi_array)
+        total_points = n_theta * n_phi
+
+        parallel_msg = f"启用2D并行计算: {n_workers} 个进程"
+        if show_progress:
+            print(f"  {parallel_msg}")
+        if progress_callback:
+            progress_callback(0, total_points, parallel_msg)
+
+        # 准备所有 (i, j) 任务参数
+        # 传递 wave_params 字典而不是 wave 对象，因为 IncidentWave 可能不容易 pickle
+        args_list = []
+        for i, theta in enumerate(theta_array):
+            for j, phi in enumerate(phi_array):
+                wave_params = {'frequency': frequency, 'phi': phi}
+                # 复用 _compute_single_angle: (theta, surfaces, wave_params, samples, k_mag)
+                args = (theta, surfaces, wave_params, samples_per_lambda, k_mag)
+                args_list.append(((i, j), args))
+
+        rcs_2d = np.zeros((n_theta, n_phi))
+
+        try:
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                # 提交任务，建立 future -> (i, j) 映射
+                future_to_idx = {
+                    executor.submit(self._compute_single_angle, args): idx_tuple
+                    for idx_tuple, args in args_list
+                }
+
+                computed = 0
+                for future in as_completed(future_to_idx):
+                    i, j = future_to_idx[future]
+                    rcs_2d[i, j] = future.result()
+                    computed += 1
+
+                    if computed % max(1, total_points // 20) == 0 or computed == total_points:
+                        progress = computed / total_points * 100
+                        msg = f"进度: {progress:.0f}% ({computed}/{total_points})"
+                        if show_progress:
+                            print(f"  {msg}")
+                        if progress_callback:
+                            progress_callback(computed, total_points, msg)
+
+            done_msg = "2D并行计算完成!"
+            if show_progress:
+                print(f"  {done_msg}")
+            if progress_callback:
+                progress_callback(total_points, total_points, done_msg)
+
+            return rcs_2d
+
+        except Exception as e:
+            err_msg = f"2D并行计算失败，回退到串行: {e}"
+            if show_progress:
+                print(f"  {err_msg}")
+            if progress_callback:
+                progress_callback(0, total_points, err_msg)
+            # 回退调用串行逻辑 (注意 parallel=False 防止无限递归)
+            return self.compute_monostatic_rcs_2d(
+                surfaces, frequency, theta_array, phi_array,
+                samples_per_lambda, parallel=False,
+                show_progress=show_progress, progress_callback=progress_callback
+            )

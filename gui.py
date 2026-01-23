@@ -406,10 +406,18 @@ class CEMPoGUI:
             
             self.log(f"Previewing with Freq={real_freq/1e6:.1f}MHz, Density={real_samples} pts/lambda")
 
+            # 获取当前设置的 Theta/Phi (取 Start 值作为预览方向)
+            try:
+                theta_deg = self.theta_start.get()
+                phi_deg = self.phi_start.get()
+            except:
+                theta_deg = 0.0
+                phi_deg = 0.0
+
             # 启动后台线程
             t = threading.Thread(
                 target=self._preview_step_thread,
-                args=(surfaces, real_freq, real_samples),
+                args=(surfaces, real_freq, real_samples, theta_deg, phi_deg),
                 daemon=True
             )
             t.start()
@@ -418,7 +426,7 @@ class CEMPoGUI:
             self.log(f"STEP Load Error: {e}")
             messagebox.showerror("Error", str(e))
 
-    def _preview_step_thread(self, surfaces, freq, samples):
+    def _preview_step_thread(self, surfaces, freq, samples, theta_deg, phi_deg):
         """后台线程：计算 STEP 预览网格数据"""
         try:
             from physics.wave import IncidentWave
@@ -457,7 +465,7 @@ class CEMPoGUI:
                 except Exception as e:
                     self.root.after(0, lambda e=e, i=i: self.log(f"Surface {i} error: {e}"))
 
-            self.root.after(0, lambda: self._do_step_preview_plot(mesh_data_list, total_points))
+            self.root.after(0, lambda: self._do_step_preview_plot(mesh_data_list, total_points, theta_deg, phi_deg))
 
         except Exception as e:
             self.root.after(0, lambda: self.log(f"Preview Error: {e}"))
@@ -538,16 +546,22 @@ class CEMPoGUI:
             fig.canvas.draw_idle()
         fig.canvas.mpl_connect('scroll_event', on_scroll)
 
-    def _do_step_preview_plot(self, mesh_data_list, total_points):
+    def _do_step_preview_plot(self, mesh_data_list, total_points, theta_deg=0.0, phi_deg=0.0):
         """主线程：在嵌入式窗口中绘制 STEP 预览"""
         try:
+            from physics.wave import IncidentWave  # Ensure import
+            
             fig, canvas, win = self._create_plot_window(f"STEP Preview ({len(mesh_data_list)} surfaces)")
             ax = fig.add_subplot(111, projection='3d')
 
             colors = plt.cm.tab10(np.linspace(0, 1, min(len(mesh_data_list), 10)))
 
+            all_points_list = [] # For bounding box
+
             for idx, data in enumerate(mesh_data_list):
                 points = data['points']
+                all_points_list.append(points.reshape(-1, 3))
+                
                 nu, nv = data['nu'], data['nv']
                 step_id = data.get('step_id', -1)
                 local_idx = data.get('local_idx', idx)
@@ -567,12 +581,53 @@ class CEMPoGUI:
                 # 在面中心添加编号标注
                 center_i, center_j = nv // 2, nu // 2
                 cx, cy, cz = X[center_i, center_j], Y[center_i, center_j], Z[center_i, center_j]
-                label = f' [{local_idx}] #{step_id}'
-                ax.text(cx, cy, cz, label, fontsize=9, fontweight='bold',
-                        color='black', backgroundcolor=color, alpha=0.9)
+                # 仅在非密集时显示部分标签
+                if len(mesh_data_list) < 50 or idx % 5 == 0:
+                     label = f' #{step_id}'
+                     ax.text(cx, cy, cz, label, fontsize=8, fontweight='bold',
+                             color='black', alpha=0.6)
+
+            # --- 绘制入射波方向箭头 ---
+            if all_points_list:
+                all_points = np.vstack(all_points_list)
+                
+                # 计算包围盒中心和尺寸
+                min_xyz = np.min(all_points, axis=0)
+                max_xyz = np.max(all_points, axis=0)
+                center = (min_xyz + max_xyz) / 2.0
+                diag = np.linalg.norm(max_xyz - min_xyz)
+                radius = diag / 2.0 if diag > 0 else 1.0
+
+                # 计算入射波向量
+                # 频率任意，我们只需要方向
+                wave = IncidentWave(1e9, np.radians(theta_deg), np.radians(phi_deg))
+                k_dir = wave.k_dir # 指向原点/传播方向
+                
+                # 箭头起点：在物体 "前方" (相对于波源)
+                # k_dir 指向传播方向。波源在 -k_dir 方向。
+                # 我们希望箭头显示波的行进。
+                # 将箭头放在物体外侧，指向物体。
+                arrow_len = radius * 0.8
+                arrow_start = center - k_dir * (radius * 1.5)
+                
+                # 绘制箭头 (红色粗箭头)
+                ax.quiver(arrow_start[0], arrow_start[1], arrow_start[2],
+                          k_dir[0] * arrow_len, k_dir[1] * arrow_len, k_dir[2] * arrow_len,
+                          color='red', linewidth=3, arrow_length_ratio=0.3)
+                
+                # 添加文本标签
+                text_pos = arrow_start - k_dir * (radius * 0.2)
+                ax.text(text_pos[0], text_pos[1], text_pos[2], 
+                        f"Incident Wave\n(Theta={theta_deg}°, Phi={phi_deg}°)", 
+                        color='red', fontweight='bold', fontsize=10, ha='center')
+
+                # 将箭头相关点加入到 limits 计算中，防止被裁剪
+                # arrow_end = arrow_start + k_dir * arrow_len
+                # all_points = np.vstack([all_points, arrow_start, arrow_end])
 
             # 自动设置坐标轴范围 (Equal Aspect Ratio)
-            all_points = np.vstack([d['points'].reshape(-1, 3) for d in mesh_data_list])
+            # 使用包含箭头的数据重新计算可能更好，或者保持仅物体居中
+            # 这里保持仅物体居中，箭头可能会延伸出视图，但用户可以缩放
             self._set_axes_equal(ax, all_points)
 
             ax.set_xlabel('X')
@@ -587,6 +642,43 @@ class CEMPoGUI:
 
     def create_action_widgets(self, parent):
         ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=20)
+
+        # === 并行计算设置 ===
+        parallel_frame = ttk.LabelFrame(parent, text="性能 Performance", padding=(10, 5))
+        parallel_frame.pack(fill=tk.X, pady=(0, 10))
+
+        import os
+        max_cpu = os.cpu_count() or 4
+        self.parallel_var = tk.BooleanVar(value=False)
+        self.workers_var = tk.IntVar(value=max_cpu)
+
+        def toggle_workers():
+            if self.parallel_var.get():
+                spin_workers.configure(state='normal')
+            else:
+                spin_workers.configure(state='disabled')
+
+        chk_parallel = ttk.Checkbutton(
+            parallel_frame,
+            text="启用并行计算 (Parallel)",
+            variable=self.parallel_var,
+            command=toggle_workers
+        )
+        chk_parallel.pack(anchor=tk.W)
+
+        workers_frame = ttk.Frame(parallel_frame)
+        workers_frame.pack(fill=tk.X, pady=(5, 0))
+        ttk.Label(workers_frame, text="CPU 核心数:").pack(side=tk.LEFT)
+        spin_workers = ttk.Spinbox(
+            workers_frame,
+            from_=1,
+            to=32,
+            textvariable=self.workers_var,
+            width=5,
+            state='disabled'
+        )
+        spin_workers.pack(side=tk.LEFT, padx=5)
+        # ==================
 
         # 解析解对比选项
         self.compare_analytical_var = tk.BooleanVar(value=True)
@@ -948,6 +1040,10 @@ class CEMPoGUI:
         freq = self.freq_var.get() * 1e6
         samples = self.density_var.get()
 
+        # 并行参数
+        is_parallel = self.parallel_var.get()
+        n_workers = self.workers_var.get()
+
         # Theta 参数
         theta_start = self.theta_start.get()
         theta_end = self.theta_end.get()
@@ -975,17 +1071,23 @@ class CEMPoGUI:
 
         if is_2d:
             self.log(f"Starting 2D scan: {n_theta}×{n_phi} angles, {freq/1e6} MHz...")
+            if is_parallel:
+                self.log(f"Parallel mode enabled: {n_workers} workers")
+            
             t = threading.Thread(
                 target=self._calc_thread_2d,
-                args=(geo, freq, theta_rad, theta_deg, phi_rad, phi_deg, samples, geo_type, geo_params),
+                args=(geo, freq, theta_rad, theta_deg, phi_rad, phi_deg, samples, geo_type, geo_params, is_parallel, n_workers),
                 daemon=True
             )
             t.start()
         else:
             self.log(f"Starting 1D scan: {n_theta} angles, {freq/1e6} MHz...")
+            if is_parallel:
+                self.log(f"Parallel mode enabled: {n_workers} workers")
+
             t = threading.Thread(
                 target=self._calc_thread,
-                args=(geo, freq, theta_rad, theta_deg, samples, geo_type, geo_params, phi_rad[0]),
+                args=(geo, freq, theta_rad, theta_deg, samples, geo_type, geo_params, phi_rad[0], is_parallel, n_workers),
                 daemon=True
             )
             t.start()
@@ -1021,7 +1123,7 @@ class CEMPoGUI:
         self.progress_label.config(text=message)
         self.log(message)
 
-    def _calc_thread(self, geo, freq, angles_rad, angles_deg, samples, geo_type, geo_params, phi_rad=0.0):
+    def _calc_thread(self, geo, freq, angles_rad, angles_deg, samples, geo_type, geo_params, phi_rad=0.0, parallel=False, n_workers=None):
         """1D扫描线程"""
         try:
             solver = RibbonIntegrator()
@@ -1033,7 +1135,8 @@ class CEMPoGUI:
                 {'frequency': freq, 'phi': phi_rad},
                 angles_rad,
                 samples_per_lambda=samples,
-                parallel=False,
+                parallel=parallel,
+                n_workers=n_workers,
                 show_progress=False,
                 progress_callback=self._update_progress
             )
@@ -1058,7 +1161,7 @@ class CEMPoGUI:
             self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
             self.root.after(0, lambda: self.progress_label.config(text="计算失败"))
 
-    def _calc_thread_2d(self, geo, freq, theta_rad, theta_deg, phi_rad, phi_deg, samples, geo_type, geo_params):
+    def _calc_thread_2d(self, geo, freq, theta_rad, theta_deg, phi_rad, phi_deg, samples, geo_type, geo_params, parallel=False, n_workers=None):
         """2D扫描线程"""
         try:
             solver = RibbonIntegrator()
@@ -1071,6 +1174,8 @@ class CEMPoGUI:
                 theta_rad,
                 phi_rad,
                 samples_per_lambda=samples,
+                parallel=parallel,
+                n_workers=n_workers,
                 show_progress=False,
                 progress_callback=self._update_progress
             )
