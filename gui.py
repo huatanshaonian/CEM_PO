@@ -28,10 +28,10 @@ from physics.analytical_rcs import get_analytical_solution, compute_error_stats
 from solver.ribbon_solver import RibbonIntegrator, RCSAnalyzer
 from tools.visualize_mesh import create_occ_cylinder
 
-class GeminiPOGUI:
+class CEMPoGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Gemini PO Solver")
+        self.root.title("CEM PO Solver")
         self.root.geometry("950x650")
         
         # --- 现代配色与样式设置 ---
@@ -239,7 +239,7 @@ class GeminiPOGUI:
             return
 
         try:
-            from solver.ribbon_solver import detect_degenerate_edge
+            from solver.ribbon_solver import detect_degenerate_edge, RibbonIntegrator
 
             surfaces = load_step_file(self.step_file_path)
             face_idx = self.step_face_idx.get()
@@ -252,40 +252,14 @@ class GeminiPOGUI:
             degen_edge = detect_degenerate_edge(surf)
 
             face_type = "四边形" if degen_edge is None else f"三角形({degen_edge}退化)" if degen_edge != 'degenerate' else "完全退化"
-            self.log(f"Preview face {face_idx}: {face_type}, u=[{surf.u_min:.2f},{surf.u_max:.2f}], v=[{surf.v_min:.2f},{surf.v_max:.2f}]")
-
-            nu, nv = 40, 40
-
-            # 根据面类型生成不同的网格
-            if degen_edge == 'u_min':
-                u_start = surf.u_min + (surf.u_max - surf.u_min) * 0.02
-                u = np.linspace(u_start, surf.u_max, nu)
-                v = np.linspace(surf.v_min, surf.v_max, nv)
-            elif degen_edge == 'u_max':
-                u_end = surf.u_max - (surf.u_max - surf.u_min) * 0.02
-                u = np.linspace(surf.u_min, u_end, nu)
-                v = np.linspace(surf.v_min, surf.v_max, nv)
-            elif degen_edge == 'v_min':
-                u = np.linspace(surf.u_min, surf.u_max, nu)
-                v_start = surf.v_min + (surf.v_max - surf.v_min) * 0.02
-                v = np.linspace(v_start, surf.v_max, nv)
-            elif degen_edge == 'v_max':
-                u = np.linspace(surf.u_min, surf.u_max, nu)
-                v_end = surf.v_max - (surf.v_max - surf.v_min) * 0.02
-                v = np.linspace(surf.v_min, v_end, nv)
-            else:
-                u = np.linspace(surf.u_min, surf.u_max, nu)
-                v = np.linspace(surf.v_min, surf.v_max, nv)
-
-            uu, vv = np.meshgrid(u, v)
-            points, normals, jacobians = surf.get_data(uu, vv)
+            step_id = getattr(surf, 'step_id', -1)
+            n_edges_attr = getattr(surf, 'n_edges', 0)
+            self.log(f"Preview face [idx={face_idx}] STEP#{step_id}: {face_type}, {n_edges_attr} edges")
+            self.log(f"  u=[{surf.u_min:.2f},{surf.u_max:.2f}], v=[{surf.v_min:.2f},{surf.v_max:.2f}]")
 
             # 获取边界边
             edges_data = surf.get_edges(n_samples=30)
             n_edges = len(edges_data)
-            self.log(f"  Face {face_idx} has {n_edges} edges")
-
-            # 边的颜色
             edge_colors = plt.cm.Set1(np.linspace(0, 1, max(n_edges, 1)))
 
             # 绘图
@@ -293,37 +267,98 @@ class GeminiPOGUI:
 
             # 左图：3D 网格 + 边
             ax1 = fig.add_subplot(121, projection='3d')
-            X, Y, Z = points[..., 0], points[..., 1], points[..., 2]
-            ax1.plot_wireframe(X, Y, Z, color='#007ACC', linewidth=0.3, rstride=2, cstride=2, alpha=0.5)
 
-            # 绘制边并标注编号
+            # 根据面类型显示不同网格
+            if degen_edge is not None and degen_edge != 'degenerate':
+                # 三角形面：使用条带状网格
+                solver = RibbonIntegrator()
+
+                mesh_cells, a, b = solver.get_triangle_mesh_cells(
+                    surf, degen_edge=degen_edge, preview_a=15, preview_b=15
+                )
+                self.log(f"  Triangle mesh: a={a} strips, b={b} subdivs, {len(mesh_cells)} cells")
+
+                if mesh_cells:
+                    # 绘制网格单元边界线
+                    for cell in mesh_cells:
+                        # cell = [(u0,v0), (u1,v1), (u2,v2), (u3,v3)]
+                        u_corners = [c[0] for c in cell] + [cell[0][0]]  # 闭合
+                        v_corners = [c[1] for c in cell] + [cell[0][1]]
+                        pts_3d = surf.evaluate(np.array(u_corners), np.array(v_corners))
+                        ax1.plot(pts_3d[:, 0], pts_3d[:, 1], pts_3d[:, 2],
+                                color='#007ACC', linewidth=0.3, alpha=0.6)
+
+                    ax1.plot([], [], [], color='#007ACC', linewidth=1, label=f'{len(mesh_cells)} cells')
+                    ax2_data = {'cells': mesh_cells, 'a': a, 'b': b, 'type': 'triangle'}
+                else:
+                    ax2_data = {'type': 'empty'}
+            else:
+                # 四边形面：使用矩形网格
+                nu, nv = 20, 20
+                u = np.linspace(surf.u_min, surf.u_max, nu)
+                v = np.linspace(surf.v_min, surf.v_max, nv)
+                uu, vv = np.meshgrid(u, v)
+                points, normals, jacobians = surf.get_data(uu, vv)
+
+                X, Y, Z = points[..., 0], points[..., 1], points[..., 2]
+                ax1.plot_wireframe(X, Y, Z, color='#007ACC', linewidth=0.3, rstride=2, cstride=2, alpha=0.5)
+
+                ax2_data = {'U': uu, 'V': vv, 'jac': jacobians, 'type': 'quad'}
+
+            # 绘制边并标注局部索引
             for edge_idx, edge in enumerate(edges_data):
                 ep = edge['points']
                 color = edge_colors[edge_idx % len(edge_colors)]
                 ax1.plot(ep[:, 0], ep[:, 1], ep[:, 2], color=color, linewidth=2.5)
-                # 在边中点标注编号
                 mp = edge['midpoint']
                 ax1.text(mp[0], mp[1], mp[2], f' E{edge_idx}', fontsize=9, fontweight='bold',
                          color='white', backgroundcolor=color)
 
-            ax1.set_title(f'Face {face_idx} ({face_type}) - {n_edges} edges')
+            ax1.set_title(f'Face [idx={face_idx}] STEP#{step_id} ({face_type}) - {n_edges} edges')
             ax1.set_xlabel('X')
             ax1.set_ylabel('Y')
             ax1.set_zlabel('Z')
+            ax1.legend(loc='upper left')
+
+            # 设置坐标轴比例一致
+            all_pts_list = []
+            if 'U' in ax2_data: # Quad mesh points
+                all_pts_list.append(points.reshape(-1, 3))
+            
+            # Add edge points
+            for edge in edges_data:
+                all_pts_list.append(edge['points'])
+            
+            if all_pts_list:
+                all_pts = np.vstack(all_pts_list)
+                self._set_axes_equal(ax1, all_pts)
+
             self._add_scroll_zoom(ax1, fig)
 
-            # 右图：参数域网格和 Jacobian
+            # 右图：参数域
             ax2 = fig.add_subplot(122)
-            U, V = np.meshgrid(u, v)
-            c = ax2.pcolormesh(U, V, jacobians, cmap='viridis', shading='auto')
-            plt.colorbar(c, ax=ax2, label='Jacobian')
-            for i in range(0, nv, 4):
-                ax2.plot(U[i, :], V[i, :], 'k-', linewidth=0.3, alpha=0.5)
-            for j in range(0, nu, 4):
-                ax2.plot(U[:, j], V[:, j], 'k-', linewidth=0.3, alpha=0.5)
-            ax2.set_title(f'参数域 (u,v) - {face_type}')
+
+            if ax2_data['type'] == 'triangle':
+                # 三角形网格单元在参数域
+                for cell in ax2_data['cells']:
+                    u_corners = [c[0] for c in cell] + [cell[0][0]]
+                    v_corners = [c[1] for c in cell] + [cell[0][1]]
+                    ax2.plot(u_corners, v_corners, color='#007ACC', linewidth=0.5, alpha=0.7)
+                ax2.set_xlim(surf.u_min, surf.u_max)
+                ax2.set_ylim(surf.v_min, surf.v_max)
+                ax2.set_title(f'参数域 - 条带网格 (a={ax2_data["a"]}, b={ax2_data["b"]})')
+            elif ax2_data['type'] == 'quad':
+                c = ax2.pcolormesh(ax2_data['U'], ax2_data['V'], ax2_data['jac'],
+                                   cmap='viridis', shading='auto')
+                plt.colorbar(c, ax=ax2, label='Jacobian')
+                ax2.set_title(f'参数域 (u,v) - {face_type}')
+            else:
+                ax2.text(0.5, 0.5, 'No mesh data', ha='center', va='center', transform=ax2.transAxes)
+                ax2.set_title('参数域')
+
             ax2.set_xlabel('u')
             ax2.set_ylabel('v')
+            ax2.set_aspect('equal')
 
             plt.tight_layout()
             plt.show()
@@ -390,12 +425,17 @@ class GeminiPOGUI:
                     points, normals, jacobians = surf.get_data(uu, vv)
                     total_points += nu * nv
 
+                    # 获取 STEP ID
+                    step_id = getattr(surf, 'step_id', -1)
+
                     mesh_data_list.append({
                         'points': points,
                         'normals': normals,
                         'jacobians': jacobians,
                         'nu': nu,
-                        'nv': nv
+                        'nv': nv,
+                        'step_id': step_id,
+                        'local_idx': i
                     })
                 except Exception as e:
                     self.root.after(0, lambda e=e, i=i: self.log(f"Surface {i} error: {e}"))
@@ -404,6 +444,30 @@ class GeminiPOGUI:
 
         except Exception as e:
             self.root.after(0, lambda: self.log(f"Preview Error: {e}"))
+
+    def _set_axes_equal(self, ax, points):
+        """设置 3D 坐标轴为等比例显示"""
+        if points.ndim > 2:
+            points = points.reshape(-1, 3)
+            
+        x_limits = [points[:, 0].min(), points[:, 0].max()]
+        y_limits = [points[:, 1].min(), points[:, 1].max()]
+        z_limits = [points[:, 2].min(), points[:, 2].max()]
+
+        x_range = abs(x_limits[1] - x_limits[0])
+        x_middle = np.mean(x_limits)
+        y_range = abs(y_limits[1] - y_limits[0])
+        y_middle = np.mean(y_limits)
+        z_range = abs(z_limits[1] - z_limits[0])
+        z_middle = np.mean(z_limits)
+
+        plot_radius = 0.5 * max([x_range, y_range, z_range])
+        if plot_radius == 0: plot_radius = 1.0
+
+        ax.set_xlim3d([x_middle - plot_radius, x_middle + plot_radius])
+        ax.set_ylim3d([y_middle - plot_radius, y_middle + plot_radius])
+        ax.set_zlim3d([z_middle - plot_radius, z_middle + plot_radius])
+        ax.set_box_aspect((1, 1, 1))
 
     def _add_scroll_zoom(self, ax, fig):
         """为 3D 图添加滚轮缩放功能"""
@@ -437,6 +501,8 @@ class GeminiPOGUI:
             for idx, data in enumerate(mesh_data_list):
                 points = data['points']
                 nu, nv = data['nu'], data['nv']
+                step_id = data.get('step_id', -1)
+                local_idx = data.get('local_idx', idx)
 
                 X = points[..., 0]
                 Y = points[..., 1]
@@ -446,19 +512,16 @@ class GeminiPOGUI:
                 ax.plot_wireframe(X, Y, Z, color=color, linewidth=0.5,
                                   rstride=2, cstride=2, alpha=0.7)
 
-                # 在面中心添加编号标注
+                # 在面中心添加编号标注：显示 [局部索引] #STEP_ID
                 center_i, center_j = nv // 2, nu // 2
                 cx, cy, cz = X[center_i, center_j], Y[center_i, center_j], Z[center_i, center_j]
-                ax.text(cx, cy, cz, f' {idx}', fontsize=10, fontweight='bold',
+                label = f' [{local_idx}] #{step_id}'
+                ax.text(cx, cy, cz, label, fontsize=9, fontweight='bold',
                         color='black', backgroundcolor=color, alpha=0.9)
 
-            # 自动设置坐标轴范围
+            # 自动设置坐标轴范围 (Equal Aspect Ratio)
             all_points = np.vstack([d['points'].reshape(-1, 3) for d in mesh_data_list])
-            max_range = (all_points.max(axis=0) - all_points.min(axis=0)).max() / 2
-            mid = (all_points.max(axis=0) + all_points.min(axis=0)) / 2
-            ax.set_xlim(mid[0] - max_range, mid[0] + max_range)
-            ax.set_ylim(mid[1] - max_range, mid[1] + max_range)
-            ax.set_zlim(mid[2] - max_range, mid[2] + max_range)
+            self._set_axes_equal(ax, all_points)
 
             ax.set_xlabel('X')
             ax.set_ylabel('Y')
@@ -534,7 +597,7 @@ class GeminiPOGUI:
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         
-        self.log("Gemini PO Solver GUI Ready.")
+        self.log("CEM PO Solver GUI Ready.")
         self.log("Based on PythonOCC and Ribbon Method.")
 
     def log(self, msg):
@@ -663,6 +726,10 @@ class GeminiPOGUI:
                               length=wavelength/8, color='#FF5555', alpha=0.6)
 
             ax.set_title(f"Mesh Visualization ({n_surfaces} surfaces)")
+
+            # 设置坐标轴比例一致
+            all_points = np.vstack([d['points'].reshape(-1, 3) for d in mesh_data_list])
+            self._set_axes_equal(ax, all_points)
 
             # 添加滚轮缩放
             self._add_scroll_zoom(ax, fig)
@@ -955,5 +1022,5 @@ class GeminiPOGUI:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = GeminiPOGUI(root)
+    app = CEMPoGUI(root)
     root.mainloop()
