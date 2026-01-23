@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import sys
 import os
+import json
 import numpy as np
 import threading
 import matplotlib
@@ -27,12 +28,17 @@ from physics.wave import IncidentWave
 from physics.analytical_rcs import get_analytical_solution, compute_error_stats
 from solver.ribbon_solver import RibbonIntegrator, RCSAnalyzer
 from tools.visualize_mesh import create_occ_cylinder
+from ui.plotting import VisualizationManager
+
+CONFIG_FILE = "cem_po_config.json"
 
 class CEMPoGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("CEM PO Solver")
-        self.root.geometry("950x650")
+        self.root.geometry("1900x1100")
+        self.root.minsize(1600, 1000)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
         # --- 现代配色与样式设置 ---
         # 定义颜色变量
@@ -47,6 +53,12 @@ class CEMPoGUI:
 
         # 设置根窗口背景
         self.root.configure(bg=self.colors["bg_main"])
+
+        # 初始化可视化管理器 (在创建 Log 组件后会注入 log 回调，这里先暂存)
+        # 注意：为了让 self.log 可用，我们得稍微调整顺序，或者在 create_log_widgets 后再初始化 VizManager
+        # 这里先占位，等 create_log_widgets 执行完后再实例化
+        self.viz_manager = None
+        self.last_result = None  # 用于存储最后一次计算结果
 
         # 配置 TTK 样式
         style = ttk.Style()
@@ -119,6 +131,10 @@ class CEMPoGUI:
         right_panel = ttk.Frame(main_frame, style="TFrame")
         right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
         
+        # 初始化持久化变量
+        self.step_unit_var = tk.StringVar(value="mm")
+        self.invert_indices_var = tk.StringVar(value="0,1,3,5")
+
         self.create_config_widgets(left_panel)
         self.create_geometry_widgets(left_panel)
         self.create_action_widgets(left_panel)
@@ -127,6 +143,9 @@ class CEMPoGUI:
         # 状态变量
         self.current_geometry = None
         self.step_file_path = None
+
+        # 加载配置
+        self.load_config()
 
     def create_config_widgets(self, parent):
         # 频率
@@ -173,7 +192,7 @@ class CEMPoGUI:
 
     def create_geometry_widgets(self, parent):
         ttk.Label(parent, text="几何类型 Geometry Type:").pack(anchor=tk.W, pady=(0, 5))
-        self.geo_type_var = tk.StringVar(value="Analytic Cylinder")
+        self.geo_type_var = tk.StringVar(value="STEP File")
         types = ["Analytic Cylinder", "Analytic Plate", "Analytic Sphere", "OCC Cylinder (NURBS)", "STEP File"]
         combo = ttk.Combobox(parent, textvariable=self.geo_type_var, values=types, state="readonly")
         combo.pack(fill=tk.X, pady=(0, 10))
@@ -223,6 +242,14 @@ class CEMPoGUI:
             self.step_face_idx = tk.IntVar(value=0)
             ttk.Entry(face_frame, textvariable=self.step_face_idx, width=5).pack(side=tk.LEFT, padx=5)
             ttk.Button(face_frame, text="👁 预览单面", command=self.preview_step_single).pack(side=tk.LEFT)
+            
+            # 法线翻转设置
+            invert_frame = ttk.Frame(self.geo_params_frame, style="Card.TFrame")
+            invert_frame.pack(fill=tk.X, pady=(5, 0))
+            ttk.Label(invert_frame, text="翻转法线索引:").pack(side=tk.LEFT)
+            self.invert_indices_var = tk.StringVar(value="0,1,3,5") # 预设用户要求的值
+            ttk.Entry(invert_frame, textvariable=self.invert_indices_var, width=15).pack(side=tk.LEFT, padx=5)
+            ttk.Label(invert_frame, text="(逗号分隔)", foreground="#888888", font=("", 8)).pack(side=tk.LEFT)
 
     def add_param_input(self, label, var_name, default):
         frame = ttk.Frame(self.geo_params_frame, style="Card.TFrame")
@@ -240,7 +267,7 @@ class CEMPoGUI:
             self.log(f"Selected STEP file: {filename}")
 
     def preview_step_single(self):
-        """预览 STEP 模型的单个面，显示网格、边和编号"""
+        """预览 STEP 模型的单个面，显示网格、边和编号（嵌入式）"""
         if not self.step_file_path:
             messagebox.showwarning("Warning", "请先选择 STEP 文件")
             return
@@ -258,121 +285,16 @@ class CEMPoGUI:
             surf = surfaces[face_idx]
             degen_edge = detect_degenerate_edge(surf)
 
-            face_type = "四边形" if degen_edge is None else f"三角形({degen_edge}退化)" if degen_edge != 'degenerate' else "完全退化"
-            step_id = getattr(surf, 'step_id', -1)
-            n_edges_attr = getattr(surf, 'n_edges', 0)
-            self.log(f"Preview face [idx={face_idx}] STEP#{step_id}: {face_type}, {n_edges_attr} edges")
-            self.log(f"  u=[{surf.u_min:.2f},{surf.u_max:.2f}], v=[{surf.v_min:.2f},{surf.v_max:.2f}]")
-
             # 获取边界边
             edges_data = surf.get_edges(n_samples=30)
-            n_edges = len(edges_data)
-            edge_colors = plt.cm.Set1(np.linspace(0, 1, max(n_edges, 1)))
 
-            # 绘图
-            fig = plt.figure(figsize=(14, 5))
+            # 创建 solver 用于三角形面的网格生成
+            solver = RibbonIntegrator()
 
-            # 左图：3D 网格 + 边
-            ax1 = fig.add_subplot(121, projection='3d')
-
-            # 根据面类型显示不同网格
-            if degen_edge is not None and degen_edge != 'degenerate':
-                # 三角形面：使用条带状网格
-                solver = RibbonIntegrator()
-
-                mesh_cells, a, b = solver.get_triangle_mesh_cells(
-                    surf, degen_edge=degen_edge, preview_a=15, preview_b=15
-                )
-                self.log(f"  Triangle mesh: a={a} strips, b={b} subdivs, {len(mesh_cells)} cells")
-
-                if mesh_cells:
-                    # 绘制网格单元边界线
-                    for cell in mesh_cells:
-                        # cell = [(u0,v0), (u1,v1), (u2,v2), (u3,v3)]
-                        u_corners = [c[0] for c in cell] + [cell[0][0]]  # 闭合
-                        v_corners = [c[1] for c in cell] + [cell[0][1]]
-                        pts_3d = surf.evaluate(np.array(u_corners), np.array(v_corners))
-                        ax1.plot(pts_3d[:, 0], pts_3d[:, 1], pts_3d[:, 2],
-                                color='#007ACC', linewidth=0.3, alpha=0.6)
-
-                    ax1.plot([], [], [], color='#007ACC', linewidth=1, label=f'{len(mesh_cells)} cells')
-                    ax2_data = {'cells': mesh_cells, 'a': a, 'b': b, 'type': 'triangle'}
-                else:
-                    ax2_data = {'type': 'empty'}
-            else:
-                # 四边形面：使用矩形网格
-                nu, nv = 20, 20
-                u = np.linspace(surf.u_min, surf.u_max, nu)
-                v = np.linspace(surf.v_min, surf.v_max, nv)
-                uu, vv = np.meshgrid(u, v)
-                points, normals, jacobians = surf.get_data(uu, vv)
-
-                X, Y, Z = points[..., 0], points[..., 1], points[..., 2]
-                ax1.plot_wireframe(X, Y, Z, color='#007ACC', linewidth=0.3, rstride=2, cstride=2, alpha=0.5)
-
-                ax2_data = {'U': uu, 'V': vv, 'jac': jacobians, 'type': 'quad'}
-
-            # 绘制边并标注局部索引
-            for edge_idx, edge in enumerate(edges_data):
-                ep = edge['points']
-                color = edge_colors[edge_idx % len(edge_colors)]
-                ax1.plot(ep[:, 0], ep[:, 1], ep[:, 2], color=color, linewidth=2.5)
-                mp = edge['midpoint']
-                ax1.text(mp[0], mp[1], mp[2], f' E{edge_idx}', fontsize=9, fontweight='bold',
-                         color='white', backgroundcolor=color)
-
-            ax1.set_title(f'Face [idx={face_idx}] STEP#{step_id} ({face_type}) - {n_edges} edges')
-            ax1.set_xlabel('X')
-            ax1.set_ylabel('Y')
-            ax1.set_zlabel('Z')
-            
-            # 仅在有标签时显示图例
-            handles, labels = ax1.get_legend_handles_labels()
-            if labels:
-                ax1.legend(loc='upper left')
-
-            # 设置坐标轴比例一致
-            all_pts_list = []
-            if 'U' in ax2_data: # Quad mesh points
-                all_pts_list.append(points.reshape(-1, 3))
-            
-            # Add edge points
-            for edge in edges_data:
-                all_pts_list.append(edge['points'])
-            
-            if all_pts_list:
-                all_pts = np.vstack(all_pts_list)
-                self._set_axes_equal(ax1, all_pts)
-
-            self._add_scroll_zoom(ax1, fig)
-
-            # 右图：参数域
-            ax2 = fig.add_subplot(122)
-
-            if ax2_data['type'] == 'triangle':
-                # 三角形网格单元在参数域
-                for cell in ax2_data['cells']:
-                    u_corners = [c[0] for c in cell] + [cell[0][0]]
-                    v_corners = [c[1] for c in cell] + [cell[0][1]]
-                    ax2.plot(u_corners, v_corners, color='#007ACC', linewidth=0.5, alpha=0.7)
-                ax2.set_xlim(surf.u_min, surf.u_max)
-                ax2.set_ylim(surf.v_min, surf.v_max)
-                ax2.set_title(f'参数域 - 条带网格 (a={ax2_data["a"]}, b={ax2_data["b"]})')
-            elif ax2_data['type'] == 'quad':
-                c = ax2.pcolormesh(ax2_data['U'], ax2_data['V'], ax2_data['jac'],
-                                   cmap='viridis', shading='auto')
-                plt.colorbar(c, ax=ax2, label='Jacobian')
-                ax2.set_title(f'参数域 (u,v) - {face_type}')
-            else:
-                ax2.text(0.5, 0.5, 'No mesh data', ha='center', va='center', transform=ax2.transAxes)
-                ax2.set_title('参数域')
-
-            ax2.set_xlabel('u')
-            ax2.set_ylabel('v')
-            ax2.set_aspect('equal')
-
-            plt.tight_layout()
-            plt.show()
+            # 使用嵌入式可视化
+            self.viz_manager.show_single_face_preview(
+                surf, face_idx, degen_edge, edges_data, solver
+            )
 
         except Exception as e:
             self.log(f"Single face preview error: {e}")
@@ -389,7 +311,16 @@ class CEMPoGUI:
         self.log(f"Loading STEP file for preview...")
 
         try:
-            surfaces = load_step_file(self.step_file_path)
+            # 解析翻转索引
+            invert_indices = []
+            try:
+                idx_str = self.invert_indices_var.get()
+                if idx_str.strip():
+                    invert_indices = [int(x.strip()) for x in idx_str.split(',') if x.strip()]
+            except:
+                pass
+
+            surfaces = load_step_file(self.step_file_path, invert_indices=invert_indices)
             self.log(f"Loaded {len(surfaces)} valid surfaces")
 
             if len(surfaces) == 0:
@@ -473,231 +404,10 @@ class CEMPoGUI:
                 except Exception as e:
                     self.root.after(0, lambda e=e, i=i: self.log(f"Surface {i} error: {e}"))
 
-            self.root.after(0, lambda: self._do_step_preview_plot(mesh_data_list, total_points, scan_params))
+            self.root.after(0, lambda: self.viz_manager.show_step_preview(mesh_data_list, total_points, scan_params))
 
         except Exception as e:
             self.root.after(0, lambda: self.log(f"Preview Error: {e}"))
-
-    def _set_axes_equal(self, ax, points):
-        """设置 3D 坐标轴为等比例显示"""
-        if points.ndim > 2:
-            points = points.reshape(-1, 3)
-            
-        x_limits = [points[:, 0].min(), points[:, 0].max()]
-        y_limits = [points[:, 1].min(), points[:, 1].max()]
-        z_limits = [points[:, 2].min(), points[:, 2].max()]
-
-        x_range = abs(x_limits[1] - x_limits[0])
-        x_middle = np.mean(x_limits)
-        y_range = abs(y_limits[1] - y_limits[0])
-        y_middle = np.mean(y_limits)
-        z_range = abs(z_limits[1] - z_limits[0])
-        z_middle = np.mean(z_limits)
-
-        plot_radius = 0.5 * max([x_range, y_range, z_range])
-        if plot_radius == 0: plot_radius = 1.0
-
-        ax.set_xlim3d([x_middle - plot_radius, x_middle + plot_radius])
-        ax.set_ylim3d([y_middle - plot_radius, y_middle + plot_radius])
-        ax.set_zlim3d([z_middle - plot_radius, z_middle + plot_radius])
-        ax.set_box_aspect((1, 1, 1))
-
-    def _create_plot_window(self, title):
-        """创建一个嵌入 Matplotlib 的 Toplevel 窗口，避免 plt.show() 的冲突"""
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-        
-        new_win = tk.Toplevel(self.root)
-        new_win.title(title)
-        new_win.geometry("1000x800")
-        
-        fig = plt.Figure(figsize=(10, 8), dpi=100)
-        canvas = FigureCanvasTkAgg(fig, master=new_win)
-        
-        def on_scroll(event):
-            ax = event.inaxes
-            if ax is None: return
-            scale = 1.15 if event.button == 'down' else 1/1.15
-            xlim, ylim, zlim = ax.get_xlim(), ax.get_ylim(), ax.get_zlim()
-            xmid, ymid, zmid = (xlim[0]+xlim[1])/2, (ylim[0]+ylim[1])/2, (zlim[0]+zlim[1])/2
-            xh, yh, zh = (xlim[1]-xlim[0])/2 * scale, (ylim[1]-ylim[0])/2 * scale, (zlim[1]-zlim[0])/2 * scale
-            ax.set_xlim(xmid-xh, xmid+xh)
-            ax.set_ylim(ymid-yh, ymid+yh)
-            ax.set_zlim(zmid-zh, zmid+zh)
-            canvas.draw_idle()
-        
-        canvas.mpl_connect('scroll_event', on_scroll)
-        
-        toolbar = NavigationToolbar2Tk(canvas, new_win)
-        toolbar.update()
-        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
-        
-        return fig, canvas, new_win
-
-    def _add_scroll_zoom(self, ax, fig):
-        """为 3D 图添加滚轮缩放功能"""
-        def on_scroll(event):
-            if event.inaxes != ax:
-                return
-            scale = 1.15 if event.button == 'down' else 1/1.15
-            # 获取当前范围
-            xlim = ax.get_xlim()
-            ylim = ax.get_ylim()
-            zlim = ax.get_zlim()
-            # 计算中心和新范围
-            xmid, ymid, zmid = (xlim[0]+xlim[1])/2, (ylim[0]+ylim[1])/2, (zlim[0]+zlim[1])/2
-            xhalf = (xlim[1]-xlim[0])/2 * scale
-            yhalf = (ylim[1]-ylim[0])/2 * scale
-            zhalf = (zlim[1]-zlim[0])/2 * scale
-            ax.set_xlim(xmid - xhalf, xmid + xhalf)
-            ax.set_ylim(ymid - yhalf, ymid + yhalf)
-            ax.set_zlim(zmid - zhalf, zmid + zhalf)
-            fig.canvas.draw_idle()
-        fig.canvas.mpl_connect('scroll_event', on_scroll)
-
-    def _do_step_preview_plot(self, mesh_data_list, total_points, scan_params=None):
-        """主线程：在嵌入式窗口中绘制 STEP 预览"""
-        try:
-            from physics.wave import IncidentWave  # Ensure import
-            if scan_params is None:
-                scan_params = {}
-
-            fig, canvas, win = self._create_plot_window(f"STEP Preview ({len(mesh_data_list)} surfaces)")
-            ax = fig.add_subplot(111, projection='3d')
-
-            colors = plt.cm.tab10(np.linspace(0, 1, min(len(mesh_data_list), 10)))
-
-            all_points_list = [] # For bounding box
-
-            for idx, data in enumerate(mesh_data_list):
-                points = data['points']
-                all_points_list.append(points.reshape(-1, 3))
-                
-                nu, nv = data['nu'], data['nv']
-                step_id = data.get('step_id', -1)
-                local_idx = data.get('local_idx', idx)
-
-                X = points[..., 0]
-                Y = points[..., 1]
-                Z = points[..., 2]
-
-                # 同样应用动态步长
-                stride_u = max(1, nu // 30)
-                stride_v = max(1, nv // 30)
-
-                color = colors[idx % len(colors)]
-                ax.plot_wireframe(X, Y, Z, color=color, linewidth=0.5,
-                                  rstride=stride_v, cstride=stride_u, alpha=0.7)
-
-                # 在面中心添加编号标注
-                center_i, center_j = nv // 2, nu // 2
-                cx, cy, cz = X[center_i, center_j], Y[center_i, center_j], Z[center_i, center_j]
-                # 仅在非密集时显示部分标签
-                if len(mesh_data_list) < 50 or idx % 5 == 0:
-                     label = f' #{step_id}'
-                     ax.text(cx, cy, cz, label, fontsize=8, fontweight='bold',
-                             color='black', alpha=0.6)
-
-            # --- 绘制所有扫描方向箭头 ---
-            if all_points_list and scan_params:
-                all_points = np.vstack(all_points_list)
-                
-                # 计算包围盒
-                min_xyz = np.min(all_points, axis=0)
-                max_xyz = np.max(all_points, axis=0)
-                center = (min_xyz + max_xyz) / 2.0
-                diag = np.linalg.norm(max_xyz - min_xyz)
-                radius = diag / 2.0 if diag > 0 else 1.0
-
-                # 生成扫描角度
-                theta_s = scan_params.get('theta_start', 0)
-                theta_e = scan_params.get('theta_end', 0)
-                theta_n = scan_params.get('theta_n', 1)
-                
-                phi_s = scan_params.get('phi_start', 0)
-                phi_e = scan_params.get('phi_end', 0)
-                phi_n = scan_params.get('phi_n', 1)
-                
-                thetas = np.linspace(theta_s, theta_e, theta_n)
-                phis = np.linspace(phi_s, phi_e, max(1, phi_n))
-                
-                scan_directions = []
-                
-                if phi_n > 1: # 2D 扫描: Meshgrid
-                    T, P = np.meshgrid(thetas, phis)
-                    scan_directions = list(zip(T.flatten(), P.flatten()))
-                    scan_mode = "2D Scan"
-                else: # 1D 扫描: 遍历 Theta, Phi 固定
-                    # 注意：如果 phi_n=1, phis 只有一个值
-                    for t in thetas:
-                        for p in phis:
-                            scan_directions.append((t, p))
-                    scan_mode = "1D Scan"
-
-                # 限制最大显示数量，避免卡顿
-                max_arrows = 500
-                total_dirs = len(scan_directions)
-                step = 1
-                if total_dirs > max_arrows:
-                    step = total_dirs // max_arrows + 1
-                    self.log(f"Showing {total_dirs} directions (subsampled by {step})")
-                
-                # 准备 quiver 数据
-                Xq, Yq, Zq, Uq, Vq, Wq = [], [], [], [], [], []
-                
-                arrow_len = radius * 0.15  # 保持精致的小尺寸
-                dist_from_center = radius * 2.5 # 移到更远的位置，不干扰模型观察
-                
-                for i in range(0, total_dirs, step):
-                    t_deg, p_deg = scan_directions[i]
-                    wave = IncidentWave(1e9, np.radians(t_deg), np.radians(p_deg))
-                    k = wave.k_dir # 传播方向
-                    
-                    # 箭头起点
-                    start = center - k * dist_from_center
-                    
-                    Xq.append(start[0])
-                    Yq.append(start[1])
-                    Zq.append(start[2])
-                    Uq.append(k[0] * arrow_len)
-                    Vq.append(k[1] * arrow_len)
-                    Wq.append(k[2] * arrow_len)
-
-                # 批量绘制箭头 (更细、更短、比例更协调)
-                ax.quiver(Xq, Yq, Zq, Uq, Vq, Wq, color='#FF8C00', linewidth=0.6, 
-                          arrow_length_ratio=0.3, alpha=0.8)
-                
-                # 添加总体标签
-                ax.text2D(0.05, 0.95, f"{scan_mode}\nDirs: {total_dirs}\nRange: T[{theta_s:.0f}:{theta_e:.0f}], P[{phi_s:.0f}:{phi_e:.0f}]", 
-                          transform=ax.transAxes, color='#FF8C00', fontsize=10, fontweight='bold',
-                          bbox=dict(facecolor='white', alpha=0.8, edgecolor='none', pad=3))
-
-            # 自动设置坐标轴范围 (Equal Aspect Ratio)
-            self._set_axes_equal(ax, all_points)
-
-            ax.set_xlabel('X')
-            ax.set_ylabel('Y')
-            ax.set_zlabel('Z')
-            
-            canvas.draw()
-            self.log(f"STEP Preview: {len(mesh_data_list)} surfaces, {total_points} points")
-
-        except Exception as e:
-            self.log(f"Plot Error: {e}")
-
-            # 自动设置坐标轴范围 (Equal Aspect Ratio)
-            # 使用包含箭头的数据重新计算可能更好，或者保持仅物体居中
-            # 这里保持仅物体居中，箭头可能会延伸出视图，但用户可以缩放
-            self._set_axes_equal(ax, all_points)
-
-            ax.set_xlabel('X')
-            ax.set_ylabel('Y')
-            ax.set_zlabel('Z')
-            
-            canvas.draw()
-            self.log(f"STEP Preview: {len(mesh_data_list)} surfaces, {total_points} points")
-
-        except Exception as e:
-            self.log(f"Plot Error: {e}")
 
     def create_action_widgets(self, parent):
         ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=20)
@@ -754,8 +464,15 @@ class CEMPoGUI:
         btn_mesh = ttk.Button(parent, text="🧊 可视化网格 (Visualize Mesh)", command=self.visualize_mesh)
         btn_mesh.pack(fill=tk.X, pady=(0, 8))
 
-        btn_calc = ttk.Button(parent, text="🚀 计算 RCS (Calculate)", command=self.run_calculation)
-        btn_calc.pack(fill=tk.X, pady=(0, 8))
+        # 按钮容器 (用于并排显示计算和导出)
+        action_frame = ttk.Frame(parent)
+        action_frame.pack(fill=tk.X, pady=(0, 10))
+
+        btn_calc = ttk.Button(action_frame, text="🚀 计算 RCS (Calculate)", command=self.run_calculation)
+        btn_calc.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+
+        btn_export = ttk.Button(action_frame, text="💾 导出 (Export)", command=self.export_to_csv)
+        btn_export.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
         # 进度条
         ttk.Label(parent, text="计算进度:").pack(anchor=tk.W, pady=(10, 2))
@@ -772,16 +489,23 @@ class CEMPoGUI:
         self.progress_label.pack(anchor=tk.W)
 
     def create_log_widgets(self, parent):
-        # 头部标签
-        ttk.Label(parent, text="系统日志 System Log:", style="Main.TLabel", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
-        
-        # 带有边框的容器
-        log_frame = ttk.Frame(parent)
+        # 使用 PanedWindow 实现可调节的左右分割
+        paned = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True)
+
+        # === 左侧：系统日志（左侧配置面板的1.5倍宽度）===
+        log_container = ttk.Frame(paned, width=420)
+        paned.add(log_container, weight=0)  # weight=0 使其不随窗口扩展
+
+        ttk.Label(log_container, text="系统日志 System Log:", style="Main.TLabel",
+                  font=("Microsoft YaHei UI", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+
+        log_frame = ttk.Frame(log_container)
         log_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # 日志文本框 (自定义背景色，使用支持中文的字体)
+
         self.log_text = tk.Text(log_frame,
             height=20,
+            width=50,
             state='disabled',
             bg="#FFFFFF",
             fg="#444444",
@@ -794,12 +518,48 @@ class CEMPoGUI:
         )
         scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scroll.set)
-        
+
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        
+
+        # === 右侧：Tab 式可视化区域（主要版面）===
+        plot_container = ttk.Frame(paned)
+        paned.add(plot_container, weight=1)
+
+        # 创建 Notebook (Tab 控件)
+        self.viz_notebook = ttk.Notebook(plot_container)
+        self.viz_notebook.pack(fill=tk.BOTH, expand=True)
+
+        # Tab 1: 几何预览
+        self.preview_tab = ttk.Frame(self.viz_notebook)
+        self.viz_notebook.add(self.preview_tab, text="  几何预览 Preview  ")
+
+        # Tab 2: RCS 结果
+        self.rcs_tab = ttk.Frame(self.viz_notebook)
+        self.viz_notebook.add(self.rcs_tab, text="  RCS 结果 Results  ")
+
+        # 预览 Tab 的占位标签
+        self.preview_placeholder = ttk.Label(self.preview_tab,
+            text="点击 '预览全部' 或 '可视化网格' 查看几何图形",
+            foreground="#888888", font=("Microsoft YaHei UI", 10))
+        self.preview_placeholder.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+
+        # RCS Tab 的占位标签
+        self.rcs_placeholder = ttk.Label(self.rcs_tab,
+            text="计算完成后将在此显示 RCS 结果",
+            foreground="#888888", font=("Microsoft YaHei UI", 10))
+        self.rcs_placeholder.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+
         self.log("CEM PO Solver GUI Ready.")
         self.log("Based on PythonOCC and Ribbon Method.")
+
+        # 初始化可视化管理器，传入两个 Tab 框架
+        self.viz_manager = VisualizationManager(
+            self.root, self.log, self.colors,
+            preview_frame=self.preview_tab,
+            rcs_frame=self.rcs_tab,
+            notebook=self.viz_notebook
+        )
 
     def log(self, msg):
         self.log_text.config(state='normal')
@@ -839,8 +599,18 @@ class CEMPoGUI:
                 # 获取单位缩放系数
                 unit = getattr(self, 'step_unit_var', None)
                 scale = 0.001 if (unit and unit.get() == "mm") else 1.0
-                self.log(f"Loading STEP file: {self.step_file_path} (unit: {unit.get() if unit else 'm'}, scale: {scale})...")
-                surfaces = load_step_file(self.step_file_path, scale=scale)
+                
+                # 解析翻转索引
+                invert_indices = []
+                try:
+                    idx_str = self.invert_indices_var.get()
+                    if idx_str.strip():
+                        invert_indices = [int(x.strip()) for x in idx_str.split(',') if x.strip()]
+                except:
+                    pass
+                
+                self.log(f"Loading STEP file: {self.step_file_path} (scale: {scale}, invert: {invert_indices})...")
+                surfaces = load_step_file(self.step_file_path, scale=scale, invert_indices=invert_indices)
                 self.log(f"Loaded {len(surfaces)} surfaces.")
                 return surfaces
                 
@@ -928,23 +698,18 @@ class CEMPoGUI:
             err_msg = str(e)
             self.root.after(0, lambda msg=err_msg: self.log(f"Mesh Stats Error: {msg}"))
 
-    def _show_mesh_stats(self, n_surfaces, total_cells, total_vertices, wavelength, face_stats):
-        """显示网格统计信息"""
+    def _show_mesh_stats(self, n_surfaces, total_cells, total_vertices, wavelength, face_stats, model_size=None):
         self.progress_var.set(100)
         self.progress_label.config(text="网格统计完成")
-
-        # 估算内存占用 (每个顶点约 3*8=24 bytes for coordinates + 3*8=24 for normals)
-        estimated_memory_mb = total_vertices * 48 / (1024 * 1024)
-
-        stats_msg = (
-            f"═══════════════════════════════════════\n"
-            f"          网格统计信息 (Mesh Statistics)\n"
-            f"═══════════════════════════════════════\n"
-            f"  曲面数量 (Surfaces):     {n_surfaces}\n"
-            f"  总网格数 (Total Cells):  {total_cells:,}\n"
-            f"  总顶点数 (Total Vertices): {total_vertices:,}\n"
-            f"  波长 (Wavelength):       {wavelength*1000:.2f} mm\n"
-            f"  预估内存 (Est. Memory):  {estimated_memory_mb:.1f} MB\n"
+        est_mem = total_vertices * 48 / (1024*1024)
+        stats_msg = (f"═══════════════════════════════════════\n"
+                     f"          网格统计信息 (Mesh Statistics)\n"
+                     f"═══════════════════════════════════════\n"
+                     f"  曲面数量 (Surfaces):     {n_surfaces}\n"
+                     f"  总网格数 (Total Cells):  {total_cells:,}\n"
+                     f"  总顶点数 (Total Vertices): {total_vertices:,}\n"
+                     f"  波长 (Wavelength):       {wavelength*1000:.2f} mm\n"
+                     f"  预估内存 (Est. Memory):  {est_mem:.1f} MB\n"
             f"═══════════════════════════════════════\n"
         )
 
@@ -1015,81 +780,12 @@ class CEMPoGUI:
 
             # 数据计算完成，通知主线程开始绘图
             self.root.after(0, lambda: self._do_update_progress(100, "正在渲染 3D 图形 (这可能需要几秒钟)..."))
-            self.root.after(0, lambda: self._do_mesh_plot(
+            self.root.after(0, lambda: self.viz_manager.show_mesh_visualization(
                 mesh_data_list, total_points, len(surfaces), wave.wavelength
             ))
 
         except Exception as e:
             self.root.after(0, lambda: self.log(f"Vis Error: {e}"))
-
-    def _do_mesh_plot(self, mesh_data_list, total_points, n_surfaces, wavelength):
-        """主线程：在嵌入式窗口中绘制网格数据（使用 Line3DCollection 优化内存）"""
-        from mpl_toolkits.mplot3d.art3d import Line3DCollection
-
-        try:
-            fig, canvas, win = self._create_plot_window(f"Mesh Visualization ({n_surfaces} surfaces)")
-            ax = fig.add_subplot(111, projection='3d')
-
-            all_lines = []  # 收集所有线段
-
-            for i, data in enumerate(mesh_data_list):
-                points = data['points']
-                normals = data['normals']
-                nu, nv = data['nu'], data['nv']
-
-                # 动态计算步长以保证高频网格下的流畅度
-                stride_u = max(1, nu // 40)
-                stride_v = max(1, nv // 40)
-
-                # 采样后的网格
-                X = points[::stride_v, ::stride_u, 0]
-                Y = points[::stride_v, ::stride_u, 1]
-                Z = points[::stride_v, ::stride_u, 2]
-                rows, cols = X.shape
-
-                # 生成 u 方向线段 (横向)
-                for r in range(rows):
-                    for c in range(cols - 1):
-                        all_lines.append([
-                            (X[r, c], Y[r, c], Z[r, c]),
-                            (X[r, c+1], Y[r, c+1], Z[r, c+1])
-                        ])
-
-                # 生成 v 方向线段 (纵向)
-                for r in range(rows - 1):
-                    for c in range(cols):
-                        all_lines.append([
-                            (X[r, c], Y[r, c], Z[r, c]),
-                            (X[r+1, c], Y[r+1, c], Z[r+1, c])
-                        ])
-
-                # 绘制法线（仅在面数较少时）
-                if i == 0 or n_surfaces < 5:
-                    skip = max(1, min(nu, nv) // 8)
-                    ax.quiver(points[::skip, ::skip, 0], points[::skip, ::skip, 1], points[::skip, ::skip, 2],
-                              normals[::skip, ::skip, 0], normals[::skip, ::skip, 1],
-                              normals[::skip, ::skip, 2],
-                              length=wavelength/8, color='#FF5555', alpha=0.6)
-
-            # 一次性添加所有线段为单个 Collection 对象
-            if all_lines:
-                line_collection = Line3DCollection(all_lines, colors='#007ACC', linewidths=0.5, alpha=0.4)
-                ax.add_collection3d(line_collection)
-
-            # 设置坐标轴比例一致
-            all_points = np.vstack([d['points'].reshape(-1, 3) for d in mesh_data_list])
-            self._set_axes_equal(ax, all_points)
-
-            ax.set_xlabel('X')
-            ax.set_ylabel('Y')
-            ax.set_zlabel('Z')
-
-            canvas.draw()
-            n_lines = len(all_lines)
-            self.log(f"Visualization complete. {n_lines} line segments in 1 collection object.")
-
-        except Exception as e:
-            self.log(f"Plot Error: {e}")
 
     def run_calculation(self):
         geo = self.build_geometry()
@@ -1262,127 +958,200 @@ class CEMPoGUI:
 
     def show_results(self, result_data):
         """显示计算结果，支持1D线图和2D热图"""
+        self.last_result = result_data  # 保存计算结果以便导出
         mode = result_data.get('mode', '1d')
-        freq = result_data['freq']
-        geo_type = result_data['geo_type']
-        geo_params = result_data['geo_params']
-
+        
         if mode == '2d':
-            self._show_results_2d(result_data)
+            self.viz_manager.show_2d_results(result_data)
         else:
-            self._show_results_1d(result_data)
+            self.viz_manager.show_1d_results(result_data, self.compare_analytical_var.get())
 
-    def _show_results_2d(self, result_data):
-        """显示2D扫描结果热图"""
-        theta_deg = result_data['theta_deg']
-        phi_deg = result_data['phi_deg']
-        rcs_2d = result_data['rcs_2d']
-        freq = result_data['freq']
-        geo_type = result_data['geo_type']
+    def export_to_csv(self):
+        """将最后一次计算结果导出为 CSV 文件"""
+        if self.last_result is None:
+            messagebox.showwarning("警告", "没有可导出的计算结果，请先进行计算。")
+            return
 
-        # 创建网格
-        Theta, Phi = np.meshgrid(theta_deg, phi_deg, indexing='ij')
+        mode = self.last_result.get('mode', '1d')
+        freq_mhz = self.last_result.get('freq', 0) / 1e6
+        geo_type = self.last_result.get('geo_type', 'unknown')
+        
+        default_filename = f"rcs_{mode}_{geo_type}_{freq_mhz:.1f}MHz.csv"
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
+            initialfile=default_filename,
+            title="选择导出位置"
+        )
 
-        # 创建图形
-        fig, ax = plt.subplots(figsize=(12, 8), facecolor=self.colors["bg_main"])
+        if not file_path:
+            return
 
-        # 绘制热图
-        levels = np.linspace(np.nanmin(rcs_2d), np.nanmax(rcs_2d), 50)
-        contour = ax.contourf(Theta, Phi, rcs_2d, levels=levels, cmap='jet')
+        try:
+            import pandas as pd
+            if mode == '2d':
+                # 2D 数据导出: Theta, Phi, RCS
+                theta_deg = self.last_result['theta_deg']
+                phi_deg = self.last_result['phi_deg']
+                rcs_2d = self.last_result['rcs_2d']
+                
+                # 创建长格式表格 (Long format: Theta, Phi, RCS)
+                data_list = []
+                for i, t in enumerate(theta_deg):
+                    for j, p in enumerate(phi_deg):
+                        data_list.append({
+                            'Theta': t,
+                            'Phi': p,
+                            'RCS(dBsm)': rcs_2d[i, j]
+                        })
+                df = pd.DataFrame(data_list)
+            else:
+                # 1D 数据导出: Theta, RCS, (Analytical RCS if exists)
+                theta_deg = self.last_result['theta_deg']
+                rcs_db = self.last_result['rcs_db']
+                data = {'Theta': theta_deg, 'RCS(dBsm)': rcs_db}
+                
+                if 'rcs_analytical' in self.last_result and self.last_result['rcs_analytical'] is not None:
+                    data['RCS_Analytical(dBsm)'] = self.last_result['rcs_analytical']
+                
+                df = pd.DataFrame(data)
 
-        # 添加颜色条
-        cbar = plt.colorbar(contour, ax=ax, shrink=0.9, aspect=20)
-        cbar.set_label('RCS (dBsm)', fontsize=11)
+            df.to_csv(file_path, index=False, encoding='utf-8')
+            self.log(f"数据已导出至: {file_path}")
+            messagebox.showinfo("成功", f"数据已成功导出到 {os.path.basename(file_path)}")
 
-        # 添加等高线
-        contour_lines = ax.contour(Theta, Phi, rcs_2d, levels=15, colors='k',
-                                    linewidths=0.3, alpha=0.5)
+        except Exception as e:
+            self.log(f"导出失败: {e}")
+            messagebox.showerror("错误", f"导出 CSV 失败: {e}")
 
-        ax.set_xlabel('Theta (deg)', fontsize=11)
-        ax.set_ylabel('Phi (deg)', fontsize=11)
-        ax.set_title(f'2D Monostatic RCS - {geo_type} @ {freq/1e6:.1f} MHz', fontsize=12)
+    def on_closing(self):
+        """窗口关闭事件"""
+        self.save_config()
+        self.root.destroy()
 
-        # 显示统计信息
-        rcs_max = np.nanmax(rcs_2d)
-        rcs_min = np.nanmin(rcs_2d)
-        rcs_mean = np.nanmean(rcs_2d)
-        stats_text = (f"RCS 统计:\n"
-                      f"  最大: {rcs_max:.2f} dBsm\n"
-                      f"  最小: {rcs_min:.2f} dBsm\n"
-                      f"  平均: {rcs_mean:.2f} dBsm")
-        ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,
-                fontsize=9, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
-                fontfamily='Microsoft YaHei')
+    def save_config(self):
+        """保存当前配置到 JSON 文件"""
+        config = {}
+        try:
+            # 基础参数
+            config['frequency'] = self.freq_var.get()
+            config['density'] = self.density_var.get()
+            
+            # 扫描参数
+            config['theta_start'] = self.theta_start.get()
+            config['theta_end'] = self.theta_end.get()
+            config['theta_n'] = self.theta_n.get()
+            config['phi_start'] = self.phi_start.get()
+            config['phi_end'] = self.phi_end.get()
+            config['phi_n'] = self.phi_n.get()
+            
+            # 几何参数
+            config['geo_type'] = self.geo_type_var.get()
+            
+            # 尝试获取几何具体参数 (即使当前未显示)
+            try: config['geo_radius'] = self.geo_radius.get()
+            except: pass
+            try: config['geo_height'] = self.geo_height.get()
+            except: pass
+            try: config['geo_width'] = self.geo_width.get()
+            except: pass
+            
+            # STEP 相关
+            if self.step_file_path:
+                config['step_file_path'] = self.step_file_path
+            
+            try: config['step_unit'] = self.step_unit_var.get()
+            except: pass
+            
+            try: config['invert_indices'] = self.invert_indices_var.get()
+            except: pass
+            
+            # 并行与对比
+            config['parallel'] = self.parallel_var.get()
+            config['workers'] = self.workers_var.get()
+            config['compare_analytical'] = self.compare_analytical_var.get()
+            
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4)
+            print(f"Configuration saved to {CONFIG_FILE}")
+            
+        except Exception as e:
+            print(f"Error saving config: {e}")
 
-        self.log(f"2D RCS - 最大: {rcs_max:.2f}dBsm, 最小: {rcs_min:.2f}dBsm, 平均: {rcs_mean:.2f}dBsm")
+    def load_config(self):
+        """从 JSON 文件加载配置"""
+        if not os.path.exists(CONFIG_FILE):
+            return
+            
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # 辅助函数：安全设置变量
+            def set_var(var, key):
+                if key in config:
+                    try:
+                        var.set(config[key])
+                    except:
+                        pass
 
-        plt.tight_layout()
-        plt.show()
-
-    def _show_results_1d(self, result_data):
-        """显示1D扫描结果线图"""
-        angles_deg = result_data['angles_deg']
-        angles_rad = result_data['angles_rad']
-        rcs = result_data['rcs']
-        freq = result_data['freq']
-        geo_type = result_data['geo_type']
-        geo_params = result_data['geo_params']
-
-        # 创建图形
-        fig, ax = plt.subplots(figsize=(11, 6), facecolor=self.colors["bg_main"])
-
-        # 绘制数值解
-        ax.plot(angles_deg, rcs, color=self.colors["accent"], linewidth=2,
-                label='Ribbon PO (数值解)')
-
-        # 解析解对比
-        rcs_analytical = None
-        if self.compare_analytical_var.get() and geo_params:
-            # 映射几何类型
-            analytical_type = None
-            if "Cylinder" in geo_type:
-                analytical_type = 'cylinder'
-            elif "Plate" in geo_type:
-                analytical_type = 'plate'
-            elif "Sphere" in geo_type:
-                analytical_type = 'sphere'
-
-            if analytical_type:
-                rcs_analytical, label = get_analytical_solution(
-                    analytical_type, geo_params, freq, angles_rad
-                )
-
-                if rcs_analytical is not None:
-                    ax.plot(angles_deg, rcs_analytical, 'r--', linewidth=2,
-                            label=label)
-
-                    # 计算误差统计
-                    stats = compute_error_stats(rcs, rcs_analytical)
-                    error_text = (f"误差统计:\n"
-                                  f"  最大: {stats['max_error']:.2f} dB\n"
-                                  f"  平均: {stats['mean_error']:.2f} dB\n"
-                                  f"  RMS: {stats['rms_error']:.2f} dB")
-
-                    # 在图上添加误差信息
-                    ax.text(0.02, 0.98, error_text, transform=ax.transAxes,
-                            fontsize=9, verticalalignment='top',
-                            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
-                            fontfamily='Microsoft YaHei')
-
-                    # 记录到日志
-                    self.log(f"误差统计 - 最大: {stats['max_error']:.2f}dB, "
-                             f"平均: {stats['mean_error']:.2f}dB, "
-                             f"RMS: {stats['rms_error']:.2f}dB")
-
-        ax.set_xlabel('Theta (deg)', fontsize=11)
-        ax.set_ylabel('RCS (dBsm)', fontsize=11)
-        ax.set_title(f'Monostatic RCS - {geo_type} @ {freq/1e6:.1f} MHz', fontsize=12)
-        ax.grid(True, linestyle='--', alpha=0.6)
-        ax.legend(loc='best')
-
-        plt.tight_layout()
-        plt.show()
+            set_var(self.freq_var, 'frequency')
+            set_var(self.density_var, 'density')
+            
+            set_var(self.theta_start, 'theta_start')
+            set_var(self.theta_end, 'theta_end')
+            set_var(self.theta_n, 'theta_n')
+            set_var(self.phi_start, 'phi_start')
+            set_var(self.phi_end, 'phi_end')
+            set_var(self.phi_n, 'phi_n')
+            
+            set_var(self.geo_type_var, 'geo_type')
+            
+            # 触发几何类型更新以创建对应的变量控件
+            self.update_geo_inputs()
+            
+            # 现在可以设置具体几何参数
+            try: 
+                if 'geo_radius' in config: self.geo_radius.set(config['geo_radius'])
+            except: pass
+            try: 
+                if 'geo_height' in config: self.geo_height.set(config['geo_height'])
+            except: pass
+            try: 
+                if 'geo_width' in config: self.geo_width.set(config['geo_width'])
+            except: pass
+            
+            if 'step_file_path' in config and os.path.exists(config['step_file_path']):
+                self.step_file_path = config['step_file_path']
+                # 尝试更新 label，如果控件存在
+                try: self.step_label.config(text=os.path.basename(self.step_file_path))
+                except: pass
+            
+            try: 
+                if 'step_unit' in config: self.step_unit_var.set(config['step_unit'])
+            except: pass
+            
+            try: 
+                if 'invert_indices' in config: self.invert_indices_var.set(config['invert_indices'])
+            except: pass
+            
+            set_var(self.parallel_var, 'parallel')
+            set_var(self.workers_var, 'workers')
+            set_var(self.compare_analytical_var, 'compare_analytical')
+            
+            # 如果是并行模式，手动触发状态更新
+            if self.parallel_var.get():
+                try:
+                    # 查找 spinbox widget 并设置状态 (有点 hack，因为没有保存 widget 引用)
+                    # 更好的方式是调用 toggle_workers，但它是 create_action_widgets 的局部函数
+                    # 我们可以重新触发 Checkbutton 的 command
+                    pass 
+                except: pass
+                
+            self.log("Configuration loaded.")
+            
+        except Exception as e:
+            self.log(f"Error loading config: {e}")
 
 if __name__ == "__main__":
     try:

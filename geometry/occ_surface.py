@@ -14,11 +14,13 @@ class OCCSurface(Surface):
     支持所有来自 OpenCascade 的几何曲面（NURBS, Cylinder, Plane 等）。
     """
 
-    def __init__(self, occ_surface: Geom_Surface):
+    def __init__(self, occ_surface: Geom_Surface, invert_normal: bool = False):
         """
         occ_surface: 一个 OCC 的 Geom_Surface 或其子类实例。
+        invert_normal: 是否翻转法向量
         """
         self.surf = occ_surface
+        self.invert_normal = invert_normal
         # 获取参数范围
         self.u_min, self.u_max, self.v_min, self.v_max = self.surf.Bounds()
 
@@ -80,7 +82,10 @@ class OCCSurface(Surface):
             # 2. 获取法线 (OCC 会处理法线朝向问题)
             if props.IsNormalDefined():
                 n_dir = props.Normal()
-                normals.append([n_dir.X(), n_dir.Y(), n_dir.Z()])
+                n_vec = [n_dir.X(), n_dir.Y(), n_dir.Z()]
+                if self.invert_normal:
+                    n_vec = [-x for x in n_vec]
+                normals.append(n_vec)
             else:
                 normals.append([0.0, 0.0, 0.0])
             
@@ -107,14 +112,16 @@ class OCCFaceSurface(Surface):
     使用 BRepAdaptor_Surface 获取实际的参数域。
     """
 
-    def __init__(self, face: TopoDS_Face, scale: float = 1.0):
+    def __init__(self, face: TopoDS_Face, scale: float = 1.0, invert_normal: bool = False):
         """
         face: OCC 的 TopoDS_Face 对象
         scale: 坐标缩放系数（例如 0.001 将 mm 转换为 m）
+        invert_normal: 是否翻转法向量
         """
         self.face = face
         self.adaptor = BRepAdaptor_Surface(face)
         self.scale = scale
+        self.invert_normal = invert_normal
 
         # 获取实际的参数边界（考虑 trimming）
         self.u_min = self.adaptor.FirstUParameter()
@@ -178,7 +185,10 @@ class OCCFaceSurface(Surface):
             # 2. 获取法线（单位向量，不需要缩放）
             if props.IsNormalDefined():
                 n_dir = props.Normal()
-                normals.append([n_dir.X(), n_dir.Y(), n_dir.Z()])
+                n_vec = [n_dir.X(), n_dir.Y(), n_dir.Z()]
+                if self.invert_normal:
+                    n_vec = [-x for x in n_vec]
+                normals.append(n_vec)
             else:
                 normals.append([0.0, 0.0, 0.0])
 

@@ -30,3 +30,5 @@ tests/
 .env
 venv/
 env/
+
+cem_po_config.json

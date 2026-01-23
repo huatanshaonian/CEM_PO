@@ -40,7 +40,7 @@ def _parse_step_entity_ids(filename):
     return face_ids, edge_ids
 
 
-def load_step_file(filename, max_param_range=100, scale=1.0):
+def load_step_file(filename, max_param_range=100, scale=1.0, invert_indices=None):
     """
     读取 STEP 文件并返回 OCCFaceSurface 对象列表。
     使用 BRepAdaptor_Surface 正确处理 trimming 边界。
@@ -50,10 +50,14 @@ def load_step_file(filename, max_param_range=100, scale=1.0):
         filename: STEP 文件路径 (.stp / .step)
         max_param_range: 参数域范围阈值，超过此值的面会被跳过
         scale: 坐标缩放系数（例如 0.001 将 mm 转换为 m）
+        invert_indices: 需要翻转法向量的面索引列表 (0-based sequence index)
 
     返回:
         List[OCCFaceSurface]: 包含文件中有效面的列表
     """
+    if invert_indices is None:
+        invert_indices = []
+
     if not os.path.exists(filename):
         raise FileNotFoundError(f"STEP file not found: {filename}")
 
@@ -77,10 +81,13 @@ def load_step_file(filename, max_param_range=100, scale=1.0):
     # 遍历形状中的所有面 (Faces)
     exp = TopExp_Explorer(shape, TopAbs_FACE)
     face_idx = 0
+    valid_idx = 0
     while exp.More():
         # 转换为 TopoDS_Face
         face = topods.Face(exp.Current())
-        surf = OCCFaceSurface(face, scale=scale)
+        
+        # 默认不翻转，待确认有效后根据 valid_idx 设置
+        surf = OCCFaceSurface(face, scale=scale, invert_normal=False)
 
         # 获取 STEP 实体 ID（假设遍历顺序与文件顺序一致）
         step_id = step_face_ids[face_idx] if face_idx < len(step_face_ids) else -1
@@ -105,7 +112,14 @@ def load_step_file(filename, max_param_range=100, scale=1.0):
             print(f"  Skipping face {face_idx} (#{step_id}): param range too large (u={u_range:.1f}, v={v_range:.1f})")
             skipped += 1
         else:
+            # 使用 valid_idx (有效面索引) 来判断是否翻转，与 GUI 显示的序号保持一致
+            should_invert = valid_idx in invert_indices
+            if should_invert:
+                print(f"  Inverting normal for valid face index {valid_idx} (#{step_id})")
+                surf.invert_normal = True # 直接设置属性
+            
             surfaces.append(surf)
+            valid_idx += 1
 
         face_idx += 1
         exp.Next()
