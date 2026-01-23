@@ -318,7 +318,11 @@ class CEMPoGUI:
             ax1.set_xlabel('X')
             ax1.set_ylabel('Y')
             ax1.set_zlabel('Z')
-            ax1.legend(loc='upper left')
+            
+            # 仅在有标签时显示图例
+            handles, labels = ax1.get_legend_handles_labels()
+            if labels:
+                ax1.legend(loc='upper left')
 
             # 设置坐标轴比例一致
             all_pts_list = []
@@ -385,14 +389,20 @@ class CEMPoGUI:
                 messagebox.showwarning("Warning", "STEP 文件中没有有效的曲面")
                 return
 
-            # 使用固定的预览参数（较粗的网格用于快速预览）
-            preview_samples = 5  # samples/lambda，预览用粗网格
-            preview_freq = 300e6  # 假设频率，只影响网格密度
+            # 使用 GUI 设置的实际参数进行预览
+            try:
+                real_freq = self.freq_var.get() * 1e6
+                real_samples = self.density_var.get()
+            except:
+                real_freq = 300e6
+                real_samples = 10
+            
+            self.log(f"Previewing with Freq={real_freq/1e6:.1f}MHz, Density={real_samples} pts/lambda")
 
             # 启动后台线程
             t = threading.Thread(
                 target=self._preview_step_thread,
-                args=(surfaces, preview_freq, preview_samples),
+                args=(surfaces, real_freq, real_samples),
                 daemon=True
             )
             t.start()
@@ -469,6 +479,37 @@ class CEMPoGUI:
         ax.set_zlim3d([z_middle - plot_radius, z_middle + plot_radius])
         ax.set_box_aspect((1, 1, 1))
 
+    def _create_plot_window(self, title):
+        """创建一个嵌入 Matplotlib 的 Toplevel 窗口，避免 plt.show() 的冲突"""
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+        
+        new_win = tk.Toplevel(self.root)
+        new_win.title(title)
+        new_win.geometry("1000x800")
+        
+        fig = plt.Figure(figsize=(10, 8), dpi=100)
+        canvas = FigureCanvasTkAgg(fig, master=new_win)
+        
+        def on_scroll(event):
+            ax = event.inaxes
+            if ax is None: return
+            scale = 1.15 if event.button == 'down' else 1/1.15
+            xlim, ylim, zlim = ax.get_xlim(), ax.get_ylim(), ax.get_zlim()
+            xmid, ymid, zmid = (xlim[0]+xlim[1])/2, (ylim[0]+ylim[1])/2, (zlim[0]+zlim[1])/2
+            xh, yh, zh = (xlim[1]-xlim[0])/2 * scale, (ylim[1]-ylim[0])/2 * scale, (zlim[1]-zlim[0])/2 * scale
+            ax.set_xlim(xmid-xh, xmid+xh)
+            ax.set_ylim(ymid-yh, ymid+yh)
+            ax.set_zlim(zmid-zh, zmid+zh)
+            canvas.draw_idle()
+        
+        canvas.mpl_connect('scroll_event', on_scroll)
+        
+        toolbar = NavigationToolbar2Tk(canvas, new_win)
+        toolbar.update()
+        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+        
+        return fig, canvas, new_win
+
     def _add_scroll_zoom(self, ax, fig):
         """为 3D 图添加滚轮缩放功能"""
         def on_scroll(event):
@@ -491,9 +532,9 @@ class CEMPoGUI:
         fig.canvas.mpl_connect('scroll_event', on_scroll)
 
     def _do_step_preview_plot(self, mesh_data_list, total_points):
-        """主线程：绘制 STEP 预览，带面编号标注"""
+        """主线程：在嵌入式窗口中绘制 STEP 预览"""
         try:
-            fig = plt.figure(figsize=(10, 8))
+            fig, canvas, win = self._create_plot_window(f"STEP Preview ({len(mesh_data_list)} surfaces)")
             ax = fig.add_subplot(111, projection='3d')
 
             colors = plt.cm.tab10(np.linspace(0, 1, min(len(mesh_data_list), 10)))
@@ -508,11 +549,15 @@ class CEMPoGUI:
                 Y = points[..., 1]
                 Z = points[..., 2]
 
+                # 同样应用动态步长
+                stride_u = max(1, nu // 30)
+                stride_v = max(1, nv // 30)
+
                 color = colors[idx % len(colors)]
                 ax.plot_wireframe(X, Y, Z, color=color, linewidth=0.5,
-                                  rstride=2, cstride=2, alpha=0.7)
+                                  rstride=stride_v, cstride=stride_u, alpha=0.7)
 
-                # 在面中心添加编号标注：显示 [局部索引] #STEP_ID
+                # 在面中心添加编号标注
                 center_i, center_j = nv // 2, nu // 2
                 cx, cy, cz = X[center_i, center_j], Y[center_i, center_j], Z[center_i, center_j]
                 label = f' [{local_idx}] #{step_id}'
@@ -526,14 +571,9 @@ class CEMPoGUI:
             ax.set_xlabel('X')
             ax.set_ylabel('Y')
             ax.set_zlabel('Z')
-            ax.set_title(f'STEP Preview ({len(mesh_data_list)} surfaces, {total_points} points)')
-
-            # 添加滚轮缩放
-            self._add_scroll_zoom(ax, fig)
-
+            
+            canvas.draw()
             self.log(f"STEP Preview: {len(mesh_data_list)} surfaces, {total_points} points")
-            plt.tight_layout()
-            plt.show()
 
         except Exception as e:
             self.log(f"Plot Error: {e}")
@@ -661,15 +701,19 @@ class CEMPoGUI:
 
         self.log("Generating mesh for visualization...")
         
+        # 重置进度条
+        self.progress_var.set(0)
+        self.progress_label.config(text="正在生成网格数据...")
+        
         try:
-            # 启动守护线程避免界面冻结（关闭窗口时自动终止）
+            # 启动守护线程避免界面冻结
             t = threading.Thread(target=self.plot_multi_surface_mesh, args=(surfaces, freq, samples), daemon=True)
             t.start()
         except Exception as e:
             self.log(f"Visualization Error: {e}")
 
     def plot_multi_surface_mesh(self, surfaces, freq, samples):
-        """后台线程：只计算数据，不创建matplotlib对象"""
+        """后台线程：计算数据并汇报进度"""
         try:
             solver = RibbonIntegrator()
             wave = IncidentWave(freq, 0, 0)
@@ -677,6 +721,7 @@ class CEMPoGUI:
             # 收集所有曲面的网格数据
             mesh_data_list = []
             total_points = 0
+            n_total = len(surfaces)
 
             for i, surf in enumerate(surfaces):
                 points, normals, (nu, nv) = solver.get_mesh_data(surf, wave, samples)
@@ -687,8 +732,13 @@ class CEMPoGUI:
                     'nu': nu,
                     'nv': nv
                 })
+                
+                # 汇报进度 (降低刷新频率以减少开销)
+                if n_total < 100 or i % 5 == 0 or i == n_total - 1:
+                    self._update_progress(i + 1, n_total, f"生成网格数据: {i+1}/{n_total}")
 
-            # 将绘图操作调度到主线程
+            # 数据计算完成，通知主线程开始绘图
+            self.root.after(0, lambda: self._do_update_progress(100, "正在渲染 3D 图形 (这可能需要几秒钟)..."))
             self.root.after(0, lambda: self._do_mesh_plot(
                 mesh_data_list, total_points, len(surfaces), wave.wavelength
             ))
@@ -697,9 +747,9 @@ class CEMPoGUI:
             self.root.after(0, lambda: self.log(f"Vis Error: {e}"))
 
     def _do_mesh_plot(self, mesh_data_list, total_points, n_surfaces, wavelength):
-        """主线程：创建matplotlib图形"""
+        """主线程：在嵌入式窗口中绘制网格数据"""
         try:
-            fig = plt.figure(figsize=(10, 8))
+            fig, canvas, win = self._create_plot_window(f"Mesh Visualization ({n_surfaces} surfaces)")
             ax = fig.add_subplot(111, projection='3d')
 
             for i, data in enumerate(mesh_data_list):
@@ -711,13 +761,15 @@ class CEMPoGUI:
                 Y = points[..., 1]
                 Z = points[..., 2]
 
-                stride_u = max(1, nu // 30)
-                stride_v = max(1, nv // 30)
+                # 动态计算步长以保证高频网格下的流畅度
+                # 目标是在预览中每个面显示不超过 40x40 条线
+                stride_u = max(1, nu // 40)
+                stride_v = max(1, nv // 40)
 
                 ax.plot_wireframe(X, Y, Z, color='#007ACC', linewidth=0.5,
                                   rstride=stride_v, cstride=stride_u, alpha=0.4)
 
-                # 只给少量面画法线
+                # 绘制法线（仅在面数较少时）
                 if i == 0 or n_surfaces < 5:
                     skip = max(1, min(nu, nv) // 8)
                     ax.quiver(X[::skip, ::skip], Y[::skip, ::skip], Z[::skip, ::skip],
@@ -725,17 +777,16 @@ class CEMPoGUI:
                               normals[::skip, ::skip, 2],
                               length=wavelength/8, color='#FF5555', alpha=0.6)
 
-            ax.set_title(f"Mesh Visualization ({n_surfaces} surfaces)")
-
             # 设置坐标轴比例一致
             all_points = np.vstack([d['points'].reshape(-1, 3) for d in mesh_data_list])
             self._set_axes_equal(ax, all_points)
 
-            # 添加滚轮缩放
-            self._add_scroll_zoom(ax, fig)
-
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+            
+            canvas.draw()
             self.log(f"Visualization complete. Total vertices: {total_points}")
-            plt.show()
 
         except Exception as e:
             self.log(f"Plot Error: {e}")
@@ -1021,6 +1072,14 @@ class CEMPoGUI:
         plt.show()
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = CEMPoGUI(root)
-    root.mainloop()
+    try:
+        root = tk.Tk()
+        app = CEMPoGUI(root)
+        root.mainloop()
+    except KeyboardInterrupt:
+        print("\n程序已停止 (User Interrupted)")
+        try:
+            root.destroy()
+        except:
+            pass
+        sys.exit(0)
