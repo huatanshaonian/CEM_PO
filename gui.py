@@ -3,6 +3,7 @@ from tkinter import ttk, filedialog, messagebox
 import sys
 import os
 import json
+import time
 import numpy as np
 import threading
 import matplotlib
@@ -36,10 +37,25 @@ class CEMPoGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("CEM PO Solver")
-        self.root.geometry("1900x1100")
-        self.root.minsize(1600, 1000)
+        self.root.geometry("1900x1000")
+        self.root.minsize(1600, 900)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
+        # --- 初始化所有状态变量 (必须在创建 UI 之前) ---
+        self.viz_manager = None
+        self.last_result = None
+        self.current_geometry = None
+        self.step_file_path = None
+        self.step_unit_var = tk.StringVar(value="mm")
+        self.invert_indices_var = tk.StringVar(value="0,1,3,5")
+        
+        # 几何参数缓存
+        self.geo_params_cache = {
+            "radius": 1.0,
+            "height": 2.0,
+            "width": 5.0
+        }
+
         # --- 现代配色与样式设置 ---
         # 定义颜色变量
         self.colors = {
@@ -59,6 +75,14 @@ class CEMPoGUI:
         # 这里先占位，等 create_log_widgets 执行完后再实例化
         self.viz_manager = None
         self.last_result = None  # 用于存储最后一次计算结果
+        
+        # 几何参数缓存 (用于在切换几何类型时保留参数)
+        self.geo_params_cache = {
+            "radius": 1.0,
+            "height": 2.0,
+            "width": 5.0
+        }
+
 
         # 配置 TTK 样式
         style = ttk.Style()
@@ -131,19 +155,11 @@ class CEMPoGUI:
         right_panel = ttk.Frame(main_frame, style="TFrame")
         right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
         
-        # 初始化持久化变量
-        self.step_unit_var = tk.StringVar(value="mm")
-        self.invert_indices_var = tk.StringVar(value="0,1,3,5")
-
         self.create_config_widgets(left_panel)
         self.create_geometry_widgets(left_panel)
         self.create_action_widgets(left_panel)
         self.create_log_widgets(right_panel)
         
-        # 状态变量
-        self.current_geometry = None
-        self.step_file_path = None
-
         # 加载配置
         self.load_config()
 
@@ -205,7 +221,22 @@ class CEMPoGUI:
         # 初始刷新
         self.update_geo_inputs()
 
+    def save_geo_params(self):
+        """保存当前几何参数到缓存"""
+        # 保存基础几何参数
+        for key in ["radius", "height", "width"]:
+            var_name = f"geo_{key}"
+            if hasattr(self, var_name):
+                try:
+                    val = getattr(self, var_name).get()
+                    self.geo_params_cache[key] = val
+                except:
+                    pass
+
     def update_geo_inputs(self, event=None):
+        # 1. 保存当前参数到缓存
+        self.save_geo_params()
+        
         # 清空旧控件
         for widget in self.geo_params_frame.winfo_children():
             widget.destroy()
@@ -224,14 +255,22 @@ class CEMPoGUI:
             btn = ttk.Button(self.geo_params_frame, text="📂 选择 STEP 文件...", command=self.browse_step)
             btn.pack(fill=tk.X, pady=5)
             self.step_label = ttk.Label(self.geo_params_frame, text="未选择文件", foreground="#888888", wraplength=200)
+            if self.step_file_path:
+                self.step_label.config(text=os.path.basename(self.step_file_path))
             self.step_label.pack(fill=tk.X)
+            
             # STEP 单位选择
             unit_frame = ttk.Frame(self.geo_params_frame, style="Card.TFrame")
             unit_frame.pack(fill=tk.X, pady=(5, 0))
             ttk.Label(unit_frame, text="STEP 单位:").pack(side=tk.LEFT)
-            self.step_unit_var = tk.StringVar(value="mm")
+            
+            # 只有当变量不存在时才初始化，避免重置
+            if not hasattr(self, 'step_unit_var'):
+                self.step_unit_var = tk.StringVar(value="mm")
+                
             ttk.Radiobutton(unit_frame, text="mm", variable=self.step_unit_var, value="mm").pack(side=tk.LEFT, padx=5)
             ttk.Radiobutton(unit_frame, text="m", variable=self.step_unit_var, value="m").pack(side=tk.LEFT)
+            
             # STEP 预览按钮
             btn_preview = ttk.Button(self.geo_params_frame, text="👁 预览全部", command=self.preview_step)
             btn_preview.pack(fill=tk.X, pady=(5, 0))
@@ -247,7 +286,10 @@ class CEMPoGUI:
             invert_frame = ttk.Frame(self.geo_params_frame, style="Card.TFrame")
             invert_frame.pack(fill=tk.X, pady=(5, 0))
             ttk.Label(invert_frame, text="翻转法线索引:").pack(side=tk.LEFT)
-            self.invert_indices_var = tk.StringVar(value="0,1,3,5") # 预设用户要求的值
+            
+            if not hasattr(self, 'invert_indices_var'):
+                self.invert_indices_var = tk.StringVar(value="0,1,3,5")
+                
             ttk.Entry(invert_frame, textvariable=self.invert_indices_var, width=15).pack(side=tk.LEFT, padx=5)
             ttk.Label(invert_frame, text="(逗号分隔)", foreground="#888888", font=("", 8)).pack(side=tk.LEFT)
 
@@ -255,7 +297,11 @@ class CEMPoGUI:
         frame = ttk.Frame(self.geo_params_frame, style="Card.TFrame")
         frame.pack(fill=tk.X, pady=3)
         ttk.Label(frame, text=label).pack(side=tk.LEFT)
-        var = tk.DoubleVar(value=default)
+        
+        # 使用缓存值（如果有），否则使用默认值
+        current_val = self.geo_params_cache.get(var_name, default)
+        var = tk.DoubleVar(value=current_val)
+        
         ttk.Entry(frame, textvariable=var, width=10).pack(side=tk.RIGHT)
         setattr(self, f"geo_{var_name}", var)
 
@@ -538,6 +584,10 @@ class CEMPoGUI:
         self.rcs_tab = ttk.Frame(self.viz_notebook)
         self.viz_notebook.add(self.rcs_tab, text="  RCS 结果 Results  ")
 
+        # Tab 3: 对比 (Comparison)
+        self.compare_tab = ttk.Frame(self.viz_notebook)
+        self.viz_notebook.add(self.compare_tab, text="  对比 Comparison  ")
+
         # 预览 Tab 的占位标签
         self.preview_placeholder = ttk.Label(self.preview_tab,
             text="点击 '预览全部' 或 '可视化网格' 查看几何图形",
@@ -550,16 +600,292 @@ class CEMPoGUI:
             foreground="#888888", font=("Microsoft YaHei UI", 10))
         self.rcs_placeholder.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
 
+        # 对比 Tab 的布局
+        self.create_comparison_widgets(self.compare_tab)
+
         self.log("CEM PO Solver GUI Ready.")
         self.log("Based on PythonOCC and Ribbon Method.")
 
-        # 初始化可视化管理器，传入两个 Tab 框架
+        # 初始化可视化管理器，传入三个 Tab 框架
         self.viz_manager = VisualizationManager(
             self.root, self.log, self.colors,
             preview_frame=self.preview_tab,
             rcs_frame=self.rcs_tab,
+            compare_frame=self.compare_plot_frame, # 注意这里传入的是用于绘图的子Frame
             notebook=self.viz_notebook
         )
+
+    def create_comparison_widgets(self, parent):
+        """创建对比 Tab 的控件"""
+        # 顶部控制栏
+        control_frame = ttk.Frame(parent, padding=10)
+        control_frame.pack(side=tk.TOP, fill=tk.X)
+
+        # === 1. 计算数据源 ===
+        calc_group = ttk.LabelFrame(control_frame, text="计算数据源 (Calculated Data)", padding=5)
+        calc_group.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+
+        self.calc_source_var = tk.StringVar(value="current")
+        
+        # 选项1: 当前内存数据
+        rb1 = ttk.Radiobutton(calc_group, text="当前计算结果 (Current Session)", 
+                            variable=self.calc_source_var, value="current")
+        rb1.pack(anchor=tk.W)
+        
+        # 选项2: 加载CSV
+        frame_csv = ttk.Frame(calc_group)
+        frame_csv.pack(anchor=tk.W, fill=tk.X)
+        rb2 = ttk.Radiobutton(frame_csv, text="加载 CSV 文件:", 
+                            variable=self.calc_source_var, value="csv")
+        rb2.pack(side=tk.LEFT)
+        
+        self.btn_load_calc = ttk.Button(frame_csv, text="浏览...", width=6, command=self.load_calc_csv)
+        self.btn_load_calc.pack(side=tk.LEFT, padx=5)
+        
+        self.lbl_calc_file = ttk.Label(calc_group, text="(未选择文件)", foreground="#888888", font=("", 8))
+        self.lbl_calc_file.pack(anchor=tk.W, padx=20)
+        
+        self.loaded_calc_result = None # 存储加载的CSV数据
+
+        # === 2. 参考数据设置 ===
+        ref_group = ttk.LabelFrame(control_frame, text="参考数据 (Reference Data)", padding=5)
+        ref_group.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+
+        # 数据目录选择
+        self.ref_data_dir = tk.StringVar(value=r"F:\data\parameter\csv_output")
+        ttk.Label(ref_group, text="目录:").pack(side=tk.LEFT)
+        ttk.Entry(ref_group, textvariable=self.ref_data_dir, width=25).pack(side=tk.LEFT, padx=5)
+        ttk.Button(ref_group, text="...", width=3, 
+                 command=lambda: self.ref_data_dir.set(filedialog.askdirectory() or self.ref_data_dir.get())
+                 ).pack(side=tk.LEFT, padx=(0, 10))
+
+        # 模型 ID 和 频率
+        frame_ref_params = ttk.Frame(ref_group)
+        frame_ref_params.pack(side=tk.LEFT, fill=tk.X)
+        
+        ttk.Label(frame_ref_params, text="模型ID:").pack(side=tk.LEFT)
+        self.comp_model_id = tk.StringVar(value="001")
+        ttk.Entry(frame_ref_params, textvariable=self.comp_model_id, width=6).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(frame_ref_params, text="频率:").pack(side=tk.LEFT)
+        self.comp_freq_suffix = tk.StringVar(value="1.5G")
+        combo_freq = ttk.Combobox(frame_ref_params, textvariable=self.comp_freq_suffix, 
+                                values=["1.5G", "3G"], width=6)
+        combo_freq.pack(side=tk.LEFT, padx=5)
+
+        # === 3. 操作 ===
+        action_group = ttk.Frame(control_frame, padding=5)
+        action_group.pack(side=tk.LEFT, fill=tk.Y)
+        
+        # 绘图风格
+        ttk.Label(action_group, text="风格:").pack(side=tk.TOP, anchor=tk.W)
+        self.plot_style_var = tk.StringVar(value="pixel")
+        ttk.Combobox(action_group, textvariable=self.plot_style_var, 
+                   values=["pixel", "contour"], width=8, state="readonly").pack(side=tk.TOP, pady=2)
+
+        # 对比按钮
+        ttk.Button(action_group, text="执行对比\nRun Comparison", 
+                 command=self.run_comparison).pack(side=tk.BOTTOM, fill=tk.X, pady=5)
+
+        # 绘图区域容器
+        self.compare_plot_frame = ttk.Frame(parent)
+        self.compare_plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        
+        # 初始占位符
+        ttk.Label(self.compare_plot_frame, 
+                text="请设置参考数据参数并点击 '执行对比'\n(需先进行一次计算以获取当前结果)",
+                foreground="#888888", justify=tk.CENTER
+                ).place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+
+    def load_calc_csv(self):
+        """加载计算结果 CSV 文件"""
+        file_path = filedialog.askopenfilename(
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
+            title="选择计算结果文件"
+        )
+        if not file_path:
+            return
+
+        try:
+            import pandas as pd
+            df = pd.read_csv(file_path)
+            
+            # 简单的格式检查
+            required_cols_2d = {'Theta', 'Phi', 'RCS(dBsm)'}
+            
+            cols = set(df.columns)
+            
+            result_data = {}
+            
+            if required_cols_2d.issubset(cols):
+                # 2D 数据
+                self.log(f"Detected 2D data in {os.path.basename(file_path)}")
+                
+                # Pivot table to create grid
+                try:
+                    pivot = df.pivot(index='Theta', columns='Phi', values='RCS(dBsm)')
+                    # pivot 自动排序索引和列
+                    theta_deg = pivot.index.values
+                    phi_deg = pivot.columns.values
+                    rcs_db_grid = pivot.values
+                    
+                    # 转换为线性值 (因为 run_comparison 期望接收线性值并再次 log10)
+                    rcs_linear = 10**(rcs_db_grid / 10.0)
+                    
+                    result_data = {
+                        'mode': '2d',
+                        'theta_deg': theta_deg,
+                        'phi_deg': phi_deg,
+                        'rcs_2d': rcs_linear,
+                        'geo_type': 'Loaded CSV',
+                        'freq': 0 # 未知频率
+                    }
+                    
+                    self.loaded_calc_result = result_data
+                    self.lbl_calc_file.config(text=os.path.basename(file_path))
+                    self.calc_source_var.set("csv") # 自动切换到 CSV 模式
+                    self.log("Calculated data loaded successfully.")
+                    
+                except Exception as e:
+                     self.log(f"Error pivoting data: {e}")
+                     messagebox.showerror("数据错误", f"无法解析数据网格: {e}")
+            else:
+                 messagebox.showerror("格式错误", f"CSV 文件缺少必要列。\n需要: {required_cols_2d}\n检测到: {cols}")
+                 return
+
+        except Exception as e:
+            self.log(f"Error loading CSV: {e}")
+            messagebox.showerror("错误", f"加载失败: {e}")
+
+    def run_comparison(self):
+        """执行对比逻辑"""
+        # 1. 确定数据源
+        source = self.calc_source_var.get()
+        calc_result = None
+        
+        if source == "current":
+            calc_result = self.last_result
+            if calc_result is None:
+                messagebox.showwarning("警告", "没有当前计算结果！\n请先在 '配置与几何' 中点击 '计算 RCS'，或选择加载 CSV。")
+                return
+        elif source == "csv":
+            calc_result = self.loaded_calc_result
+            if calc_result is None:
+                 messagebox.showwarning("警告", "尚未加载 CSV 文件！\n请点击 '浏览...' 按钮选择文件。")
+                 return
+        
+        # 2. 获取参数
+        data_dir = self.ref_data_dir.get()
+        model_id = self.comp_model_id.get()
+        freq_suffix = self.comp_freq_suffix.get()
+        style = self.plot_style_var.get()
+
+        if not os.path.exists(data_dir):
+             messagebox.showerror("错误", f"数据目录不存在:\n{data_dir}")
+             return
+
+        self.log(f"Starting comparison with Reference: Model={model_id}, Freq={freq_suffix}...")
+
+        # 3. 异步执行加载和对比 (传入 calc_result)
+        threading.Thread(target=self._comparison_thread, 
+                       args=(data_dir, model_id, freq_suffix, style, calc_result),
+                       daemon=True).start()
+
+    def _comparison_thread(self, data_dir, model_id, freq_suffix, style, calc_result):
+        try:
+            # 导入读取模块
+            import sys
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            read_compare_path = os.path.join(base_dir, 'read-compare')
+            
+            if read_compare_path not in sys.path:
+                sys.path.append(read_compare_path)
+            
+            try:
+                from rcs_data_reader import get_adaptive_rcs_matrix
+            except ImportError as ie:
+                self.root.after(0, lambda: messagebox.showerror("模块导入错误", f"无法导入 rcs_data_reader。\n详细错误: {ie}"))
+                return
+
+            # 1. 获取并处理计算数据 (calc_result)
+            self.root.after(0, lambda: self.log(f"Step 1: Processing calculated data..."))
+            if calc_result is None:
+                self.root.after(0, lambda: self.log("Error: calc_result is None"))
+                return
+            
+            if calc_result['mode'] != '2d':
+                self.root.after(0, lambda: messagebox.showwarning("模式不匹配", "当前对比仅支持 2D 扫描结果。"))
+                return
+                
+            # 核心修正：判断是否需要转换 dB。
+            # 如果是刚算出来的 last_result，solver.py 返回的是 dB。
+            # 如果是 load_calc_csv 加载的，我们也确保转成了 dB (或者保持原样)。
+            # 我们假设所有 calc_result['rcs_2d'] 都已经是 dBsm 了。
+            calc_rcs_db = calc_result.get('rcs_2d')
+            
+            # 简单验证数据范围，如果是线性值（通常>0且非常小），给予警告或自动转换
+            if np.nanmax(calc_rcs_db) < 0.001 and np.nanmin(calc_rcs_db) >= 0:
+                 # 看起来像线性值
+                 self.root.after(0, lambda: self.log("Detected linear values, converting to dB..."))
+                 calc_rcs_db = 10 * np.log10(np.maximum(calc_rcs_db, 1e-15))
+
+            calc_theta = calc_result['theta_deg']
+            calc_phi = calc_result['phi_deg']
+            self.root.after(0, lambda: self.log(f"Calculated data OK. Shape: {calc_rcs_db.shape}"))
+
+            # 2. 加载参考数据
+            self.root.after(0, lambda: self.log(f"Step 2: Loading reference {model_id}_{freq_suffix}..."))
+            try:
+                ref_data_pkg = get_adaptive_rcs_matrix(model_id, freq_suffix, data_dir, verbose=False)
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("读取参考数据失败", f"无法读取参考数据:\n{e}"))
+                self.root.after(0, lambda: self.log(f"Ref Load Error: {e}"))
+                return
+            
+            ref_rcs_db = ref_data_pkg['rcs_db']
+            ref_theta = ref_data_pkg['theta_values']
+            ref_phi = ref_data_pkg['phi_values']
+            self.root.after(0, lambda: self.log(f"Reference data OK. Shape: {ref_rcs_db.shape}"))
+
+            # 3. 检查网格是否匹配
+            if calc_rcs_db.shape != ref_rcs_db.shape:
+                msg = (f"网格尺寸不匹配 (Grid Mismatch)!\n"
+                       f"计算值 (Calculated): {calc_rcs_db.shape}\n"
+                       f"参考值 (Reference): {ref_rcs_db.shape}\n"
+                       f"请检查扫描设置中的 Theta/Phi 点数是否一致。")
+                self.root.after(0, lambda: messagebox.showerror("网格不匹配", msg))
+                self.root.after(0, lambda: self.log(f"Mismatch: Calc{calc_rcs_db.shape} vs Ref{ref_rcs_db.shape}"))
+                return
+
+            # 4. 计算差异和统计
+            self.root.after(0, lambda: self.log("Step 3: Calculating differences..."))
+            diff_db = calc_rcs_db - ref_rcs_db
+            
+            mse = np.nanmean(diff_db**2)
+            rmse = np.sqrt(mse)
+            mean_error = np.nanmean(diff_db)
+            
+            metrics = {
+                'mse': mse,
+                'rmse': rmse,
+                'mean_error': mean_error
+            }
+
+            # 5. 可视化
+            self.root.after(0, lambda: self.log("Step 4: Rendering comparison plots..."))
+            self.root.after(0, lambda: self.viz_manager.show_comparison_2d(
+                calc_rcs_db, ref_rcs_db, diff_db,
+                calc_theta, calc_phi, metrics, style
+            ))
+            
+            self.root.after(0, lambda: self.log(f"Comparison successful. RMSE: {rmse:.4f} dB"))
+
+        except Exception as e:
+             err_msg = str(e)
+             import traceback
+             traceback.print_exc()
+             self.root.after(0, lambda: messagebox.showerror("对比过程错误", f"发生未预料的错误:\n{err_msg}"))
+             self.root.after(0, lambda: self.log(f"Unexpected Error: {err_msg}"))
 
     def log(self, msg):
         self.log_text.config(state='normal')
@@ -881,6 +1207,7 @@ class CEMPoGUI:
     def _calc_thread(self, geo, freq, angles_rad, angles_deg, samples, geo_type, geo_params, phi_rad=0.0, parallel=False, n_workers=None):
         """1D扫描线程"""
         try:
+            start_time = time.time()
             solver = RibbonIntegrator()
             analyzer = RCSAnalyzer(solver)
 
@@ -895,6 +1222,9 @@ class CEMPoGUI:
                 show_progress=False,
                 progress_callback=self._update_progress
             )
+            
+            end_time = time.time()
+            elapsed_time = end_time - start_time
 
             # 准备结果数据
             result_data = {
@@ -905,11 +1235,12 @@ class CEMPoGUI:
                 'rcs': rcs,
                 'freq': freq,
                 'geo_type': geo_type,
-                'geo_params': geo_params
+                'geo_params': geo_params,
+                'elapsed_time': elapsed_time
             }
 
             self.root.after(0, lambda: self.show_results(result_data))
-            self.root.after(0, lambda: self.log("Calculation finished."))
+            self.root.after(0, lambda: self.log(f"Calculation finished. Time elapsed: {elapsed_time:.2f} s"))
 
         except Exception as e:
             self.root.after(0, lambda: self.log(f"Calculation Error: {e}"))
@@ -919,6 +1250,7 @@ class CEMPoGUI:
     def _calc_thread_2d(self, geo, freq, theta_rad, theta_deg, phi_rad, phi_deg, samples, geo_type, geo_params, parallel=False, n_workers=None):
         """2D扫描线程"""
         try:
+            start_time = time.time()
             solver = RibbonIntegrator()
             analyzer = RCSAnalyzer(solver)
 
@@ -934,6 +1266,9 @@ class CEMPoGUI:
                 show_progress=False,
                 progress_callback=self._update_progress
             )
+            
+            end_time = time.time()
+            elapsed_time = end_time - start_time
 
             # 准备结果数据
             result_data = {
@@ -945,11 +1280,12 @@ class CEMPoGUI:
                 'rcs_2d': rcs_2d,
                 'freq': freq,
                 'geo_type': geo_type,
-                'geo_params': geo_params
+                'geo_params': geo_params,
+                'elapsed_time': elapsed_time
             }
 
             self.root.after(0, lambda: self.show_results(result_data))
-            self.root.after(0, lambda: self.log("2D Calculation finished."))
+            self.root.after(0, lambda: self.log(f"2D Calculation finished. Time elapsed: {elapsed_time:.2f} s"))
 
         except Exception as e:
             self.root.after(0, lambda: self.log(f"2D Calculation Error: {e}"))
@@ -976,7 +1312,13 @@ class CEMPoGUI:
         freq_mhz = self.last_result.get('freq', 0) / 1e6
         geo_type = self.last_result.get('geo_type', 'unknown')
         
-        default_filename = f"rcs_{mode}_{geo_type}_{freq_mhz:.1f}MHz.csv"
+        # 如果是 STEP 模式，尝试使用文件名作为标识
+        if geo_type.lower() == 'step' and hasattr(self, 'step_file_path') and self.step_file_path:
+            geo_label = os.path.splitext(os.path.basename(self.step_file_path))[0]
+        else:
+            geo_label = geo_type
+
+        default_filename = f"rcs_{mode}_{geo_label}_{freq_mhz:.1f}MHz.csv"
         file_path = filedialog.asksaveasfilename(
             defaultextension=".csv",
             filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
@@ -1033,6 +1375,9 @@ class CEMPoGUI:
         """保存当前配置到 JSON 文件"""
         config = {}
         try:
+            # 1. 确保当前UI中的几何参数已同步到缓存
+            self.save_geo_params()
+            
             # 基础参数
             config['frequency'] = self.freq_var.get()
             config['density'] = self.density_var.get()
@@ -1047,14 +1392,7 @@ class CEMPoGUI:
             
             # 几何参数
             config['geo_type'] = self.geo_type_var.get()
-            
-            # 尝试获取几何具体参数 (即使当前未显示)
-            try: config['geo_radius'] = self.geo_radius.get()
-            except: pass
-            try: config['geo_height'] = self.geo_height.get()
-            except: pass
-            try: config['geo_width'] = self.geo_width.get()
-            except: pass
+            config['geo_params_cache'] = self.geo_params_cache  # 保存整个缓存
             
             # STEP 相关
             if self.step_file_path:
@@ -1070,6 +1408,10 @@ class CEMPoGUI:
             config['parallel'] = self.parallel_var.get()
             config['workers'] = self.workers_var.get()
             config['compare_analytical'] = self.compare_analytical_var.get()
+            
+            # 参考数据设置
+            try: config['ref_data_dir'] = self.ref_data_dir.get()
+            except: pass
             
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=4)
@@ -1106,20 +1448,13 @@ class CEMPoGUI:
             set_var(self.phi_n, 'phi_n')
             
             set_var(self.geo_type_var, 'geo_type')
+
+            # 恢复几何参数缓存
+            if 'geo_params_cache' in config:
+                self.geo_params_cache.update(config['geo_params_cache'])
             
-            # 触发几何类型更新以创建对应的变量控件
+            # 触发几何类型更新以创建对应的变量控件 (这会使用恢复的缓存)
             self.update_geo_inputs()
-            
-            # 现在可以设置具体几何参数
-            try: 
-                if 'geo_radius' in config: self.geo_radius.set(config['geo_radius'])
-            except: pass
-            try: 
-                if 'geo_height' in config: self.geo_height.set(config['geo_height'])
-            except: pass
-            try: 
-                if 'geo_width' in config: self.geo_width.set(config['geo_width'])
-            except: pass
             
             if 'step_file_path' in config and os.path.exists(config['step_file_path']):
                 self.step_file_path = config['step_file_path']
@@ -1139,12 +1474,14 @@ class CEMPoGUI:
             set_var(self.workers_var, 'workers')
             set_var(self.compare_analytical_var, 'compare_analytical')
             
+            # 恢复参考数据设置
+            if 'ref_data_dir' in config and hasattr(self, 'ref_data_dir'):
+                self.ref_data_dir.set(config['ref_data_dir'])
+            
             # 如果是并行模式，手动触发状态更新
             if self.parallel_var.get():
                 try:
-                    # 查找 spinbox widget 并设置状态 (有点 hack，因为没有保存 widget 引用)
-                    # 更好的方式是调用 toggle_workers，但它是 create_action_widgets 的局部函数
-                    # 我们可以重新触发 Checkbutton 的 command
+                    # 查找 spinbox widget 并设置状态
                     pass 
                 except: pass
                 

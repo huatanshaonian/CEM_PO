@@ -23,23 +23,26 @@ class VisualizationManager:
     支持双 Tab 嵌入式绘图：预览 Tab 和 RCS 结果 Tab。
     """
     def __init__(self, root, log_callback=None, theme_colors=None,
-                 preview_frame=None, rcs_frame=None, notebook=None):
+                 preview_frame=None, rcs_frame=None, compare_frame=None, notebook=None):
         self.root = root
         self.log_callback = log_callback if log_callback else print
         self.colors = theme_colors if theme_colors else {
             "bg_main": "#FAFAFA",
             "accent": "#007ACC"
         }
-        # 双 Tab 框架
+        # 多 Tab 框架
         self.preview_frame = preview_frame  # 几何预览 Tab
         self.rcs_frame = rcs_frame          # RCS 结果 Tab
-        self.notebook = notebook            # Notebook 控件，用于切换 Tab
+        self.compare_frame = compare_frame  # 对比 Tab (新增)
+        self.notebook = notebook            # Notebook 控件
 
         # 当前嵌入的 canvas 和 toolbar
         self.preview_canvas = None
         self.preview_toolbar = None
         self.rcs_canvas = None
         self.rcs_toolbar = None
+        self.compare_canvas = None
+        self.compare_toolbar = None
 
     def log(self, msg):
         self.log_callback(msg)
@@ -51,14 +54,19 @@ class VisualizationManager:
                 widget.destroy()
 
     def _switch_to_preview_tab(self):
-        """切换到预览 Tab"""
+        """切换到预览 Tab (Index 0)"""
         if self.notebook:
             self.notebook.select(0)
 
     def _switch_to_rcs_tab(self):
-        """切换到 RCS 结果 Tab"""
+        """切换到 RCS 结果 Tab (Index 1)"""
         if self.notebook:
             self.notebook.select(1)
+            
+    def _switch_to_compare_tab(self):
+        """切换到对比 Tab (Index 2)"""
+        if self.notebook and self.notebook.index("end") > 2:
+            self.notebook.select(2)
 
     def _add_scroll_zoom(self, ax, fig, canvas=None):
         """为 3D 坐标轴添加滚轮缩放功能"""
@@ -605,7 +613,7 @@ class VisualizationManager:
         except Exception as e:
             self.log(f"1D RCS Plot Error: {e}")
 
-    def show_2d_results(self, result_data):
+    def show_2d_results(self, result_data, style='contour'):
         """显示 2D RCS 结果（嵌入式）"""
         try:
             # 清除旧内容并切换到 RCS Tab
@@ -622,29 +630,43 @@ class VisualizationManager:
             freq = result_data['freq']
             geo_type = result_data['geo_type']
 
-            Theta, Phi = np.meshgrid(theta_deg, phi_deg, indexing='ij')
-
             fig = plt.Figure(figsize=(10, 7), dpi=100, facecolor=self.colors["bg_main"])
             canvas = FigureCanvasTkAgg(fig, master=self.rcs_frame)
             self.rcs_canvas = canvas
 
             ax = fig.add_subplot(111)
-            levels = np.linspace(np.nanmin(rcs_2d), np.nanmax(rcs_2d), 50)
-            contour = ax.contourf(Phi, Theta, rcs_2d, levels=levels, cmap='jet')
-
-            cbar = fig.colorbar(contour, ax=ax, shrink=0.9, aspect=20)
-            cbar.set_label('RCS (dBsm)', fontsize=11)
-
-            ax.contour(Phi, Theta, rcs_2d, levels=15, colors='k', linewidths=0.3, alpha=0.5)
-
-            ax.set_xlabel('Phi (deg)', fontsize=11)
-            ax.set_ylabel('Theta (deg)', fontsize=11)
-            ax.invert_yaxis()
-            ax.set_title(f'2D Monostatic RCS - {geo_type} @ {freq / 1e6:.1f} MHz', fontsize=12)
-
+            
+            # 统计信息
             rcs_max = np.nanmax(rcs_2d)
             rcs_min = np.nanmin(rcs_2d)
             rcs_mean = np.nanmean(rcs_2d)
+            
+            if style == 'pixel':
+                # 使用 imshow (像素模式)
+                # 注意：imshow 的 extent 顺序是 [xmin, xmax, ymax, ymin] (注意Y轴通常是反的，但在RCS图中Theta从0到180向下)
+                # 这里我们希望 Theta 0 在上，180 在下
+                im = ax.imshow(rcs_2d, 
+                               extent=[phi_deg.min(), phi_deg.max(), theta_deg.max(), theta_deg.min()],
+                               aspect='equal', origin='upper', cmap='jet')
+                cbar = fig.colorbar(im, ax=ax, shrink=0.9, aspect=20)
+                plot_title = f'2D RCS (Pixel) - {geo_type}'
+            else:
+                # 使用 contourf (平滑模式) - 默认
+                Theta, Phi = np.meshgrid(theta_deg, phi_deg, indexing='ij')
+                levels = np.linspace(rcs_min, rcs_max, 50)
+                contour = ax.contourf(Phi, Theta, rcs_2d, levels=levels, cmap='jet')
+                cbar = fig.colorbar(contour, ax=ax, shrink=0.9, aspect=20)
+                # 叠加等高线
+                ax.contour(Phi, Theta, rcs_2d, levels=15, colors='k', linewidths=0.3, alpha=0.5)
+                ax.invert_yaxis() # 确保 Theta 0 在上方
+                ax.set_aspect('equal')
+                plot_title = f'2D RCS (Contour) - {geo_type}'
+
+            cbar.set_label('RCS (dBsm)', fontsize=11)
+            ax.set_xlabel('Phi (deg)', fontsize=11)
+            ax.set_ylabel('Theta (deg)', fontsize=11)
+            ax.set_title(f'{plot_title} @ {freq / 1e6:.1f} MHz', fontsize=12)
+
             stats_text = f"Stats:\nMax: {rcs_max:.2f} dBsm\nMin: {rcs_min:.2f} dBsm\nMean: {rcs_mean:.2f} dBsm"
             ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=9, va='top',
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
@@ -660,7 +682,102 @@ class VisualizationManager:
 
             fig.tight_layout()
             canvas.draw()
-            self.log(f"2D RCS - Max: {rcs_max:.2f}dBsm, Min: {rcs_min:.2f}dBsm")
+            self.log(f"2D RCS displayed ({style}) - Max: {rcs_max:.2f}dBsm")
 
         except Exception as e:
             self.log(f"2D RCS Plot Error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def show_comparison_2d(self, calc_data, ref_data, diff_data, theta, phi, metrics, style='pixel'):
+        """显示 2D 对比结果：计算值 vs 参考值 vs 误差"""
+        try:
+            # 清除旧内容并切换到对比 Tab
+            self._clear_frame(self.compare_frame)
+            self._switch_to_compare_tab()
+            
+            if not self.compare_frame:
+                self.log("Error: No Comparison frame available")
+                return
+
+            target_frame = self.compare_frame
+
+            # 使用 constrained_layout 替代 tight_layout，处理多子图和 colorbar 更稳健
+            fig = plt.Figure(figsize=(12, 5), dpi=100, facecolor=self.colors["bg_main"], constrained_layout=True)
+            canvas = FigureCanvasTkAgg(fig, master=target_frame)
+            self.compare_canvas = canvas
+            
+            # 创建 1行3列 的子图
+            gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 1])
+            ax1 = fig.add_subplot(gs[0])
+            ax2 = fig.add_subplot(gs[1])
+            ax3 = fig.add_subplot(gs[2])
+            
+            axes = [ax1, ax2, ax3]
+            titles = ["Calculated RCS", "Reference RCS", "Difference (Calc - Ref)"]
+            datas = [calc_data, ref_data, diff_data]
+            
+            # 统一计算/参考的颜色范围
+            vmin = min(np.nanmin(calc_data), np.nanmin(ref_data))
+            vmax = max(np.nanmax(calc_data), np.nanmax(ref_data))
+            
+            # 误差的颜色范围 (以0为中心)
+            diff_max = np.nanmax(np.abs(diff_data))
+            diff_vmin, diff_vmax = -diff_max, diff_max
+
+            extent = [phi.min(), phi.max(), theta.max(), theta.min()]
+
+            for i, ax in enumerate(axes):
+                data = datas[i]
+                
+                # 绘图逻辑
+                if i < 2: # 计算值和参考值
+                    if style == 'pixel':
+                        im = ax.imshow(data, extent=extent, aspect='auto', origin='upper', 
+                                     cmap='jet', vmin=vmin, vmax=vmax)
+                    else:
+                        Theta, Phi = np.meshgrid(theta, phi, indexing='ij')
+                        im = ax.contourf(Phi, Theta, data, levels=50, cmap='jet', vmin=vmin, vmax=vmax)
+                        ax.invert_yaxis()
+                    
+                    # 只在第二个图(参考值)右侧加 colorbar，代表前两个图的标尺
+                    if i == 1: 
+                         cbar = fig.colorbar(im, ax=ax, shrink=0.9, aspect=20)
+                         cbar.set_label('RCS (dBsm)')
+                
+                else: # 误差图
+                    if style == 'pixel':
+                        im = ax.imshow(data, extent=extent, aspect='auto', origin='upper', 
+                                     cmap='seismic', vmin=diff_vmin, vmax=diff_vmax)
+                    else:
+                        Theta, Phi = np.meshgrid(theta, phi, indexing='ij')
+                        im = ax.contourf(Phi, Theta, data, levels=50, cmap='seismic', vmin=diff_vmin, vmax=diff_vmax)
+                        ax.invert_yaxis()
+                    
+                    cbar = fig.colorbar(im, ax=ax, shrink=0.9, aspect=20)
+                    cbar.set_label('Error (dB)')
+
+                ax.set_title(titles[i], fontsize=10)
+                ax.set_xlabel('Phi')
+                if i == 0: ax.set_ylabel('Theta')
+            
+            # 添加整体统计信息
+            fig.suptitle(f"Comparison: Mean Error = {metrics['mean_error']:.2f} dB, RMSE = {metrics['rmse']:.2f} dB", fontsize=12)
+
+            # 工具栏
+            toolbar_frame = ttk.Frame(target_frame)
+            toolbar_frame.pack(side=tk.BOTTOM, fill=tk.X)
+            toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+            toolbar.update()
+            self.compare_toolbar = toolbar
+            
+            canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+            
+            # constrained_layout 会自动处理布局，不需要 tight_layout
+            canvas.draw()
+            self.log(f"Comparison displayed: RMSE={metrics['rmse']:.2f}dB")
+            
+        except Exception as e:
+            self.log(f"Comparison Plot Error: {e}")
+            import traceback
+            traceback.print_exc()
