@@ -40,7 +40,7 @@ def _parse_step_entity_ids(filename):
     return face_ids, edge_ids
 
 
-def load_step_file(filename, max_param_range=100):
+def load_step_file(filename, max_param_range=100, scale=1.0):
     """
     读取 STEP 文件并返回 OCCFaceSurface 对象列表。
     使用 BRepAdaptor_Surface 正确处理 trimming 边界。
@@ -49,6 +49,7 @@ def load_step_file(filename, max_param_range=100):
     参数:
         filename: STEP 文件路径 (.stp / .step)
         max_param_range: 参数域范围阈值，超过此值的面会被跳过
+        scale: 坐标缩放系数（例如 0.001 将 mm 转换为 m）
 
     返回:
         List[OCCFaceSurface]: 包含文件中有效面的列表
@@ -79,7 +80,7 @@ def load_step_file(filename, max_param_range=100):
     while exp.More():
         # 转换为 TopoDS_Face
         face = topods.Face(exp.Current())
-        surf = OCCFaceSurface(face)
+        surf = OCCFaceSurface(face, scale=scale)
 
         # 获取 STEP 实体 ID（假设遍历顺序与文件顺序一致）
         step_id = step_face_ids[face_idx] if face_idx < len(step_face_ids) else -1

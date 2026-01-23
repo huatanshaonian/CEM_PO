@@ -206,6 +206,13 @@ class CEMPoGUI:
             btn.pack(fill=tk.X, pady=5)
             self.step_label = ttk.Label(self.geo_params_frame, text="未选择文件", foreground="#888888", wraplength=200)
             self.step_label.pack(fill=tk.X)
+            # STEP 单位选择
+            unit_frame = ttk.Frame(self.geo_params_frame, style="Card.TFrame")
+            unit_frame.pack(fill=tk.X, pady=(5, 0))
+            ttk.Label(unit_frame, text="STEP 单位:").pack(side=tk.LEFT)
+            self.step_unit_var = tk.StringVar(value="mm")
+            ttk.Radiobutton(unit_frame, text="mm", variable=self.step_unit_var, value="mm").pack(side=tk.LEFT, padx=5)
+            ttk.Radiobutton(unit_frame, text="m", variable=self.step_unit_var, value="m").pack(side=tk.LEFT)
             # STEP 预览按钮
             btn_preview = ttk.Button(self.geo_params_frame, text="👁 预览全部", command=self.preview_step)
             btn_preview.pack(fill=tk.X, pady=(5, 0))
@@ -590,6 +597,9 @@ class CEMPoGUI:
         ).pack(anchor=tk.W, pady=(0, 10))
 
         # 使用自定义样式的按钮
+        btn_gen_mesh = ttk.Button(parent, text="📊 生成网格 (Generate Mesh)", command=self.generate_mesh_stats)
+        btn_gen_mesh.pack(fill=tk.X, pady=(0, 8))
+
         btn_mesh = ttk.Button(parent, text="🧊 可视化网格 (Visualize Mesh)", command=self.visualize_mesh)
         btn_mesh.pack(fill=tk.X, pady=(0, 8))
 
@@ -675,8 +685,11 @@ class CEMPoGUI:
             elif geo_type == "STEP File":
                 if not self.step_file_path:
                     raise ValueError("请先选择 STEP 文件")
-                self.log(f"Loading STEP file: {self.step_file_path}...")
-                surfaces = load_step_file(self.step_file_path)
+                # 获取单位缩放系数
+                unit = getattr(self, 'step_unit_var', None)
+                scale = 0.001 if (unit and unit.get() == "mm") else 1.0
+                self.log(f"Loading STEP file: {self.step_file_path} (unit: {unit.get() if unit else 'm'}, scale: {scale})...")
+                surfaces = load_step_file(self.step_file_path, scale=scale)
                 self.log(f"Loaded {len(surfaces)} surfaces.")
                 return surfaces
                 
@@ -684,6 +697,118 @@ class CEMPoGUI:
             self.log(f"Error building geometry: {str(e)}")
             messagebox.showerror("Geometry Error", str(e))
             return None
+
+    def generate_mesh_stats(self):
+        """生成网格并显示统计信息，不进行3D可视化（节省内存）"""
+        geo = self.build_geometry()
+        if not geo:
+            return
+
+        freq = self.freq_var.get() * 1e6
+        samples = self.density_var.get()
+
+        surfaces = geo if isinstance(geo, list) else [geo]
+
+        self.log("Generating mesh statistics...")
+        self.progress_var.set(0)
+        self.progress_label.config(text="正在计算网格统计...")
+
+        # 启动后台线程
+        t = threading.Thread(target=self._compute_mesh_stats, args=(surfaces, freq, samples), daemon=True)
+        t.start()
+
+    def _compute_mesh_stats(self, surfaces, freq, samples):
+        """后台线程：计算网格统计信息"""
+        try:
+            from solver.ribbon_solver import RibbonIntegrator
+            from physics.wave import IncidentWave
+            solver = RibbonIntegrator()
+            wave = IncidentWave(freq, 0, 0)
+
+            total_cells = 0
+            total_vertices = 0
+            n_total = len(surfaces)
+            face_stats = []
+
+            # 用于计算包围盒
+            all_min = np.array([np.inf, np.inf, np.inf])
+            all_max = np.array([-np.inf, -np.inf, -np.inf])
+
+            for i, surf in enumerate(surfaces):
+                # 只计算网格尺寸，不存储实际数据
+                nu, nv = solver.get_mesh_size(surf, wave, samples)
+                n_cells = nu * nv
+                n_vertices = (nu + 1) * (nv + 1)
+                total_cells += n_cells
+                total_vertices += n_vertices
+
+                # 采样角点来估算包围盒
+                u_min, u_max = surf.u_domain
+                v_min, v_max = surf.v_domain
+                corners_uv = [(u_min, v_min), (u_max, v_min), (u_min, v_max), (u_max, v_max)]
+                for u, v in corners_uv:
+                    pt = surf.evaluate(np.array([u]), np.array([v]))[0]
+                    all_min = np.minimum(all_min, pt)
+                    all_max = np.maximum(all_max, pt)
+
+                # 获取面信息
+                step_id = getattr(surf, 'step_id', i)
+                face_stats.append({
+                    'index': i,
+                    'step_id': step_id,
+                    'nu': nu,
+                    'nv': nv,
+                    'cells': n_cells
+                })
+
+                # 更新进度
+                if n_total < 100 or i % 10 == 0 or i == n_total - 1:
+                    self._update_progress(i + 1, n_total, f"计算网格: {i+1}/{n_total}")
+
+            # 计算模型尺寸
+            model_size = all_max - all_min
+
+            # 在主线程显示结果
+            self.root.after(0, lambda: self._show_mesh_stats(
+                n_total, total_cells, total_vertices, wave.wavelength, face_stats, model_size
+            ))
+
+        except Exception as e:
+            err_msg = str(e)
+            self.root.after(0, lambda msg=err_msg: self.log(f"Mesh Stats Error: {msg}"))
+
+    def _show_mesh_stats(self, n_surfaces, total_cells, total_vertices, wavelength, face_stats):
+        """显示网格统计信息"""
+        self.progress_var.set(100)
+        self.progress_label.config(text="网格统计完成")
+
+        # 估算内存占用 (每个顶点约 3*8=24 bytes for coordinates + 3*8=24 for normals)
+        estimated_memory_mb = total_vertices * 48 / (1024 * 1024)
+
+        stats_msg = (
+            f"═══════════════════════════════════════\n"
+            f"          网格统计信息 (Mesh Statistics)\n"
+            f"═══════════════════════════════════════\n"
+            f"  曲面数量 (Surfaces):     {n_surfaces}\n"
+            f"  总网格数 (Total Cells):  {total_cells:,}\n"
+            f"  总顶点数 (Total Vertices): {total_vertices:,}\n"
+            f"  波长 (Wavelength):       {wavelength*1000:.2f} mm\n"
+            f"  预估内存 (Est. Memory):  {estimated_memory_mb:.1f} MB\n"
+            f"═══════════════════════════════════════\n"
+        )
+
+        self.log(stats_msg)
+
+        # 显示前10个面的详细信息
+        if len(face_stats) <= 20:
+            self.log("各面网格详情:")
+            for fs in face_stats:
+                self.log(f"  Face {fs['index']} (#{fs['step_id']}): {fs['nu']}×{fs['nv']} = {fs['cells']:,} cells")
+        else:
+            self.log(f"前10个面的网格详情:")
+            for fs in face_stats[:10]:
+                self.log(f"  Face {fs['index']} (#{fs['step_id']}): {fs['nu']}×{fs['nv']} = {fs['cells']:,} cells")
+            self.log(f"  ... 还有 {len(face_stats)-10} 个面")
 
     def visualize_mesh(self):
         geo = self.build_geometry()
@@ -747,35 +872,58 @@ class CEMPoGUI:
             self.root.after(0, lambda: self.log(f"Vis Error: {e}"))
 
     def _do_mesh_plot(self, mesh_data_list, total_points, n_surfaces, wavelength):
-        """主线程：在嵌入式窗口中绘制网格数据"""
+        """主线程：在嵌入式窗口中绘制网格数据（使用 Line3DCollection 优化内存）"""
+        from mpl_toolkits.mplot3d.art3d import Line3DCollection
+
         try:
             fig, canvas, win = self._create_plot_window(f"Mesh Visualization ({n_surfaces} surfaces)")
             ax = fig.add_subplot(111, projection='3d')
+
+            all_lines = []  # 收集所有线段
 
             for i, data in enumerate(mesh_data_list):
                 points = data['points']
                 normals = data['normals']
                 nu, nv = data['nu'], data['nv']
 
-                X = points[..., 0]
-                Y = points[..., 1]
-                Z = points[..., 2]
-
                 # 动态计算步长以保证高频网格下的流畅度
-                # 目标是在预览中每个面显示不超过 40x40 条线
                 stride_u = max(1, nu // 40)
                 stride_v = max(1, nv // 40)
 
-                ax.plot_wireframe(X, Y, Z, color='#007ACC', linewidth=0.5,
-                                  rstride=stride_v, cstride=stride_u, alpha=0.4)
+                # 采样后的网格
+                X = points[::stride_v, ::stride_u, 0]
+                Y = points[::stride_v, ::stride_u, 1]
+                Z = points[::stride_v, ::stride_u, 2]
+                rows, cols = X.shape
+
+                # 生成 u 方向线段 (横向)
+                for r in range(rows):
+                    for c in range(cols - 1):
+                        all_lines.append([
+                            (X[r, c], Y[r, c], Z[r, c]),
+                            (X[r, c+1], Y[r, c+1], Z[r, c+1])
+                        ])
+
+                # 生成 v 方向线段 (纵向)
+                for r in range(rows - 1):
+                    for c in range(cols):
+                        all_lines.append([
+                            (X[r, c], Y[r, c], Z[r, c]),
+                            (X[r+1, c], Y[r+1, c], Z[r+1, c])
+                        ])
 
                 # 绘制法线（仅在面数较少时）
                 if i == 0 or n_surfaces < 5:
                     skip = max(1, min(nu, nv) // 8)
-                    ax.quiver(X[::skip, ::skip], Y[::skip, ::skip], Z[::skip, ::skip],
+                    ax.quiver(points[::skip, ::skip, 0], points[::skip, ::skip, 1], points[::skip, ::skip, 2],
                               normals[::skip, ::skip, 0], normals[::skip, ::skip, 1],
                               normals[::skip, ::skip, 2],
                               length=wavelength/8, color='#FF5555', alpha=0.6)
+
+            # 一次性添加所有线段为单个 Collection 对象
+            if all_lines:
+                line_collection = Line3DCollection(all_lines, colors='#007ACC', linewidths=0.5, alpha=0.4)
+                ax.add_collection3d(line_collection)
 
             # 设置坐标轴比例一致
             all_points = np.vstack([d['points'].reshape(-1, 3) for d in mesh_data_list])
@@ -784,9 +932,10 @@ class CEMPoGUI:
             ax.set_xlabel('X')
             ax.set_ylabel('Y')
             ax.set_zlabel('Z')
-            
+
             canvas.draw()
-            self.log(f"Visualization complete. Total vertices: {total_points}")
+            n_lines = len(all_lines)
+            self.log(f"Visualization complete. {n_lines} line segments in 1 collection object.")
 
         except Exception as e:
             self.log(f"Plot Error: {e}")

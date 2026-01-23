@@ -107,12 +107,14 @@ class OCCFaceSurface(Surface):
     使用 BRepAdaptor_Surface 获取实际的参数域。
     """
 
-    def __init__(self, face: TopoDS_Face):
+    def __init__(self, face: TopoDS_Face, scale: float = 1.0):
         """
         face: OCC 的 TopoDS_Face 对象
+        scale: 坐标缩放系数（例如 0.001 将 mm 转换为 m）
         """
         self.face = face
         self.adaptor = BRepAdaptor_Surface(face)
+        self.scale = scale
 
         # 获取实际的参数边界（考虑 trimming）
         self.u_min = self.adaptor.FirstUParameter()
@@ -139,7 +141,7 @@ class OCCFaceSurface(Surface):
 
         for ui, vi in zip(u_flat, v_flat):
             pnt = self.adaptor.Value(ui, vi)
-            points.append([pnt.X(), pnt.Y(), pnt.Z()])
+            points.append([pnt.X() * self.scale, pnt.Y() * self.scale, pnt.Z() * self.scale])
 
         return np.array(points).reshape(shape + (3,))
 
@@ -152,6 +154,7 @@ class OCCFaceSurface(Surface):
     def get_data(self, u_grid, v_grid):
         """
         使用 BRepLProp_SLProps 获取点、法线和 Jacobian。
+        坐标和 Jacobian 会根据 scale 参数进行缩放。
         """
         u, v = np.broadcast_arrays(u_grid, v_grid)
         shape = u.shape
@@ -168,24 +171,24 @@ class OCCFaceSurface(Surface):
         for ui, vi in zip(u_flat, v_flat):
             props.SetParameters(ui, vi)
 
-            # 1. 获取坐标点
+            # 1. 获取坐标点（应用缩放）
             pnt = props.Value()
-            points.append([pnt.X(), pnt.Y(), pnt.Z()])
+            points.append([pnt.X() * self.scale, pnt.Y() * self.scale, pnt.Z() * self.scale])
 
-            # 2. 获取法线
+            # 2. 获取法线（单位向量，不需要缩放）
             if props.IsNormalDefined():
                 n_dir = props.Normal()
                 normals.append([n_dir.X(), n_dir.Y(), n_dir.Z()])
             else:
                 normals.append([0.0, 0.0, 0.0])
 
-            # 3. 计算 Jacobian |Du x Dv|
+            # 3. 计算 Jacobian |Du x Dv|（应用 scale^2 因为是面积元素）
             du = props.D1U()
             dv = props.D1V()
             du_vec = np.array([du.X(), du.Y(), du.Z()])
             dv_vec = np.array([dv.X(), dv.Y(), dv.Z()])
             cross_prod = np.cross(du_vec, dv_vec)
-            jacobians.append(np.linalg.norm(cross_prod))
+            jacobians.append(np.linalg.norm(cross_prod) * self.scale * self.scale)
 
         points = np.array(points).reshape(shape + (3,))
         normals = np.array(normals).reshape(shape + (3,))
@@ -212,12 +215,12 @@ class OCCFaceSurface(Surface):
             t_min = curve.FirstParameter()
             t_max = curve.LastParameter()
 
-            # 采样边上的点
+            # 采样边上的点（应用缩放）
             t_vals = np.linspace(t_min, t_max, n_samples)
             points = []
             for t in t_vals:
                 pnt = curve.Value(t)
-                points.append([pnt.X(), pnt.Y(), pnt.Z()])
+                points.append([pnt.X() * self.scale, pnt.Y() * self.scale, pnt.Z() * self.scale])
 
             points = np.array(points)
             midpoint = points[n_samples // 2]
