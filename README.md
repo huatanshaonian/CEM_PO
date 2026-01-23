@@ -1,74 +1,115 @@
-# 高频物理光学 (PO) 电磁散射求解器 (原型)
+# 电磁散射 PO 求解器 (CEM PO Solver)
+
+[![Python](https://img.shields.io/badge/Python-3.9%2B-blue)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 ## 项目简介
 
-本项目是一个基于 Python 的高频电磁散射求解器原型，采用物理光学 (Physical Optics, PO) 近似方法。
-其核心算法实现了“Ribbon Method”（带状积分法），通过将二维面积分转化为一维数值求和与一维解析积分（Sinc 函数），提高了计算效率。
+**CEM PO Solver** 是一个基于物理光学 (Physical Optics, PO) 近似的高频电磁散射求解器。它提供了一个现代化的图形用户界面 (GUI)，专为工程验证和学术研究设计。
 
-当前版本（Phase 1）主要关注算法的正确性验证，已实现了针对解析圆柱体的单站 RCS (雷达散射截面) 计算，并与解析解进行了对比验证。
+本项目采用 **Ribbon Method**（带状积分法）作为核心算法，将二维面积分转化为一维解析积分（Sinc 函数）与一维数值求和，在保证精度的同时大幅提高了计算效率。
 
-## 环境搭建
+### ✨ 核心特性
 
-本项目依赖 Python 3.9+ 以及 numpy, scipy, matplotlib 等科学计算库。建议使用 Conda 进行环境管理。
+*   **🖥️ 现代化 GUI**: 基于 Tkinter 的图形界面，支持实时日志、参数配置和结果可视化。
+*   **📐 CAD 支持**: 集成 `PythonOCC`，支持直接导入 **STEP (.stp/.step)** 格式的复杂 CAD 模型。
+*   **🚀 并行计算**: 内置多进程并行加速引擎，利用多核 CPU 快速完成海量角度的 RCS 扫描。
+*   **📊 交互式可视化**:
+    *   **3D 预览**: 交互式查看 STEP 模型网格、法线方向及入射波示意图。
+    *   **2D 扫描**: 支持生成高质量的 RCS 热力图 (Heatmap) 和等高线图。
+    *   **数据对比**: 内置对比工具，可加载 CSV/参考数据计算 RMSE 误差并生成差异图。
+*   **💾 数据持久化**: 自动保存计算结果为 CSV，支持从界面直接加载历史数据。
 
-### 1. 创建 Conda 环境
+## 🛠️ 环境搭建
+
+本项目依赖 Python 3.9+ 以及科学计算和 CAD 处理库。推荐使用 Conda 管理环境。
+
+### 1. 创建环境
 
 ```bash
-conda create -n cem python -y
+conda create -n cem python=3.9 -y
 conda activate cem
 ```
 
 ### 2. 安装依赖
 
-```bash
-pip install numpy scipy matplotlib
-```
-
-## 快速开始
-
-项目包含一个主要的验证脚本 `main.py`，用于计算圆柱体的单站 RCS 并与理论公式进行对比。
-
-### 运行验证
+请确保安装了以下核心库：
 
 ```bash
-python main.py
+# 科学计算基础
+pip install numpy scipy matplotlib pandas
+
+# CAD 内核 (OpenCascade)
+conda install -c conda-forge pythonocc-core
+
+# GUI 增强 (可选)
+pip install sv_ttk
 ```
 
-运行成功后，控制台将输出主瓣附近的误差（应小于 0.5 dB），并生成一张对比图 `rcs_verification.png`。
+> **注意**: `pythonocc-core` 必须通过 Conda 安装，因为它包含大量二进制依赖。
 
-## 项目结构
+## 🚀 快速开始
 
-```
-F:\data\CEM_PO\
-├── geometry/           # 几何定义层
-│   ├── surface.py      # Surface 抽象基类
-│   └── cylinder.py     # 解析圆柱体实现
-├── physics/            # 物理定义层
-│   ├── constants.py    # 物理常数 (光速, 阻抗等)
-│   └── wave.py         # 入射波定义
-├── solver/             # 求解器核心层
-│   └── ribbon_solver.py # Ribbon 积分器与 RCS 分析器
-├── main.py             # 验证脚本入口
-├── instruction.txt     # 项目需求说明
-└── README.md           # 项目说明文档
+### 启动 GUI
+
+项目的入口是 `gui.py`。在终端中运行：
+
+```bash
+python gui.py
 ```
 
-## 核心算法说明
+### 使用流程
 
-求解器使用了 **Ribbon Method**：
-1.  **几何离散**：将曲面沿 $v$ 方向切分为多个带状区域 (ribbons)。
-2.  **相位近似**：在每个带状区域内，假设相位沿 $u$ 方向线性变化。
-3.  **解析积分**：利用 Sinc 函数解析计算 $u$ 方向的积分贡献。
-4.  **数值求和**：将所有带状区域的贡献累加，得到总散射场。
+1.  **配置参数**: 在左侧面板设置频率 (Frequency)、网格密度 (Mesh Density) 和扫描角度范围。
+2.  **选择几何**:
+    *   选择 "STEP File" 并加载您的 `.stp` 模型。
+    *   点击 "预览全部 (Preview)" 检查模型导入是否正确及法线方向（红色箭头应指向外部）。
+    *   *可选*: 使用 "反转法线索引" 修复法线反向的面。
+3.  **运行计算**:
+    *   勾选 "并行计算 (Parallel)" 以加速。
+    *   点击 "计算 RCS (Run 1D/2D)"。
+4.  **查看结果**:
+    *   计算完成后，结果将自动在 "RCS 结果" 标签页显示。
+    *   切换到 "对比 (Comparison)" 标签页，加载参考数据进行精度验证。
 
-公式：
-$$ I \approx \sum_{ribbons} (\hat{n} \cdot \hat{k}_{inc}) \cdot e^{j \Phi_0} \cdot L_u L_v \cdot \text{sinc}\left(\frac{\alpha L_u}{2\pi}\right) $$
-
-## 扩展指南
-
-要添加新的几何形状（例如球体或 NURBS 曲面）：
-1.  继承 `geometry.surface.Surface` 类。
-2.  实现 `evaluate(u, v)`, `get_normal(u, v)`, 和 `get_jacobian(u, v)` 方法。
-3.  确保这些方法支持 numpy 的向量化操作。
+## 📂 项目结构
 
 ```
+CEM_PO/
+├── gui.py                  # [核心] GUI 入口与主控制器
+├── geometry/
+│   ├── step_loader.py      # STEP 文件解析与网格化 (基于 PythonOCC)
+│   ├── occ_surface.py      # OpenCascade 曲面封装
+│   └── surface.py          # 几何基类
+├── solver/
+│   └── ribbon_solver.py    # Ribbon Method 核心算法与并行计算引擎
+├── ui/
+│   └── plotting.py         # Matplotlib 嵌入式绘图与可视化管理
+├── read-compare/
+│   ├── rcs_data_reader.py  # 参考数据读取与清洗
+│   └── rcs_visual.py       # 独立的可视化脚本
+├── physics/
+├── cem_po_config.json      # 用户配置持久化文件 (自动生成)
+└── results/                # 计算结果默认保存目录
+```
+
+## 🧠 算法原理
+
+求解器基于 **Ribbon Method**：
+
+1.  **几何离散**: 利用 OpenCascade 的参数化能力，将任意 CAD 曲面沿 $v$ 方向切分为细长的带状区域。
+2.  **相位线性化**: 在每个带状微元内，假设相位沿 $u$ 方向线性变化。
+3.  **解析积分**: 沿 $u$ 方向的积分被解析为 Sinc 函数形式：
+    $$ I_u \propto L_u \cdot \text{sinc}\left(\frac{k \cdot L_u \cdot \partial \Phi / \partial u}{2\pi}\right) $$
+4.  **并行求和**:
+    *   **预计算**: 主进程将几何数据转化为纯 NumPy 数组 (`CachedMeshData`)。
+    *   **分发**: 通过 `ProcessPoolExecutor` 将角度任务分发至各 CPU 核心。
+    *   **归约**: 汇总各核心计算的复数散射场，得到总 RCS。
+
+## 🤝 贡献
+
+欢迎提交 Issue 或 Pull Request 来改进本项目！
+
+## 📄 许可证
+
+本项目基于 MIT 许可证开源。详见 LICENSE 文件。
