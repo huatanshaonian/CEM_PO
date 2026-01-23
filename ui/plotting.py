@@ -714,7 +714,7 @@ class VisualizationManager:
             ax3 = fig.add_subplot(gs[2])
             
             axes = [ax1, ax2, ax3]
-            titles = ["Calculated RCS", "Reference RCS", "Difference (Calc - Ref)"]
+            titles = ["Calculated RCS", "Reference RCS", f"Difference (Calc - Ref)\nRMSE={metrics['rmse']:.2f}, Mean={metrics['mean_error']:.2f}"]
             datas = [calc_data, ref_data, diff_data]
             
             # 统一计算/参考的颜色范围
@@ -733,12 +733,13 @@ class VisualizationManager:
                 # 绘图逻辑
                 if i < 2: # 计算值和参考值
                     if style == 'pixel':
-                        im = ax.imshow(data, extent=extent, aspect='auto', origin='upper', 
+                        im = ax.imshow(data, extent=extent, aspect='equal', origin='upper', 
                                      cmap='jet', vmin=vmin, vmax=vmax)
                     else:
                         Theta, Phi = np.meshgrid(theta, phi, indexing='ij')
                         im = ax.contourf(Phi, Theta, data, levels=50, cmap='jet', vmin=vmin, vmax=vmax)
                         ax.invert_yaxis()
+                        ax.set_aspect('equal')
                     
                     # 只在第二个图(参考值)右侧加 colorbar，代表前两个图的标尺
                     if i == 1: 
@@ -747,12 +748,13 @@ class VisualizationManager:
                 
                 else: # 误差图
                     if style == 'pixel':
-                        im = ax.imshow(data, extent=extent, aspect='auto', origin='upper', 
+                        im = ax.imshow(data, extent=extent, aspect='equal', origin='upper', 
                                      cmap='seismic', vmin=diff_vmin, vmax=diff_vmax)
                     else:
                         Theta, Phi = np.meshgrid(theta, phi, indexing='ij')
                         im = ax.contourf(Phi, Theta, data, levels=50, cmap='seismic', vmin=diff_vmin, vmax=diff_vmax)
                         ax.invert_yaxis()
+                        ax.set_aspect('equal')
                     
                     cbar = fig.colorbar(im, ax=ax, shrink=0.9, aspect=20)
                     cbar.set_label('Error (dB)')
@@ -777,6 +779,120 @@ class VisualizationManager:
             canvas.draw()
             self.log(f"Comparison displayed: RMSE={metrics['rmse']:.2f}dB")
             
+        except Exception as e:
+            self.log(f"Comparison Plot Error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def show_comparison_dual_2d(self, rcs_a, rcs_b, rcs_ref, diff_a, diff_b, theta, phi, metrics_a, metrics_b, style='pixel'):
+        """显示双数据对比结果 (A vs B vs Ref)"""
+        try:
+            # 清除旧内容并切换到对比 Tab
+            self._clear_frame(self.compare_frame)
+            self._switch_to_compare_tab()
+            
+            if not self.compare_frame:
+                self.log("Error: No Comparison frame available")
+                return
+
+            target_frame = self.compare_frame
+
+            # 使用 constrained_layout
+            fig = plt.Figure(figsize=(14, 8), dpi=100, facecolor=self.colors["bg_main"], constrained_layout=True)
+            canvas = FigureCanvasTkAgg(fig, master=target_frame)
+            self.compare_canvas = canvas
+            
+            # 创建 2行3列 的子图
+            # Row 1: Data A, Data B, Reference
+            # Row 2: Diff A-Ref, Diff B-Ref, Diff A-B
+            gs = fig.add_gridspec(2, 3)
+            
+            ax_a = fig.add_subplot(gs[0, 0])
+            ax_b = fig.add_subplot(gs[0, 1])
+            ax_ref = fig.add_subplot(gs[0, 2])
+            
+            ax_diff_a = fig.add_subplot(gs[1, 0])
+            ax_diff_b = fig.add_subplot(gs[1, 1])
+            ax_diff_ab = fig.add_subplot(gs[1, 2])
+            
+            axes_row1 = [ax_a, ax_b, ax_ref]
+            axes_row2 = [ax_diff_a, ax_diff_b, ax_diff_ab]
+            
+            titles_row1 = ["Data A (Primary)", "Data B (Compare)", "Reference"]
+            datas_row1 = [rcs_a, rcs_b, rcs_ref]
+            
+            # 计算 A-B 差异
+            diff_ab = rcs_a - rcs_b
+            rmse_ab = np.sqrt(np.nanmean(diff_ab**2))
+            mean_ab = np.nanmean(diff_ab)
+            
+            # 更新标题包含 Mean Error
+            titles_row2 = [f"Error A (A-Ref)\nRMSE={metrics_a['rmse']:.2f}, Mean={metrics_a['mean_error']:.2f}", 
+                           f"Error B (B-Ref)\nRMSE={metrics_b['rmse']:.2f}, Mean={metrics_b['mean_error']:.2f}", 
+                           f"Diff A-B\nRMSE={rmse_ab:.2f}, Mean={mean_ab:.2f}"]
+            datas_row2 = [diff_a, diff_b, diff_ab]
+
+            # 统一 row1 的颜色范围 (RCS)
+            vmin = min(np.nanmin(rcs_a), np.nanmin(rcs_b), np.nanmin(rcs_ref))
+            vmax = max(np.nanmax(rcs_a), np.nanmax(rcs_b), np.nanmax(rcs_ref))
+            
+            # 统一 row2 的颜色范围 (Error)
+            err_max = max(np.nanmax(np.abs(diff_a)), np.nanmax(np.abs(diff_b)), np.nanmax(np.abs(diff_ab)))
+            diff_vmin, diff_vmax = -err_max, err_max
+
+            extent = [phi.min(), phi.max(), theta.max(), theta.min()]
+            Theta, Phi = np.meshgrid(theta, phi, indexing='ij')
+
+            # 绘制 Row 1 (RCS Values)
+            for i, ax in enumerate(axes_row1):
+                data = datas_row1[i]
+                if style == 'pixel':
+                    im = ax.imshow(data, extent=extent, aspect='equal', origin='upper', 
+                                 cmap='jet', vmin=vmin, vmax=vmax)
+                else:
+                    im = ax.contourf(Phi, Theta, data, levels=50, cmap='jet', vmin=vmin, vmax=vmax)
+                    ax.invert_yaxis()
+                    ax.set_aspect('equal') # 强制正方形
+
+                ax.set_title(titles_row1[i], fontsize=10)
+                if i == 0: ax.set_ylabel('Theta')
+                # 只在最后一个图右侧加 colorbar
+                if i == 2:
+                    cbar = fig.colorbar(im, ax=axes_row1, shrink=0.9, aspect=30, location='right')
+                    cbar.set_label('RCS (dBsm)')
+
+            # 绘制 Row 2 (Differences)
+            for i, ax in enumerate(axes_row2):
+                data = datas_row2[i]
+                if style == 'pixel':
+                    im = ax.imshow(data, extent=extent, aspect='equal', origin='upper', 
+                                 cmap='seismic', vmin=diff_vmin, vmax=diff_vmax)
+                else:
+                    im = ax.contourf(Phi, Theta, data, levels=50, cmap='seismic', vmin=diff_vmin, vmax=diff_vmax)
+                    ax.invert_yaxis()
+                    ax.set_aspect('equal') # 强制正方形
+                
+                ax.set_title(titles_row2[i], fontsize=10)
+                ax.set_xlabel('Phi')
+                if i == 0: ax.set_ylabel('Theta')
+                # 只在最后一个图右侧加 colorbar
+                if i == 2:
+                    cbar = fig.colorbar(im, ax=axes_row2, shrink=0.9, aspect=30, location='right')
+                    cbar.set_label('Difference (dB)')
+
+            fig.suptitle(f"Dual Model Comparison", fontsize=14)
+
+            # 工具栏
+            toolbar_frame = ttk.Frame(target_frame)
+            toolbar_frame.pack(side=tk.BOTTOM, fill=tk.X)
+            toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+            toolbar.update()
+            self.compare_toolbar = toolbar
+            
+            canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+            canvas.draw()
+            self.log(f"Dual comparison displayed.")
+
         except Exception as e:
             self.log(f"Comparison Plot Error: {e}")
             import traceback

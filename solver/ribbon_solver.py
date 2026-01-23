@@ -49,24 +49,43 @@ class CachedMeshData:
     预计算的网格数据，用于并行计算传输。
     包含积分所需的所有几何信息（纯 NumPy 数组）。
     """
-    def __init__(self, points, normals, jacobians, dP_du, du, dv):
+    def __init__(self, points, normals, jacobians, dP_du, dP_dv, du, dv):
         self.points = points
         self.normals = normals
         self.jacobians = jacobians
         self.dP_du = dP_du  # Partial derivative dP/du for alpha calc
+        self.dP_dv = dP_dv  # Partial derivative dP/dv for beta calc
         self.du = du
         self.dv = dv
 
-class RibbonIntegrator:
+class DiscretePOIntegrator:
     """
-    使用 Ribbon 方法进行物理光学 (PO) 积分
-    支持自适应网格划分 (根据频率和几何尺寸)
+    离散物理光学 (PO) 积分器，支持多种 sinc 校正模式
+
+    将曲面离散为 nv × nu 的网格，支持三种模式：
+    - 'none': 纯离散 PO，无 sinc 校正
+    - 'u_only': 仅 u 方向 sinc 校正 (原始 Ribbon 近似)
+    - 'dual': 双向 sinc 校正
+
+    sinc 校正假设每个格子内相位是线性函数，使用 sinc(α·du/2π) 因子
+    修正快速振荡的影响。双向校正额外添加 sinc(β·dv/2π)。
+
+    注意：这不是真正的 Ribbon 方法（后者在 u 方向做整条解析积分）。
+    要达到相同精度，需要比真正 Ribbon 方法更多的网格点。
+
+    参数:
+        nu, nv: 手动指定网格数（可选）
+        samples_per_lambda: 每波长采样数（默认10）
+        sinc_mode: 'none' | 'u_only' | 'dual'（默认 'dual'）
     """
 
-    def __init__(self, nu=None, nv=None, samples_per_lambda=10):
+    def __init__(self, nu=None, nv=None, samples_per_lambda=10, sinc_mode='dual'):
         self.nu_manual = nu
         self.nv_manual = nv
         self.default_samples_per_lambda = samples_per_lambda
+        if sinc_mode not in ('none', 'u_only', 'dual'):
+            raise ValueError(f"sinc_mode 必须是 'none', 'u_only' 或 'dual'，收到: {sinc_mode}")
+        self.sinc_mode = sinc_mode
 
     def _estimate_mesh_density(self, surface, wavelength, samples_per_lambda):
         if self.nu_manual is not None and self.nv_manual is not None:
@@ -86,8 +105,9 @@ class RibbonIntegrator:
         p_u = surface.evaluate(u_samples, v_mid)
         dist_u = np.sum(np.sqrt(np.sum(np.diff(p_u, axis=0)**2, axis=-1)))
 
+        # 双向 sinc 校正：u/v 两个方向使用相同的采样密度
         nv = int(max(20, (dist_v / wavelength) * samples_per_lambda))
-        nu = int(max(20, (dist_u / wavelength) * (samples_per_lambda / 2)))
+        nu = int(max(20, (dist_u / wavelength) * samples_per_lambda))
         
         return nu, nv
 
@@ -114,49 +134,75 @@ class RibbonIntegrator:
         points, normals, jacobians = surface.get_data(uu, vv)
         
         # 2. 计算 dP/du (用于 alpha 计算)
-        eps = du * 1e-4
-        p_plus = surface.evaluate(uu + eps, vv)
-        p_minus = surface.evaluate(uu - eps, vv)
-        dP_du = (p_plus - p_minus) / (2 * eps)
-        
-        return CachedMeshData(points, normals, jacobians, dP_du, du, dv)
+        eps_u = du * 1e-4
+        p_plus_u = surface.evaluate(uu + eps_u, vv)
+        p_minus_u = surface.evaluate(uu - eps_u, vv)
+        dP_du = (p_plus_u - p_minus_u) / (2 * eps_u)
+
+        # 3. 计算 dP/dv (用于 beta 计算 - 双向 sinc 校正)
+        eps_v = dv * 1e-4
+        p_plus_v = surface.evaluate(uu, vv + eps_v)
+        p_minus_v = surface.evaluate(uu, vv - eps_v)
+        dP_dv = (p_plus_v - p_minus_v) / (2 * eps_v)
+
+        return CachedMeshData(points, normals, jacobians, dP_du, dP_dv, du, dv)
 
     def integrate_cached(self, cached_data, wave):
         """
         使用预计算的 CachedMeshData 进行积分。
         此方法可在子进程调用，无 SWIG 依赖。
+
+        采用相位稳定化技术：使用参考点将相位值控制在较小范围内，
+        避免高频/大目标时 exp(i·phase) 的数值精度问题。
         """
         points = cached_data.points
         normals = cached_data.normals
         jacobians = cached_data.jacobians
         dP_du = cached_data.dP_du
+        dP_dv = cached_data.dP_dv
         du = cached_data.du
         dv = cached_data.dv
-        
+
         k_vec = wave.k_vector
         k_dir = wave.k_dir
-        
-        # 相位
-        phase = 2.0 * np.sum(points * k_vec, axis=-1)
-        
-        # Alpha (d_phase/du)
-        # alpha = d(2 * P . k) / du = 2 * (dP/du . k)
-        alpha = 2.0 * np.sum(dP_du * k_vec, axis=-1)
-        
+
+        # 相位稳定化：选择网格中心作为参考点
+        # 对于大目标/高频，直接计算的 phase 可能是几千弧度，导致精度下降
+        nv, nu = points.shape[:2]
+        ref_point = points[nv // 2, nu // 2]  # 网格中心点
+        phase_ref = 2.0 * np.sum(ref_point * k_vec)
+
+        # 计算相对相位（小量，通常在 [-几十, +几十] 弧度范围内）
+        phase_local = 2.0 * np.sum((points - ref_point) * k_vec, axis=-1)
+
         # 照射检测
         n_dot_k = np.sum(normals * k_dir, axis=-1)
         lit_mask = n_dot_k < 0
         illumination_factor = -n_dot_k
 
-        # Ribbon 积分
-        sinc_term = np.sinc(alpha * du / (2.0 * np.pi))
+        # 根据 sinc_mode 应用不同的校正
+        if self.sinc_mode == 'none':
+            # 纯离散 PO，无校正
+            sinc_factor = 1.0
+        elif self.sinc_mode == 'u_only':
+            # 仅 u 方向 sinc 校正
+            alpha = 2.0 * np.sum(dP_du * k_vec, axis=-1)
+            sinc_factor = np.sinc(alpha * du / (2.0 * np.pi))
+        else:  # 'dual'
+            # 双向 sinc 校正
+            alpha = 2.0 * np.sum(dP_du * k_vec, axis=-1)
+            beta = 2.0 * np.sum(dP_dv * k_vec, axis=-1)
+            sinc_u = np.sinc(alpha * du / (2.0 * np.pi))
+            sinc_v = np.sinc(beta * dv / (2.0 * np.pi))
+            sinc_factor = sinc_u * sinc_v
 
         contributions = (illumination_factor * jacobians *
-                        np.exp(1j * phase) *
-                        sinc_term *
+                        np.exp(1j * phase_local) *
+                        sinc_factor *
                         du * dv)
 
-        return np.sum(contributions[lit_mask])
+        # 最终结果乘回全局相位因子
+        return np.sum(contributions[lit_mask]) * np.exp(1j * phase_ref)
 
     def integrate_surface(self, surface, wave, samples_per_lambda=None):
         """(旧接口) 直接计算，不缓存"""
@@ -561,3 +607,244 @@ class RCSAnalyzer:
 
         except Exception as e:
             raise RuntimeError(f"2D并行计算致命错误: {e}")
+
+
+# =============================================================================
+# 真正的 Ribbon 积分器
+# =============================================================================
+
+class TrueRibbonIntegrator:
+    """
+    真正的 Ribbon 积分器：v 方向离散，u 方向自适应 Gauss 积分
+
+    与离散 PO 的区别：
+    - 离散 PO: 两个方向都离散为网格点，用矩形法则求和
+    - True Ribbon: v 方向离散为 nv 条 ribbon，每条 ribbon 沿 u 方向
+                   使用自适应分段 Gauss 积分
+
+    关键改进：
+    - 自适应分段：将 u 区间分成多个子区间，确保每个子区间内相位变化 < π
+    - 这样 Gauss 积分在每个子区间内都能精确工作
+
+    参数:
+        nv: v 方向 ribbon 数量（可选，自动估算）
+        n_gauss: 每个子区间的 Gauss 积分点数（默认 8）
+        samples_per_lambda: 每波长采样数，用于自动估算 nv
+        max_phase_per_segment: 每个子区间最大相位变化（默认 π/2）
+    """
+
+    # Gauss-Legendre 节点和权重（预计算）
+    _gauss_cache = {}
+
+    def __init__(self, nv=None, n_gauss=8, samples_per_lambda=8, max_phase_per_segment=np.pi/2):
+        self.nv_manual = nv
+        self.n_gauss = n_gauss
+        self.samples_per_lambda = samples_per_lambda
+        self.max_phase_per_segment = max_phase_per_segment
+
+        # 预计算 Gauss 节点和权重
+        if n_gauss not in self._gauss_cache:
+            nodes, weights = np.polynomial.legendre.leggauss(n_gauss)
+            self._gauss_cache[n_gauss] = (nodes, weights)
+        self.gauss_nodes, self.gauss_weights = self._gauss_cache[n_gauss]
+
+    def _estimate_nv(self, surface, wavelength):
+        """估算 v 方向需要的 ribbon 数量"""
+        if self.nv_manual is not None:
+            return self.nv_manual
+
+        u_min, u_max = surface.u_domain
+        v_min, v_max = surface.v_domain
+
+        # 沿 v 方向采样，估算物理长度
+        u_mid = (u_min + u_max) / 2
+        v_samples = np.linspace(v_min, v_max, 20)
+        p_v = surface.evaluate(u_mid, v_samples)
+        dist_v = np.sum(np.sqrt(np.sum(np.diff(p_v, axis=0)**2, axis=-1)))
+
+        nv = int(max(10, (dist_v / wavelength) * self.samples_per_lambda))
+        return nv
+
+    def _estimate_u_segments(self, surface, wave, v_center):
+        """估算 u 方向需要的分段数，基于相位变化范围"""
+        u_min, u_max = surface.u_domain
+        k_vec = wave.k_vector
+
+        # 采样 u 方向的多个点，估算相位变化范围
+        n_sample = 50
+        u_samples = np.linspace(u_min, u_max, n_sample)
+        v_arr = np.full_like(u_samples, v_center)
+        points = surface.evaluate(u_samples, v_arr)
+
+        # 计算相位
+        phases = 2.0 * np.sum(points * k_vec, axis=-1)
+
+        # 使用相位的最大变化范围（不是端点差）
+        # 对于周期性曲面（如圆柱），端点差可能很小但实际变化很大
+        phase_max = np.max(phases)
+        phase_min = np.min(phases)
+        total_phase_range = phase_max - phase_min
+
+        # 需要多少段才能使每段相位变化 < max_phase
+        n_segments = int(np.ceil(total_phase_range / self.max_phase_per_segment))
+        n_segments = max(1, n_segments)
+
+        return n_segments
+
+    def _gauss_integrate_segment(self, surface, wave, v_center, u_start, u_end, ref_point):
+        """在 [u_start, u_end] 区间上做 Gauss 积分"""
+        k_vec = wave.k_vector
+        k_dir = wave.k_dir
+
+        # 将 [-1, 1] 映射到 [u_start, u_end]
+        u_scale = (u_end - u_start) / 2
+        u_shift = (u_end + u_start) / 2
+        u_arr = self.gauss_nodes * u_scale + u_shift
+        v_arr = np.full_like(u_arr, v_center)
+
+        # 获取几何数据
+        points, normals, jacobians = surface.get_data(u_arr, v_arr)
+
+        # 照射检测
+        n_dot_k = np.sum(normals * k_dir, axis=-1)
+        illumination = np.where(n_dot_k < 0, -n_dot_k, 0.0)
+
+        # 相位（相对于参考点）
+        phase_local = 2.0 * np.sum((points - ref_point) * k_vec, axis=-1)
+
+        # Gauss 积分
+        integrand = illumination * jacobians * np.exp(1j * phase_local)
+        return np.sum(self.gauss_weights * integrand) * u_scale
+
+    def integrate_surface(self, surface, wave, samples_per_lambda=None):
+        """
+        对曲面进行 Ribbon 积分
+
+        对于每条 ribbon (固定 v)，沿 u 方向做自适应分段 Gauss 积分。
+        """
+        spl = samples_per_lambda if samples_per_lambda is not None else self.samples_per_lambda
+        nv = self._estimate_nv(surface, wave.wavelength)
+
+        u_min, u_max = surface.u_domain
+        v_min, v_max = surface.v_domain
+
+        dv = (v_max - v_min) / nv
+        v_centers = np.linspace(v_min + dv/2, v_max - dv/2, nv)
+
+        k_vec = wave.k_vector
+
+        # 相位稳定化：使用曲面中心作为参考点
+        u_mid = (u_min + u_max) / 2
+        v_mid = (v_min + v_max) / 2
+        ref_point = surface.evaluate(u_mid, v_mid)
+        phase_ref = 2.0 * np.dot(ref_point.flatten(), k_vec)
+
+        total_integral = 0j
+        self._total_segments = 0  # 用于统计
+
+        for v_c in v_centers:
+            # 估算这条 ribbon 需要多少 u 分段
+            n_segments = self._estimate_u_segments(surface, wave, v_c)
+            self._total_segments += n_segments
+
+            # 分段积分
+            u_edges = np.linspace(u_min, u_max, n_segments + 1)
+            ribbon_integral = 0j
+
+            for i in range(n_segments):
+                seg_integral = self._gauss_integrate_segment(
+                    surface, wave, v_c,
+                    u_edges[i], u_edges[i+1],
+                    ref_point
+                )
+                ribbon_integral += seg_integral
+
+            total_integral += ribbon_integral * dv
+
+        return total_integral * np.exp(1j * phase_ref)
+
+    def get_mesh_size(self, surface, wave, samples_per_lambda=None):
+        """返回网格尺寸估算 (n_gauss * avg_segments, nv)"""
+        spl = samples_per_lambda if samples_per_lambda is not None else self.samples_per_lambda
+        nv = self._estimate_nv(surface, wave.wavelength)
+
+        # 估算平均分段数
+        u_min, u_max = surface.u_domain
+        v_min, v_max = surface.v_domain
+        v_mid = (v_min + v_max) / 2
+        avg_segments = self._estimate_u_segments(surface, wave, v_mid)
+
+        return self.n_gauss * avg_segments, nv
+
+
+# =============================================================================
+# 向后兼容别名 & 算法选择接口
+# =============================================================================
+
+# 保持向后兼容：原来的 RibbonIntegrator 现在是 DiscretePOIntegrator
+RibbonIntegrator = DiscretePOIntegrator
+
+
+# 可用算法列表
+AVAILABLE_ALGORITHMS = {
+    'discrete_po_none': {
+        'name': '离散PO (无校正)',
+        'class': DiscretePOIntegrator,
+        'kwargs': {'sinc_mode': 'none'},
+        'description': '纯离散 PO，无 sinc 校正。需要最多网格点，精度依赖网格密度。',
+    },
+    'discrete_po_sinc_u': {
+        'name': '离散PO (单向Sinc)',
+        'class': DiscretePOIntegrator,
+        'kwargs': {'sinc_mode': 'u_only'},
+        'description': '离散 PO + u方向 sinc 校正。原始 Ribbon 近似，适中精度。',
+    },
+    'discrete_po_sinc_dual': {
+        'name': '离散PO (双向Sinc)',
+        'class': DiscretePOIntegrator,
+        'kwargs': {'sinc_mode': 'dual'},
+        'description': '离散 PO + 双向 sinc 校正。最佳精度，适合斜入射场景。',
+    },
+    'true_ribbon': {
+        'name': '真Ribbon (Gauss积分)',
+        'class': TrueRibbonIntegrator,
+        'kwargs': {},
+        'description': 'v方向离散，u方向高阶Gauss积分。高效且精确，推荐使用。',
+    },
+}
+
+
+def get_integrator(algorithm='discrete_po_sinc_dual', **kwargs):
+    """
+    算法工厂函数：根据名称获取积分器实例
+
+    参数:
+        algorithm: 算法名称，可选:
+            - 'discrete_po_none': 纯离散 PO
+            - 'discrete_po_sinc_u': 单向 sinc 校正
+            - 'discrete_po_sinc_dual': 双向 sinc 校正 (默认)
+            - 'true_ribbon': 真 Ribbon (v离散 + u方向Gauss积分)
+        **kwargs: 传递给积分器的额外参数 (如 samples_per_lambda)
+
+    返回:
+        积分器实例
+    """
+    if algorithm not in AVAILABLE_ALGORITHMS:
+        raise ValueError(f"未知算法: {algorithm}. 可用: {list(AVAILABLE_ALGORITHMS.keys())}")
+
+    algo_info = AVAILABLE_ALGORITHMS[algorithm]
+    # 合并算法预设参数和用户参数（用户参数优先）
+    merged_kwargs = {**algo_info.get('kwargs', {}), **kwargs}
+    return algo_info['class'](**merged_kwargs)
+
+
+def list_algorithms():
+    """列出所有可用算法"""
+    result = []
+    for key, info in AVAILABLE_ALGORITHMS.items():
+        result.append({
+            'id': key,
+            'name': info['name'],
+            'description': info['description']
+        })
+    return result

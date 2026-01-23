@@ -27,7 +27,7 @@ from geometry.occ_surface import OCCSurface
 from geometry.step_loader import load_step_file
 from physics.wave import IncidentWave
 from physics.analytical_rcs import get_analytical_solution, compute_error_stats
-from solver.ribbon_solver import RibbonIntegrator, RCSAnalyzer
+from solver.ribbon_solver import RibbonIntegrator, RCSAnalyzer, get_integrator, list_algorithms, AVAILABLE_ALGORITHMS
 from tools.visualize_mesh import create_occ_cylinder
 from ui.plotting import VisualizationManager
 
@@ -458,6 +458,45 @@ class CEMPoGUI:
     def create_action_widgets(self, parent):
         ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=20)
 
+        # === 算法选择 ===
+        algo_frame = ttk.LabelFrame(parent, text="算法 Algorithm", padding=(10, 5))
+        algo_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(algo_frame, text="积分方法:").pack(anchor=tk.W)
+        # 默认使用双向 sinc 校正算法
+        default_algo = 'discrete_po_sinc_dual'
+        algo_choices = [(info['name'], key) for key, info in AVAILABLE_ALGORITHMS.items()]
+        self._algo_name_to_id = {name: key for name, key in algo_choices}
+        self._algo_id_to_name = {key: name for name, key in algo_choices}
+
+        self.algorithm_var = tk.StringVar(value=self._algo_id_to_name.get(default_algo, algo_choices[0][0]))
+        algo_combo = ttk.Combobox(
+            algo_frame,
+            textvariable=self.algorithm_var,
+            values=[name for name, _ in algo_choices],
+            state="readonly",
+            width=30
+        )
+        algo_combo.pack(fill=tk.X, pady=(0, 5))
+
+        # 算法描述
+        self.algo_desc_label = ttk.Label(
+            algo_frame,
+            text=AVAILABLE_ALGORITHMS[default_algo]['description'],
+            foreground="#666666",
+            font=("Microsoft YaHei UI", 8),
+            wraplength=250
+        )
+        self.algo_desc_label.pack(anchor=tk.W)
+
+        def on_algo_change(event=None):
+            display_name = self.algorithm_var.get()
+            algo_id = self._algo_name_to_id.get(display_name, default_algo)
+            desc = AVAILABLE_ALGORITHMS.get(algo_id, {}).get('description', '')
+            self.algo_desc_label.config(text=desc)
+
+        algo_combo.bind("<<ComboboxSelected>>", on_algo_change)
+
         # === 并行计算设置 ===
         parallel_frame = ttk.LabelFrame(parent, text="性能 Performance", padding=(10, 5))
         parallel_frame.pack(fill=tk.X, pady=(0, 10))
@@ -621,10 +660,12 @@ class CEMPoGUI:
         control_frame = ttk.Frame(parent, padding=10)
         control_frame.pack(side=tk.TOP, fill=tk.X)
 
-        # === 1. 计算数据源 ===
+        # === 1. 计算数据源 (左侧) ===
         calc_group = ttk.LabelFrame(control_frame, text="计算数据源 (Calculated Data)", padding=5)
         calc_group.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
 
+        # --- 数据源 A (主要) ---
+        ttk.Label(calc_group, text="数据源 A (Primary):", font=("", 9, "bold")).pack(anchor=tk.W)
         self.calc_source_var = tk.StringVar(value="current")
         
         # 选项1: 当前内存数据
@@ -632,22 +673,41 @@ class CEMPoGUI:
                             variable=self.calc_source_var, value="current")
         rb1.pack(anchor=tk.W)
         
-        # 选项2: 加载CSV
+        # 选项2: 加载CSV 1
         frame_csv = ttk.Frame(calc_group)
         frame_csv.pack(anchor=tk.W, fill=tk.X)
-        rb2 = ttk.Radiobutton(frame_csv, text="加载 CSV 文件:", 
+        rb2 = ttk.Radiobutton(frame_csv, text="加载 CSV:", 
                             variable=self.calc_source_var, value="csv")
         rb2.pack(side=tk.LEFT)
         
-        self.btn_load_calc = ttk.Button(frame_csv, text="浏览...", width=6, command=self.load_calc_csv)
+        self.btn_load_calc = ttk.Button(frame_csv, text="浏览...", width=6, command=lambda: self.load_csv_slot(1))
         self.btn_load_calc.pack(side=tk.LEFT, padx=5)
         
         self.lbl_calc_file = ttk.Label(calc_group, text="(未选择文件)", foreground="#888888", font=("", 8))
         self.lbl_calc_file.pack(anchor=tk.W, padx=20)
         
-        self.loaded_calc_result = None # 存储加载的CSV数据
+        ttk.Separator(calc_group, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
 
-        # === 2. 参考数据设置 ===
+        # --- 数据源 B (可选) ---
+        ttk.Label(calc_group, text="数据源 B (Optional Compare):", font=("", 9, "bold")).pack(anchor=tk.W)
+        
+        frame_csv2 = ttk.Frame(calc_group)
+        frame_csv2.pack(anchor=tk.W, fill=tk.X)
+        ttk.Label(frame_csv2, text="对比 CSV:").pack(side=tk.LEFT)
+        
+        self.btn_load_calc2 = ttk.Button(frame_csv2, text="浏览...", width=6, command=lambda: self.load_csv_slot(2))
+        self.btn_load_calc2.pack(side=tk.LEFT, padx=5)
+        
+        # 清除按钮
+        ttk.Button(frame_csv2, text="清除", width=4, command=self.clear_csv2).pack(side=tk.LEFT, padx=2)
+
+        self.lbl_calc_file_2 = ttk.Label(calc_group, text="(未选择 - 仅单对比)", foreground="#888888", font=("", 8))
+        self.lbl_calc_file_2.pack(anchor=tk.W, padx=20)
+
+        self.loaded_calc_result = None   # CSV 1
+        self.loaded_calc_result_2 = None # CSV 2 (Optional)
+
+        # === 2. 参考数据设置 (中间) ===
         ref_group = ttk.LabelFrame(control_frame, text="参考数据 (Reference Data)", padding=5)
         ref_group.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
 
@@ -661,7 +721,7 @@ class CEMPoGUI:
 
         # 模型 ID 和 频率
         frame_ref_params = ttk.Frame(ref_group)
-        frame_ref_params.pack(side=tk.LEFT, fill=tk.X)
+        frame_ref_params.pack(side=tk.LEFT, fill=tk.X, pady=5)
         
         ttk.Label(frame_ref_params, text="模型ID:").pack(side=tk.LEFT)
         self.comp_model_id = tk.StringVar(value="001")
@@ -673,7 +733,7 @@ class CEMPoGUI:
                                 values=["1.5G", "3G"], width=6)
         combo_freq.pack(side=tk.LEFT, padx=5)
 
-        # === 3. 操作 ===
+        # === 3. 操作 (右侧) ===
         action_group = ttk.Frame(control_frame, padding=5)
         action_group.pack(side=tk.LEFT, fill=tk.Y)
         
@@ -693,88 +753,95 @@ class CEMPoGUI:
         
         # 初始占位符
         ttk.Label(self.compare_plot_frame, 
-                text="请设置参考数据参数并点击 '执行对比'\n(需先进行一次计算以获取当前结果)",
+                text="请设置参数并点击 '执行对比'\n支持: [计算结果 A vs 参考] 或 [结果 A vs 结果 B vs 参考]",
                 foreground="#888888", justify=tk.CENTER
                 ).place(relx=0.5, rely=0.5, anchor=tk.CENTER)
 
-    def load_calc_csv(self):
-        """加载计算结果 CSV 文件"""
+    def load_csv_slot(self, slot_id):
+        """加载 CSV 文件到指定槽位 (1 或 2)"""
         file_path = filedialog.askopenfilename(
             filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
-            title="选择计算结果文件"
+            title=f"选择计算结果 CSV {slot_id}"
         )
         if not file_path:
             return
 
+        result = self._parse_csv_result(file_path)
+        if result:
+            filename = os.path.basename(file_path)
+            if slot_id == 1:
+                self.loaded_calc_result = result
+                self.lbl_calc_file.config(text=filename)
+                self.calc_source_var.set("csv") # 自动切到 CSV 模式
+            else:
+                self.loaded_calc_result_2 = result
+                self.lbl_calc_file_2.config(text=filename, foreground="#000000")
+            self.log(f"CSV {slot_id} loaded: {filename}")
+
+    def clear_csv2(self):
+        """清除数据源 B"""
+        self.loaded_calc_result_2 = None
+        self.lbl_calc_file_2.config(text="(未选择 - 仅单对比)", foreground="#888888")
+
+    def _parse_csv_result(self, file_path):
+        """解析 CSV 结果文件，返回 result_data 字典"""
         try:
             import pandas as pd
             df = pd.read_csv(file_path)
             
-            # 简单的格式检查
             required_cols_2d = {'Theta', 'Phi', 'RCS(dBsm)'}
-            
             cols = set(df.columns)
             
-            result_data = {}
-            
             if required_cols_2d.issubset(cols):
-                # 2D 数据
-                self.log(f"Detected 2D data in {os.path.basename(file_path)}")
+                # 2D 数据 pivot
+                pivot = df.pivot(index='Theta', columns='Phi', values='RCS(dBsm)')
+                # 将 dBsm 转回线性值，因为后续流程统一处理
+                # 注意：之前的 _comparison_thread 逻辑已修改为不再重复取 log
+                # 为了保持统一，这里我们直接存储 dBsm 值到 rcs_2d，
+                # 但需要标记它已经是 dB 了。
+                # 由于 _comparison_thread 里的逻辑是：calc_rcs_db = calc_result.get('rcs_2d')
+                # 并且有一个自动检测线性的补丁。
+                # 所以这里直接存 dBsm 值是安全的。
                 
-                # Pivot table to create grid
-                try:
-                    pivot = df.pivot(index='Theta', columns='Phi', values='RCS(dBsm)')
-                    # pivot 自动排序索引和列
-                    theta_deg = pivot.index.values
-                    phi_deg = pivot.columns.values
-                    rcs_db_grid = pivot.values
-                    
-                    # 转换为线性值 (因为 run_comparison 期望接收线性值并再次 log10)
-                    rcs_linear = 10**(rcs_db_grid / 10.0)
-                    
-                    result_data = {
-                        'mode': '2d',
-                        'theta_deg': theta_deg,
-                        'phi_deg': phi_deg,
-                        'rcs_2d': rcs_linear,
-                        'geo_type': 'Loaded CSV',
-                        'freq': 0 # 未知频率
-                    }
-                    
-                    self.loaded_calc_result = result_data
-                    self.lbl_calc_file.config(text=os.path.basename(file_path))
-                    self.calc_source_var.set("csv") # 自动切换到 CSV 模式
-                    self.log("Calculated data loaded successfully.")
-                    
-                except Exception as e:
-                     self.log(f"Error pivoting data: {e}")
-                     messagebox.showerror("数据错误", f"无法解析数据网格: {e}")
+                result_data = {
+                    'mode': '2d',
+                    'theta_deg': pivot.index.values,
+                    'phi_deg': pivot.columns.values,
+                    'rcs_2d': pivot.values, # 已经是 dB
+                    'geo_type': 'Loaded CSV',
+                    'freq': 0
+                }
+                return result_data
             else:
-                 messagebox.showerror("格式错误", f"CSV 文件缺少必要列。\n需要: {required_cols_2d}\n检测到: {cols}")
-                 return
+                 messagebox.showerror("格式错误", f"CSV 缺少必要列: {required_cols_2d}\n检测到: {cols}")
+                 return None
 
         except Exception as e:
-            self.log(f"Error loading CSV: {e}")
-            messagebox.showerror("错误", f"加载失败: {e}")
+            self.log(f"Error parsing CSV: {e}")
+            messagebox.showerror("CSV 解析失败", str(e))
+            return None
 
     def run_comparison(self):
         """执行对比逻辑"""
-        # 1. 确定数据源
+        # 1. 确定数据源 A
         source = self.calc_source_var.get()
-        calc_result = None
+        calc_result_1 = None
         
         if source == "current":
-            calc_result = self.last_result
-            if calc_result is None:
-                messagebox.showwarning("警告", "没有当前计算结果！\n请先在 '配置与几何' 中点击 '计算 RCS'，或选择加载 CSV。")
+            calc_result_1 = self.last_result
+            if calc_result_1 is None:
+                messagebox.showwarning("警告", "没有当前计算结果！")
                 return
         elif source == "csv":
-            calc_result = self.loaded_calc_result
-            if calc_result is None:
-                 messagebox.showwarning("警告", "尚未加载 CSV 文件！\n请点击 '浏览...' 按钮选择文件。")
+            calc_result_1 = self.loaded_calc_result
+            if calc_result_1 is None:
+                 messagebox.showwarning("警告", "尚未加载 CSV 1 文件！")
                  return
         
-        # 2. 获取参数
+        # 2. 确定数据源 B (可选)
+        calc_result_2 = self.loaded_calc_result_2
+
+        # 3. 获取参数
         data_dir = self.ref_data_dir.get()
         model_id = self.comp_model_id.get()
         freq_suffix = self.comp_freq_suffix.get()
@@ -784,14 +851,17 @@ class CEMPoGUI:
              messagebox.showerror("错误", f"数据目录不存在:\n{data_dir}")
              return
 
-        self.log(f"Starting comparison with Reference: Model={model_id}, Freq={freq_suffix}...")
+        msg = f"Starting comparison: A vs Ref"
+        if calc_result_2:
+            msg += " vs B"
+        self.log(msg + f" (Model={model_id})")
 
-        # 3. 异步执行加载和对比 (传入 calc_result)
+        # 4. 异步执行
         threading.Thread(target=self._comparison_thread, 
-                       args=(data_dir, model_id, freq_suffix, style, calc_result),
+                       args=(data_dir, model_id, freq_suffix, style, calc_result_1, calc_result_2),
                        daemon=True).start()
 
-    def _comparison_thread(self, data_dir, model_id, freq_suffix, style, calc_result):
+    def _comparison_thread(self, data_dir, model_id, freq_suffix, style, calc_result_1, calc_result_2=None):
         try:
             # 导入读取模块
             import sys
@@ -807,85 +877,90 @@ class CEMPoGUI:
                 self.root.after(0, lambda: messagebox.showerror("模块导入错误", f"无法导入 rcs_data_reader。\n详细错误: {ie}"))
                 return
 
-            # 1. 获取并处理计算数据 (calc_result)
-            self.root.after(0, lambda: self.log(f"Step 1: Processing calculated data..."))
-            if calc_result is None:
-                self.root.after(0, lambda: self.log("Error: calc_result is None"))
+            # --- 处理数据 A ---
+            self.root.after(0, lambda: self.log(f"Processing Data A..."))
+            if calc_result_1['mode'] != '2d':
+                self.root.after(0, lambda: messagebox.showwarning("模式错误", "数据 A 必须是 2D 扫描结果。"))
                 return
             
-            if calc_result['mode'] != '2d':
-                self.root.after(0, lambda: messagebox.showwarning("模式不匹配", "当前对比仅支持 2D 扫描结果。"))
-                return
+            rcs_a = calc_result_1.get('rcs_2d')
+            # 自动 dB 检测/转换
+            if np.nanmax(rcs_a) < 0.001 and np.nanmin(rcs_a) >= 0:
+                 rcs_a = 10 * np.log10(np.maximum(rcs_a, 1e-15))
+            
+            theta_a, phi_a = calc_result_1['theta_deg'], calc_result_1['phi_deg']
+
+            # --- 处理数据 B (如果有) ---
+            rcs_b = None
+            if calc_result_2:
+                self.root.after(0, lambda: self.log(f"Processing Data B..."))
+                if calc_result_2['mode'] != '2d':
+                    self.root.after(0, lambda: messagebox.showwarning("模式错误", "数据 B 必须是 2D 扫描结果。"))
+                    return
+                rcs_b = calc_result_2.get('rcs_2d')
+                if np.nanmax(rcs_b) < 0.001 and np.nanmin(rcs_b) >= 0:
+                     rcs_b = 10 * np.log10(np.maximum(rcs_b, 1e-15))
                 
-            # 核心修正：判断是否需要转换 dB。
-            # 如果是刚算出来的 last_result，solver.py 返回的是 dB。
-            # 如果是 load_calc_csv 加载的，我们也确保转成了 dB (或者保持原样)。
-            # 我们假设所有 calc_result['rcs_2d'] 都已经是 dBsm 了。
-            calc_rcs_db = calc_result.get('rcs_2d')
-            
-            # 简单验证数据范围，如果是线性值（通常>0且非常小），给予警告或自动转换
-            if np.nanmax(calc_rcs_db) < 0.001 and np.nanmin(calc_rcs_db) >= 0:
-                 # 看起来像线性值
-                 self.root.after(0, lambda: self.log("Detected linear values, converting to dB..."))
-                 calc_rcs_db = 10 * np.log10(np.maximum(calc_rcs_db, 1e-15))
+                # 简单检查 B 和 A 的网格是否一致 (如果不一致后续可视化会很难办)
+                if rcs_a.shape != rcs_b.shape:
+                    self.root.after(0, lambda: messagebox.showwarning("网格不匹配", "数据 A 和 B 的网格尺寸不一致，无法同台对比。"))
+                    return
 
-            calc_theta = calc_result['theta_deg']
-            calc_phi = calc_result['phi_deg']
-            self.root.after(0, lambda: self.log(f"Calculated data OK. Shape: {calc_rcs_db.shape}"))
-
-            # 2. 加载参考数据
-            self.root.after(0, lambda: self.log(f"Step 2: Loading reference {model_id}_{freq_suffix}..."))
+            # --- 加载参考数据 ---
+            self.root.after(0, lambda: self.log(f"Loading Reference {model_id}..."))
             try:
                 ref_data_pkg = get_adaptive_rcs_matrix(model_id, freq_suffix, data_dir, verbose=False)
             except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror("读取参考数据失败", f"无法读取参考数据:\n{e}"))
-                self.root.after(0, lambda: self.log(f"Ref Load Error: {e}"))
+                self.root.after(0, lambda: messagebox.showerror("参考数据读取失败", str(e)))
                 return
             
-            ref_rcs_db = ref_data_pkg['rcs_db']
-            ref_theta = ref_data_pkg['theta_values']
-            ref_phi = ref_data_pkg['phi_values']
-            self.root.after(0, lambda: self.log(f"Reference data OK. Shape: {ref_rcs_db.shape}"))
-
-            # 3. 检查网格是否匹配
-            if calc_rcs_db.shape != ref_rcs_db.shape:
-                msg = (f"网格尺寸不匹配 (Grid Mismatch)!\n"
-                       f"计算值 (Calculated): {calc_rcs_db.shape}\n"
-                       f"参考值 (Reference): {ref_rcs_db.shape}\n"
-                       f"请检查扫描设置中的 Theta/Phi 点数是否一致。")
+            rcs_ref = ref_data_pkg['rcs_db']
+            
+            # --- 检查网格匹配 ---
+            if rcs_a.shape != rcs_ref.shape:
+                msg = f"网格不匹配!\nA: {rcs_a.shape}, Ref: {rcs_ref.shape}"
                 self.root.after(0, lambda: messagebox.showerror("网格不匹配", msg))
-                self.root.after(0, lambda: self.log(f"Mismatch: Calc{calc_rcs_db.shape} vs Ref{ref_rcs_db.shape}"))
                 return
 
-            # 4. 计算差异和统计
-            self.root.after(0, lambda: self.log("Step 3: Calculating differences..."))
-            diff_db = calc_rcs_db - ref_rcs_db
-            
-            mse = np.nanmean(diff_db**2)
-            rmse = np.sqrt(mse)
-            mean_error = np.nanmean(diff_db)
-            
-            metrics = {
-                'mse': mse,
-                'rmse': rmse,
-                'mean_error': mean_error
-            }
+            # --- 计算指标 ---
+            def calc_metrics(diff):
+                mse = np.nanmean(diff**2)
+                return {'rmse': np.sqrt(mse), 'mean_error': np.nanmean(diff)}
 
-            # 5. 可视化
-            self.root.after(0, lambda: self.log("Step 4: Rendering comparison plots..."))
-            self.root.after(0, lambda: self.viz_manager.show_comparison_2d(
-                calc_rcs_db, ref_rcs_db, diff_db,
-                calc_theta, calc_phi, metrics, style
-            ))
+            diff_a = rcs_a - rcs_ref
+            metrics_a = calc_metrics(diff_a)
             
-            self.root.after(0, lambda: self.log(f"Comparison successful. RMSE: {rmse:.4f} dB"))
+            metrics_b = None
+            diff_b = None
+            if rcs_b is not None:
+                diff_b = rcs_b - rcs_ref
+                metrics_b = calc_metrics(diff_b)
+
+            # --- 可视化 ---
+            self.root.after(0, lambda: self.log("Rendering plots..."))
+            
+            # 如果有 B，调用双对比视图；否则调用单对比视图
+            if rcs_b is not None:
+                # 我们需要扩展 viz_manager 来支持这个
+                # 为了简单起见，我会在 plotting.py 增加 show_comparison_dual_2d
+                self.root.after(0, lambda: self.viz_manager.show_comparison_dual_2d(
+                    rcs_a, rcs_b, rcs_ref, 
+                    diff_a, diff_b,
+                    theta_a, phi_a, 
+                    metrics_a, metrics_b, style
+                ))
+            else:
+                self.root.after(0, lambda: self.viz_manager.show_comparison_2d(
+                    rcs_a, rcs_ref, diff_a,
+                    theta_a, phi_a, metrics_a, style
+                ))
+            
+            self.root.after(0, lambda: self.log("Comparison complete."))
 
         except Exception as e:
-             err_msg = str(e)
              import traceback
              traceback.print_exc()
-             self.root.after(0, lambda: messagebox.showerror("对比过程错误", f"发生未预料的错误:\n{err_msg}"))
-             self.root.after(0, lambda: self.log(f"Unexpected Error: {err_msg}"))
+             self.root.after(0, lambda: messagebox.showerror("错误", str(e)))
 
     def log(self, msg):
         self.log_text.config(state='normal')
@@ -1204,12 +1279,19 @@ class CEMPoGUI:
         self.progress_label.config(text=message)
         self.log(message)
 
+    def _get_selected_algorithm_id(self):
+        """获取当前选择的算法ID"""
+        display_name = self.algorithm_var.get()
+        return self._algo_name_to_id.get(display_name, 'discrete_po_sinc_dual')
+
     def _calc_thread(self, geo, freq, angles_rad, angles_deg, samples, geo_type, geo_params, phi_rad=0.0, parallel=False, n_workers=None):
         """1D扫描线程"""
         try:
             start_time = time.time()
-            solver = RibbonIntegrator()
+            algo_id = self._get_selected_algorithm_id()
+            solver = get_integrator(algo_id)
             analyzer = RCSAnalyzer(solver)
+            self.root.after(0, lambda: self.log(f"Using algorithm: {AVAILABLE_ALGORITHMS[algo_id]['name']}"))
 
             # 使用进度回调
             rcs = analyzer.compute_monostatic_rcs(
@@ -1251,8 +1333,10 @@ class CEMPoGUI:
         """2D扫描线程"""
         try:
             start_time = time.time()
-            solver = RibbonIntegrator()
+            algo_id = self._get_selected_algorithm_id()
+            solver = get_integrator(algo_id)
             analyzer = RCSAnalyzer(solver)
+            self.root.after(0, lambda: self.log(f"Using algorithm: {AVAILABLE_ALGORITHMS[algo_id]['name']}"))
 
             # 2D扫描
             rcs_2d = analyzer.compute_monostatic_rcs_2d(
@@ -1404,6 +1488,9 @@ class CEMPoGUI:
             try: config['invert_indices'] = self.invert_indices_var.get()
             except: pass
             
+            # 算法选择
+            config['algorithm'] = self._get_selected_algorithm_id()
+
             # 并行与对比
             config['parallel'] = self.parallel_var.get()
             config['workers'] = self.workers_var.get()
@@ -1470,6 +1557,15 @@ class CEMPoGUI:
                 if 'invert_indices' in config: self.invert_indices_var.set(config['invert_indices'])
             except: pass
             
+            # 恢复算法选择（兼容旧配置）
+            if 'algorithm' in config:
+                algo_id = config['algorithm']
+                # 向后兼容：旧的 'discrete_po' 映射到新的双向 sinc
+                if algo_id == 'discrete_po':
+                    algo_id = 'discrete_po_sinc_dual'
+                if algo_id in self._algo_id_to_name:
+                    self.algorithm_var.set(self._algo_id_to_name[algo_id])
+
             set_var(self.parallel_var, 'parallel')
             set_var(self.workers_var, 'workers')
             set_var(self.compare_analytical_var, 'compare_analytical')
