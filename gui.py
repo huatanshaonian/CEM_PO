@@ -406,18 +406,26 @@ class CEMPoGUI:
             
             self.log(f"Previewing with Freq={real_freq/1e6:.1f}MHz, Density={real_samples} pts/lambda")
 
-            # 获取当前设置的 Theta/Phi (取 Start 值作为预览方向)
+            # 获取扫描参数
             try:
-                theta_deg = self.theta_start.get()
-                phi_deg = self.phi_start.get()
+                scan_params = {
+                    'theta_start': self.theta_start.get(),
+                    'theta_end': self.theta_end.get(),
+                    'theta_n': self.theta_n.get(),
+                    'phi_start': self.phi_start.get(),
+                    'phi_end': self.phi_end.get(),
+                    'phi_n': self.phi_n.get()
+                }
             except:
-                theta_deg = 0.0
-                phi_deg = 0.0
+                scan_params = {
+                    'theta_start': 0.0, 'theta_end': 0.0, 'theta_n': 1,
+                    'phi_start': 0.0, 'phi_end': 0.0, 'phi_n': 1
+                }
 
             # 启动后台线程
             t = threading.Thread(
                 target=self._preview_step_thread,
-                args=(surfaces, real_freq, real_samples, theta_deg, phi_deg),
+                args=(surfaces, real_freq, real_samples, scan_params),
                 daemon=True
             )
             t.start()
@@ -426,7 +434,7 @@ class CEMPoGUI:
             self.log(f"STEP Load Error: {e}")
             messagebox.showerror("Error", str(e))
 
-    def _preview_step_thread(self, surfaces, freq, samples, theta_deg, phi_deg):
+    def _preview_step_thread(self, surfaces, freq, samples, scan_params):
         """后台线程：计算 STEP 预览网格数据"""
         try:
             from physics.wave import IncidentWave
@@ -465,7 +473,7 @@ class CEMPoGUI:
                 except Exception as e:
                     self.root.after(0, lambda e=e, i=i: self.log(f"Surface {i} error: {e}"))
 
-            self.root.after(0, lambda: self._do_step_preview_plot(mesh_data_list, total_points, theta_deg, phi_deg))
+            self.root.after(0, lambda: self._do_step_preview_plot(mesh_data_list, total_points, scan_params))
 
         except Exception as e:
             self.root.after(0, lambda: self.log(f"Preview Error: {e}"))
@@ -546,11 +554,13 @@ class CEMPoGUI:
             fig.canvas.draw_idle()
         fig.canvas.mpl_connect('scroll_event', on_scroll)
 
-    def _do_step_preview_plot(self, mesh_data_list, total_points, theta_deg=0.0, phi_deg=0.0):
+    def _do_step_preview_plot(self, mesh_data_list, total_points, scan_params=None):
         """主线程：在嵌入式窗口中绘制 STEP 预览"""
         try:
             from physics.wave import IncidentWave  # Ensure import
-            
+            if scan_params is None:
+                scan_params = {}
+
             fig, canvas, win = self._create_plot_window(f"STEP Preview ({len(mesh_data_list)} surfaces)")
             ax = fig.add_subplot(111, projection='3d')
 
@@ -587,43 +597,92 @@ class CEMPoGUI:
                      ax.text(cx, cy, cz, label, fontsize=8, fontweight='bold',
                              color='black', alpha=0.6)
 
-            # --- 绘制入射波方向箭头 ---
-            if all_points_list:
+            # --- 绘制所有扫描方向箭头 ---
+            if all_points_list and scan_params:
                 all_points = np.vstack(all_points_list)
                 
-                # 计算包围盒中心和尺寸
+                # 计算包围盒
                 min_xyz = np.min(all_points, axis=0)
                 max_xyz = np.max(all_points, axis=0)
                 center = (min_xyz + max_xyz) / 2.0
                 diag = np.linalg.norm(max_xyz - min_xyz)
                 radius = diag / 2.0 if diag > 0 else 1.0
 
-                # 计算入射波向量
-                # 频率任意，我们只需要方向
-                wave = IncidentWave(1e9, np.radians(theta_deg), np.radians(phi_deg))
-                k_dir = wave.k_dir # 指向原点/传播方向
+                # 生成扫描角度
+                theta_s = scan_params.get('theta_start', 0)
+                theta_e = scan_params.get('theta_end', 0)
+                theta_n = scan_params.get('theta_n', 1)
                 
-                # 箭头起点：在物体 "前方" (相对于波源)
-                # k_dir 指向传播方向。波源在 -k_dir 方向。
-                # 我们希望箭头显示波的行进。
-                # 将箭头放在物体外侧，指向物体。
-                arrow_len = radius * 0.8
-                arrow_start = center - k_dir * (radius * 1.5)
+                phi_s = scan_params.get('phi_start', 0)
+                phi_e = scan_params.get('phi_end', 0)
+                phi_n = scan_params.get('phi_n', 1)
                 
-                # 绘制箭头 (红色粗箭头)
-                ax.quiver(arrow_start[0], arrow_start[1], arrow_start[2],
-                          k_dir[0] * arrow_len, k_dir[1] * arrow_len, k_dir[2] * arrow_len,
-                          color='red', linewidth=3, arrow_length_ratio=0.3)
+                thetas = np.linspace(theta_s, theta_e, theta_n)
+                phis = np.linspace(phi_s, phi_e, max(1, phi_n))
                 
-                # 添加文本标签
-                text_pos = arrow_start - k_dir * (radius * 0.2)
-                ax.text(text_pos[0], text_pos[1], text_pos[2], 
-                        f"Incident Wave\n(Theta={theta_deg}°, Phi={phi_deg}°)", 
-                        color='red', fontweight='bold', fontsize=10, ha='center')
+                scan_directions = []
+                
+                if phi_n > 1: # 2D 扫描: Meshgrid
+                    T, P = np.meshgrid(thetas, phis)
+                    scan_directions = list(zip(T.flatten(), P.flatten()))
+                    scan_mode = "2D Scan"
+                else: # 1D 扫描: 遍历 Theta, Phi 固定
+                    # 注意：如果 phi_n=1, phis 只有一个值
+                    for t in thetas:
+                        for p in phis:
+                            scan_directions.append((t, p))
+                    scan_mode = "1D Scan"
 
-                # 将箭头相关点加入到 limits 计算中，防止被裁剪
-                # arrow_end = arrow_start + k_dir * arrow_len
-                # all_points = np.vstack([all_points, arrow_start, arrow_end])
+                # 限制最大显示数量，避免卡顿
+                max_arrows = 500
+                total_dirs = len(scan_directions)
+                step = 1
+                if total_dirs > max_arrows:
+                    step = total_dirs // max_arrows + 1
+                    self.log(f"Showing {total_dirs} directions (subsampled by {step})")
+                
+                # 准备 quiver 数据
+                Xq, Yq, Zq, Uq, Vq, Wq = [], [], [], [], [], []
+                
+                arrow_len = radius * 0.15  # 保持精致的小尺寸
+                dist_from_center = radius * 2.5 # 移到更远的位置，不干扰模型观察
+                
+                for i in range(0, total_dirs, step):
+                    t_deg, p_deg = scan_directions[i]
+                    wave = IncidentWave(1e9, np.radians(t_deg), np.radians(p_deg))
+                    k = wave.k_dir # 传播方向
+                    
+                    # 箭头起点
+                    start = center - k * dist_from_center
+                    
+                    Xq.append(start[0])
+                    Yq.append(start[1])
+                    Zq.append(start[2])
+                    Uq.append(k[0] * arrow_len)
+                    Vq.append(k[1] * arrow_len)
+                    Wq.append(k[2] * arrow_len)
+
+                # 批量绘制箭头 (更细、更短、比例更协调)
+                ax.quiver(Xq, Yq, Zq, Uq, Vq, Wq, color='#FF8C00', linewidth=0.6, 
+                          arrow_length_ratio=0.3, alpha=0.8)
+                
+                # 添加总体标签
+                ax.text2D(0.05, 0.95, f"{scan_mode}\nDirs: {total_dirs}\nRange: T[{theta_s:.0f}:{theta_e:.0f}], P[{phi_s:.0f}:{phi_e:.0f}]", 
+                          transform=ax.transAxes, color='#FF8C00', fontsize=10, fontweight='bold',
+                          bbox=dict(facecolor='white', alpha=0.8, edgecolor='none', pad=3))
+
+            # 自动设置坐标轴范围 (Equal Aspect Ratio)
+            self._set_axes_equal(ax, all_points)
+
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+            
+            canvas.draw()
+            self.log(f"STEP Preview: {len(mesh_data_list)} surfaces, {total_points} points")
+
+        except Exception as e:
+            self.log(f"Plot Error: {e}")
 
             # 自动设置坐标轴范围 (Equal Aspect Ratio)
             # 使用包含箭头的数据重新计算可能更好，或者保持仅物体居中
