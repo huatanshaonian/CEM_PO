@@ -229,6 +229,12 @@ def plot_results(theta_deg, rcs_analytical, results, title, algorithms):
     try:
         import matplotlib.pyplot as plt
 
+        # 设置中文字体
+        plt.rcParams['font.family'] = ['Microsoft YaHei', 'SimHei', 'sans-serif']
+        plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'DejaVu Sans']
+        plt.rcParams['axes.unicode_minus'] = False
+        plt.rcParams['font.size'] = 10
+
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
         # 左图：RCS 曲线
