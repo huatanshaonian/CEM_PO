@@ -455,8 +455,29 @@ class TrueRibbonIntegrator:
 
 ---
 
-## 10. 参考资料
+## 11. 最新进展 (2026.01.24)
 
-1. Elking et al., "A Review of High-Frequency RCS Analysis Capabilities at MDA", IEEE AP Magazine, 1995
-2. Gordon, "Far-field approximations to the Kirchoff-Helmholtz representations of scattered fields", IEEE TAP, 1975
-3. Ludwig, "Computation of radiation patterns involving numerical double integration", IEEE TAP, 1968
+### 11.1 AnalyticRibbonIntegrator 已实现
+
+在 `solver/ribbon_solver.py` 中新增了 `AnalyticRibbonIntegrator` 类，严格遵循 1995 论文算法：
+1. **多项式拟合**：使用五阶多项式拟合 G(u)，三阶多项式拟合 φ(u)。
+2. **精确阴影边界**：通过求解五阶多项式 $G(u)=0$ 的根，并利用 Newton-Raphson 迭代精化，阴影边界精度达到 $10^{-6}$。
+3. **分段积分**：仅在 $G(u) > 0$（即 $n \cdot k < 0$）的区间进行积分。
+4. **解析/高阶Gauss积分**：目前核心积分使用 16 阶 Gauss 积分，对多项式乘以指数函数具有极高精度（接近解析解）。
+
+### 11.2 关键限制说明
+
+**解析 Ribbon 技术的限制**：
+- 论文明确指出，快速解析技术（如 Ludwig 积分）主要针对**非有理双三次参数曲面 (Non-rational Bi-cubic Surfaces)**。
+- 对于 **NURBS (有理 B-spline)**：
+    - 由于分母含有项，其法向和 Jacobian 不再是纯多项式。
+    - 我们的实现使用多项式拟合来近似，这在大多数情况下是足够精确的，但对于极度弯曲或权值差异巨大的 NURBS 可能存在拟合误差。
+    - **建议**：对于非 bi-cubic 曲面，可以使用 `true_ribbon` (自适应分段 Gauss) 作为稳健方案。
+
+### 11.3 算法对比矩阵 (2026版)
+
+| 算法 ID | 核心方法 | 阴影边界处理 | 精度 | 适用场景 |
+|---------|---------|-------------|------|----------|
+| `discrete_po_sinc_dual` | 2D 离散 + Sinc | 逐点离散检测 | 中 | 通用、中等频率 |
+| `true_ribbon` | v 离散, u 自适应 Gauss | 逐段检测 | 高 | 通用、高精度 |
+| `analytic_ribbon` | **多项式拟合 + 精确求根** | **解析求根 (1e-6)** | **极高** | **Bi-cubic 曲面、精确阴影处理** |

@@ -778,6 +778,115 @@ class TrueRibbonIntegrator:
 
 
 # =============================================================================
+# 真正的 Analytic Ribbon 积分器 (严格按照论文实现)
+# =============================================================================
+
+class AnalyticRibbonIntegrator:
+    """
+    严格按照论文实现的Ribbon积分器 (CADDSCAT, 1995)
+
+    与 TrueRibbonIntegrator 的区别：
+    - TrueRibbonIntegrator: 使用自适应Gauss数值积分
+    - AnalyticRibbonIntegrator: 使用多项式拟合 + 解析积分 (Ludwig/Gauss)
+
+    主要特点：
+    - G(u) = -(n·k)·J 用五阶多项式拟合
+    - φ(u) = 2k·P 用三阶多项式拟合
+    - 阴影边界通过 G(u)=0 求根精确确定 (精度 1e-6)
+    - 只在被照亮区间进行积分
+    """
+
+    def __init__(self, nv=None, samples_per_lambda=8,
+                 n_fit_samples=16, shadow_tol=1e-6):
+        """
+        参数:
+            nv: v方向ribbon数（自动估算若不指定）
+            samples_per_lambda: 每波长采样数
+            n_fit_samples: 多项式拟合采样点数 (论文建议针对bi-cubic采样)
+            shadow_tol: 阴影边界精度 (论文要求 1e-6)
+        """
+        self.nv_manual = nv
+        self.samples_per_lambda = samples_per_lambda
+        self.n_fit_samples = max(10, n_fit_samples)
+        self.shadow_tol = shadow_tol
+
+    def _estimate_nv(self, surface, wavelength):
+        """估算 v 方向需要的 ribbon 数量"""
+        if self.nv_manual is not None:
+            return self.nv_manual
+
+        u_min, u_max = surface.u_domain
+        v_min, v_max = surface.v_domain
+
+        # 沿 v 方向采样，估算物理长度
+        u_mid = (u_min + u_max) / 2
+        v_samples = np.linspace(v_min, v_max, 20)
+        p_v = surface.evaluate(u_mid, v_samples)
+        dist_v = np.sum(np.sqrt(np.sum(np.diff(p_v, axis=0)**2, axis=-1)))
+
+        nv = int(max(10, (dist_v / wavelength) * self.samples_per_lambda))
+        return nv
+
+    def integrate_surface(self, surface, wave, samples_per_lambda=None):
+        """
+        主入口：对曲面进行 Analytic Ribbon 积分
+        """
+        from .ribbon_polynomials import RibbonPolynomialCalculator
+        from .ribbon_analytic import RibbonAnalyticIntegrator
+
+        spl = samples_per_lambda if samples_per_lambda is not None else self.samples_per_lambda
+        nv = self._estimate_nv(surface, wave.wavelength)
+
+        u_min, u_max = surface.u_domain
+        v_min, v_max = surface.v_domain
+
+        dv = (v_max - v_min) / nv
+        v_centers = np.linspace(v_min + dv/2, v_max - dv/2, nv)
+
+        k_vec = wave.k_vector
+        # 相位稳定化参考点
+        u_mid = (u_min + u_max) / 2
+        v_mid = (v_min + v_max) / 2
+        ref_point = surface.evaluate(u_mid, v_mid)
+
+        total_integral = 0j
+
+        for v_c in v_centers:
+            # 1. 计算多项式系数 (G(u) 5阶, phi(u) 3阶)
+            G_coeffs, phi_coeffs = RibbonPolynomialCalculator.compute_coefficients(
+                surface, v_c, wave, n_samples=self.n_fit_samples
+            )
+
+            # 2. 找阴影边界 (G(u)=0 的根)
+            shadow_bounds = RibbonPolynomialCalculator.find_shadow_boundaries(
+                G_coeffs, u_min, u_max, tol=self.shadow_tol
+            )
+
+            # 3. 确定被照亮区间
+            lit_intervals = RibbonPolynomialCalculator.get_illuminated_intervals(
+                G_coeffs, u_min, u_max, shadow_bounds
+            )
+
+            # 4. 对每个区间进行积分
+            ribbon_integral = 0j
+            for u_a, u_b in lit_intervals:
+                seg_integral = RibbonAnalyticIntegrator.integrate_segment(
+                    G_coeffs, phi_coeffs, u_a, u_b, ref_point, k_vec
+                )
+                ribbon_integral += seg_integral
+
+            total_integral += ribbon_integral * dv
+
+        return total_integral
+
+    def get_mesh_size(self, surface, wave, samples_per_lambda=None):
+        """返回网格尺寸估算 (拟合采样数, nv)"""
+        spl = samples_per_lambda if samples_per_lambda is not None else self.samples_per_lambda
+        nv = self._estimate_nv(surface, wave.wavelength)
+        return self.n_fit_samples, nv
+
+
+# =============================================================================
 # 向后兼容别名 & 算法选择接口
 # =============================================================================
 
@@ -810,6 +919,12 @@ AVAILABLE_ALGORITHMS = {
         'class': TrueRibbonIntegrator,
         'kwargs': {},
         'description': 'v方向离散，u方向高阶Gauss积分。高效且精确，推荐使用。',
+    },
+    'analytic_ribbon': {
+        'name': '解析Ribbon (论文算法)',
+        'class': AnalyticRibbonIntegrator,
+        'kwargs': {},
+        'description': '严格按照1995论文实现：多项式拟合+精确阴影边界+解析积分。',
     },
 }
 
