@@ -914,11 +914,11 @@ AVAILABLE_ALGORITHMS = {
         'kwargs': {'sinc_mode': 'dual'},
         'description': '离散 PO + 双向 sinc 校正。最佳精度，适合斜入射场景。',
     },
-    'true_ribbon': {
-        'name': '真Ribbon (Gauss积分)',
+    'gauss_ribbon': {
+        'name': 'Gauss-Ribbon (自适应)',
         'class': TrueRibbonIntegrator,
         'kwargs': {},
-        'description': 'v方向离散，u方向高阶Gauss积分。高效且精确，推荐使用。',
+        'description': 'v方向离散，u方向自适应Gauss积分。高效且精确，推荐用于非多项式曲面。',
     },
     'analytic_ribbon': {
         'name': '解析Ribbon (论文算法)',
@@ -938,8 +938,8 @@ def get_integrator(algorithm='discrete_po_sinc_dual', **kwargs):
             - 'discrete_po_none': 纯离散 PO
             - 'discrete_po_sinc_u': 单向 sinc 校正
             - 'discrete_po_sinc_dual': 双向 sinc 校正 (默认)
-            - 'true_ribbon': 真 Ribbon (v离散 + u方向Gauss积分)
-        **kwargs: 传递给积分器的额外参数 (如 samples_per_lambda)
+            - 'gauss_ribbon': Gauss Ribbon (v离散 + u方向Gauss积分)
+            - 'analytic_ribbon': 解析 Ribbon (多项式拟合)
 
     返回:
         积分器实例
