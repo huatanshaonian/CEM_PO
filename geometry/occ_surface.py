@@ -243,3 +243,112 @@ class OCCFaceSurface(Surface):
             exp.Next()
 
         return edges_data
+
+    def get_edge_by_index(self, index, n_samples=40):
+        """
+        根据索引获取特定的边，并进行离散化采样
+        
+        参数:
+            index: 边的局部索引 (0-based)
+            n_samples: 采样点数
+            
+        返回:
+            points: numpy array (n_samples, 3) 包含边上的有序点序列
+        """
+        exp = TopExp_Explorer(self.face, TopAbs_EDGE)
+        current_idx = 0
+        while exp.More():
+            if current_idx == index:
+                edge = topods.Edge(exp.Current())
+                curve = BRepAdaptor_Curve(edge)
+                
+                t_min = curve.FirstParameter()
+                t_max = curve.LastParameter()
+                
+                # 均匀参数采样
+                t_vals = np.linspace(t_min, t_max, n_samples)
+                points = []
+                for t in t_vals:
+                    p = curve.Value(t)
+                    points.append([p.X() * self.scale, p.Y() * self.scale, p.Z() * self.scale])
+                
+                return np.array(points)
+                
+            current_idx += 1
+            exp.Next()
+            
+        raise IndexError(f"Edge index {index} out of range (max {current_idx-1})")
+
+    def get_edge_by_index_with_normals(self, index, n_samples=40):
+        """
+        获取边缘的采样点及其对应的面法向
+
+        参数:
+            index: 边的局部索引 (0-based)
+            n_samples: 采样点数
+
+        返回:
+            points: numpy array (n_samples, 3) 边上的有序点序列
+            normals: numpy array (n_samples, 3) 每个点对应的面法向
+        """
+        from OCC.Core.BRep import BRep_Tool
+        from OCC.Core.Geom2dAdaptor import Geom2dAdaptor_Curve
+
+        exp = TopExp_Explorer(self.face, TopAbs_EDGE)
+        current_idx = 0
+        while exp.More():
+            if current_idx == index:
+                edge = topods.Edge(exp.Current())
+
+                # 获取边缘的3D曲线
+                curve = BRepAdaptor_Curve(edge)
+                t_min = curve.FirstParameter()
+                t_max = curve.LastParameter()
+
+                # 尝试获取PCurve（边缘在面参数空间中的曲线）
+                pcurve, first, last = BRep_Tool.CurveOnSurface(edge, self.face)
+                has_pcurve = pcurve is not None
+
+                # 均匀参数采样
+                t_vals = np.linspace(t_min, t_max, n_samples)
+                points = []
+                normals = []
+
+                # 创建SLProps对象用于计算法向
+                props = BRepLProp_SLProps(self.adaptor, 1, 1e-6)
+
+                for i, t in enumerate(t_vals):
+                    # 获取3D点
+                    p = curve.Value(t)
+                    points.append([p.X() * self.scale, p.Y() * self.scale, p.Z() * self.scale])
+
+                    # 获取法向
+                    if has_pcurve:
+                        # 通过PCurve获取参数坐标
+                        # 需要将t映射到PCurve的参数范围
+                        t_pcurve = first + (t - t_min) / (t_max - t_min) * (last - first)
+                        p2d = pcurve.Value(t_pcurve)
+                        u, v = p2d.X(), p2d.Y()
+                    else:
+                        # 如果没有PCurve，使用面中心的法向
+                        u = (self.u_min + self.u_max) / 2
+                        v = (self.v_min + self.v_max) / 2
+
+                    props.SetParameters(u, v)
+                    if props.IsNormalDefined():
+                        n = props.Normal()
+                        normal = np.array([n.X(), n.Y(), n.Z()])
+                        if self.invert_normal:
+                            normal = -normal
+                    else:
+                        normal = np.array([0.0, 0.0, 1.0])
+
+                    normals.append(normal)
+
+                return np.array(points), np.array(normals)
+
+            current_idx += 1
+            exp.Next()
+
+        raise IndexError(f"Edge index {index} out of range (max {current_idx-1})")
+
