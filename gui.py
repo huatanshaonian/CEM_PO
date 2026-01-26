@@ -497,6 +497,37 @@ class CEMPoGUI:
 
         algo_combo.bind("<<ComboboxSelected>>", on_algo_change)
 
+        # === PTD 设置 (Edge Diffraction) ===
+        ptd_frame = ttk.LabelFrame(parent, text="PTD 设置 (Edge Diffraction)", padding=(10, 5))
+        ptd_frame.pack(fill=tk.X, pady=(0, 10))
+
+        self.ptd_enabled_var = tk.BooleanVar(value=False)
+        def toggle_ptd():
+            if self.ptd_enabled_var.get():
+                self.ptd_entry.configure(state='normal')
+            else:
+                self.ptd_entry.configure(state='disabled')
+
+        ttk.Checkbutton(
+            ptd_frame,
+            text="启用 PTD (Enable PTD)",
+            variable=self.ptd_enabled_var,
+            command=toggle_ptd
+        ).pack(anchor=tk.W)
+
+        ttk.Label(ptd_frame, text="边缘列表 (Edges, e.g. F0E1,F1E2):").pack(anchor=tk.W, pady=(5, 0))
+        self.ptd_edges_var = tk.StringVar(value="F0E1,F1E2,F2E3,F5E1,F6E3,F7E3")
+        self.ptd_entry = ttk.Entry(ptd_frame, textvariable=self.ptd_edges_var, state='disabled')
+        self.ptd_entry.pack(fill=tk.X, pady=(0, 5))
+
+        # 极化选择
+        pol_frame = ttk.Frame(ptd_frame)
+        pol_frame.pack(fill=tk.X, pady=(5, 0))
+        ttk.Label(pol_frame, text="极化 (Polarization):").pack(side=tk.LEFT)
+        self.pol_var = tk.StringVar(value="VV")
+        self.pol_combo = ttk.Combobox(pol_frame, textvariable=self.pol_var, values=["VV", "HH"], state="readonly", width=5)
+        self.pol_combo.pack(side=tk.LEFT, padx=5)
+
         # === 并行计算设置 ===
         parallel_frame = ttk.LabelFrame(parent, text="性能 Performance", padding=(10, 5))
         parallel_frame.pack(fill=tk.X, pady=(0, 10))
