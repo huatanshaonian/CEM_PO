@@ -115,7 +115,7 @@ class VisualizationManager:
         ax.set_zlim3d([z_middle - plot_radius, z_middle + plot_radius])
         ax.set_box_aspect((1, 1, 1))
 
-    def show_step_preview(self, mesh_data_list, total_points, scan_params=None):
+    def show_step_preview(self, mesh_data_list, total_points, scan_params=None, ptd_edges_data=None):
         """显示 STEP 模型预览，带交互式面选择侧边栏（嵌入式）"""
         try:
             if scan_params is None:
@@ -256,6 +256,23 @@ class VisualizationManager:
                 cb = ttk.Checkbutton(chk_frame, text=f"Face {idx} (#{step_id})", variable=var,
                                      command=lambda i=idx, v=var: toggle_visibility(i, v))
                 cb.pack(anchor="w", padx=5, pady=2)
+            
+            # --- 绘制 PTD 边缘 ---
+            if ptd_edges_data:
+                self.log(f"Highlighting {len(ptd_edges_data)} PTD edges")
+                for edge in ptd_edges_data:
+                    # edge 包含 'points': (N, 3) 数组
+                    pts = edge['points']
+                    
+                    # 绘制多段线
+                    ax.plot(pts[:, 0], pts[:, 1], pts[:, 2], 
+                            color='#FFFF00', linewidth=3.0, alpha=1.0, zorder=100)
+                    
+                    # 标注边缘名称 (在中点位置)
+                    mid_idx = len(pts) // 2
+                    mid = pts[mid_idx]
+                    ax.text(mid[0], mid[1], mid[2], edge['name'], 
+                           color='blue', fontsize=9, fontweight='bold', zorder=101)
 
             # 全选/全不选功能
             def select_all(state):
@@ -555,47 +572,95 @@ class VisualizationManager:
                 self.log("Error: No RCS frame available")
                 return
 
-            angles_deg = result_data['angles_deg']
+            # 获取 X 轴数据和标签 (默认 Theta)
+            angles_deg = result_data.get('x_values', result_data.get('angles_deg'))
+            x_label = result_data.get('x_label', 'Theta (deg)')
+            
             rcs = result_data['rcs']
+            
+            # 检查是否有分量
+            rcs_po = result_data.get('rcs_po')
+            rcs_ptd = result_data.get('rcs_ptd')
+            has_components = (rcs_po is not None) and (rcs_ptd is not None)
+
             freq = result_data['freq']
             geo_type = result_data['geo_type']
             geo_params = result_data['geo_params']
-            angles_rad = result_data['angles_rad']
+            angles_rad = result_data.get('angles_rad') # 仅用于解析解计算
+            polarization = result_data.get('polarization', 'VV')
 
-            fig = plt.Figure(figsize=(10, 6), dpi=100, facecolor=self.colors["bg_main"])
+            # 如果有分量，创建 3 个子图；否则 1 个
+            figsize = (10, 8) if has_components else (10, 6)
+            
+            fig = plt.Figure(figsize=figsize, dpi=100, facecolor=self.colors["bg_main"], constrained_layout=True)
             canvas = FigureCanvasTkAgg(fig, master=self.rcs_frame)
             self.rcs_canvas = canvas
 
-            ax = fig.add_subplot(111)
-            ax.plot(angles_deg, rcs, color=self.colors["accent"], linewidth=2, label='Ribbon PO (Numerical)')
+            axes = []
+            if has_components:
+                gs = fig.add_gridspec(3, 1, height_ratios=[1, 1, 1])
+                ax_total = fig.add_subplot(gs[0])
+                ax_po = fig.add_subplot(gs[1], sharex=ax_total)
+                ax_ptd = fig.add_subplot(gs[2], sharex=ax_total)
+                axes = [ax_total, ax_po, ax_ptd]
+                
+                # 绘制分量
+                ax_po.plot(angles_deg, rcs_po, color='green', linewidth=1.5, label='PO Component')
+                ax_po.set_ylabel('RCS (dBsm)')
+                ax_po.legend(loc='upper right')
+                ax_po.grid(True, linestyle='--', alpha=0.6)
+                
+                ax_ptd.plot(angles_deg, rcs_ptd, color='orange', linewidth=1.5, label=f'PTD Component ({polarization})')
+                ax_ptd.set_ylabel('RCS (dBsm)')
+                ax_ptd.set_xlabel(x_label) # 只有最下面显示标签
+                ax_ptd.legend(loc='upper right')
+                ax_ptd.grid(True, linestyle='--', alpha=0.6)
+                
+                # 隐藏中间轴标签
+                plt.setp(ax_po.get_xticklabels(), visible=False)
+                plt.setp(ax_total.get_xticklabels(), visible=False)
+                
+                main_ax = ax_total
+            else:
+                main_ax = fig.add_subplot(111)
+                main_ax.set_xlabel(x_label, fontsize=11)
 
-            if compare_analytical and geo_params:
-                analytical_type = None
-                if "Cylinder" in geo_type:
-                    analytical_type = 'cylinder'
-                elif "Plate" in geo_type:
-                    analytical_type = 'plate'
-                elif "Sphere" in geo_type:
-                    analytical_type = 'sphere'
+            # 绘制 Total (或唯一结果)
+            main_ax.plot(angles_deg, rcs, color=self.colors["accent"], linewidth=2, label=f'Total RCS (PO+PTD, {polarization})')
 
-                if analytical_type:
-                    rcs_analytical, label = get_analytical_solution(analytical_type, geo_params, freq, angles_rad)
-                    if rcs_analytical is not None:
-                        ax.plot(angles_deg, rcs_analytical, 'r--', linewidth=2, label=label)
+            # 仅当 X 轴为 Theta 时才尝试绘制解析解
+            if compare_analytical and geo_params and 'Theta' in x_label and angles_rad is not None:
+                rcs_analytical, label_analytical = get_analytical_solution(
+                    geo_type, geo_params, freq, angles_rad, polarization=polarization
+                )
+                
+                if rcs_analytical is not None:
+                    # 1. 在 Total 图上绘制
+                    main_ax.plot(angles_deg, rcs_analytical, 'r--', linewidth=1.5, label=label_analytical)
+                    
+                    # 2. 如果是 GTD 参考解，且存在 PTD 子图，也在 PTD 子图上绘制以便对比
+                    if "GTD" in label_analytical and has_components:
+                        ax_ptd.plot(angles_deg, rcs_analytical, 'r--', linewidth=1.0, alpha=0.7, label='Ref GTD (Singular)')
+                        # 更新图例以包含新加的线
+                        ax_ptd.legend(loc='upper right')
+
+                    # 如果不是 GTD，计算误差统计
+                    if "GTD" not in label_analytical:
                         stats = compute_error_stats(rcs, rcs_analytical)
                         error_text = (f"Error Stats:\n"
                                       f"  Max: {stats['max_error']:.2f} dB\n"
                                       f"  Mean: {stats['mean_error']:.2f} dB\n"
                                       f"  RMS: {stats['rms_error']:.2f} dB")
-                        ax.text(0.02, 0.98, error_text, transform=ax.transAxes, fontsize=9, va='top',
+                        main_ax.text(0.02, 0.98, error_text, transform=main_ax.transAxes, fontsize=9, va='top',
                                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-                        self.log(f"Error Stats - Max: {stats['max_error']:.2f}dB, RMS: {stats['rms_error']:.2f}dB")
+                        self.log(f"Analytical Comparison ({polarization}):")
+                        self.log(f"  Max Error: {stats['max_error']:.2f} dB")
+                        self.log(f"  RMS Error: {stats['rms_error']:.2f} dB")
 
-            ax.set_xlabel('Theta (deg)', fontsize=11)
-            ax.set_ylabel('RCS (dBsm)', fontsize=11)
-            ax.set_title(f'Monostatic RCS - {geo_type} @ {freq / 1e6:.1f} MHz', fontsize=12)
-            ax.grid(True, linestyle='--', alpha=0.6)
-            ax.legend(loc='best')
+            main_ax.set_ylabel('RCS (dBsm)', fontsize=11)
+            main_ax.set_title(f'Monostatic RCS - {geo_type} @ {freq / 1e6:.1f} MHz', fontsize=12)
+            main_ax.grid(True, linestyle='--', alpha=0.6)
+            main_ax.legend(loc='upper right')
 
             # 工具栏
             toolbar_frame = ttk.Frame(self.rcs_frame)
@@ -606,12 +671,14 @@ class VisualizationManager:
 
             canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
 
-            fig.tight_layout()
+            # fig.tight_layout() # constrained_layout handled it
             canvas.draw()
             self.log(f"1D RCS result displayed: {len(angles_deg)} angles")
 
         except Exception as e:
             self.log(f"1D RCS Plot Error: {e}")
+            import traceback
+            traceback.print_exc()
 
     def show_2d_results(self, result_data, style='contour'):
         """显示 2D RCS 结果（嵌入式）"""
@@ -627,49 +694,63 @@ class VisualizationManager:
             theta_deg = result_data['theta_deg']
             phi_deg = result_data['phi_deg']
             rcs_2d = result_data['rcs_2d']
+            
+            rcs_po = result_data.get('rcs_2d_po')
+            rcs_ptd = result_data.get('rcs_2d_ptd')
+            has_components = (rcs_po is not None) and (rcs_ptd is not None)
+            
             freq = result_data['freq']
             geo_type = result_data['geo_type']
 
-            fig = plt.Figure(figsize=(10, 7), dpi=100, facecolor=self.colors["bg_main"])
+            # 如果有分量，显示 3 个图；否则 1 个
+            figsize = (14, 6) if has_components else (10, 7)
+
+            fig = plt.Figure(figsize=figsize, dpi=100, facecolor=self.colors["bg_main"], constrained_layout=True)
             canvas = FigureCanvasTkAgg(fig, master=self.rcs_frame)
             self.rcs_canvas = canvas
 
-            ax = fig.add_subplot(111)
-            
-            # 统计信息
-            rcs_max = np.nanmax(rcs_2d)
-            rcs_min = np.nanmin(rcs_2d)
-            rcs_mean = np.nanmean(rcs_2d)
-            
-            if style == 'pixel':
-                # 使用 imshow (像素模式)
-                # 注意：imshow 的 extent 顺序是 [xmin, xmax, ymax, ymin] (注意Y轴通常是反的，但在RCS图中Theta从0到180向下)
-                # 这里我们希望 Theta 0 在上，180 在下
-                im = ax.imshow(rcs_2d, 
-                               extent=[phi_deg.min(), phi_deg.max(), theta_deg.max(), theta_deg.min()],
-                               aspect='equal', origin='upper', cmap='jet')
-                cbar = fig.colorbar(im, ax=ax, shrink=0.9, aspect=20)
-                plot_title = f'2D RCS (Pixel) - {geo_type}'
+            axes = []
+            if has_components:
+                gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 1])
+                ax_total = fig.add_subplot(gs[0])
+                ax_po = fig.add_subplot(gs[1])
+                ax_ptd = fig.add_subplot(gs[2])
+                axes = [(ax_total, rcs_2d, "Total RCS"), (ax_po, rcs_po, "PO Component"), (ax_ptd, rcs_ptd, "PTD Component")]
             else:
-                # 使用 contourf (平滑模式) - 默认
-                Theta, Phi = np.meshgrid(theta_deg, phi_deg, indexing='ij')
-                levels = np.linspace(rcs_min, rcs_max, 50)
-                contour = ax.contourf(Phi, Theta, rcs_2d, levels=levels, cmap='jet')
-                cbar = fig.colorbar(contour, ax=ax, shrink=0.9, aspect=20)
-                # 叠加等高线
-                ax.contour(Phi, Theta, rcs_2d, levels=15, colors='k', linewidths=0.3, alpha=0.5)
-                ax.invert_yaxis() # 确保 Theta 0 在上方
-                ax.set_aspect('equal')
-                plot_title = f'2D RCS (Contour) - {geo_type}'
+                ax = fig.add_subplot(111)
+                axes = [(ax, rcs_2d, f"2D RCS - {geo_type}")]
 
-            cbar.set_label('RCS (dBsm)', fontsize=11)
-            ax.set_xlabel('Phi (deg)', fontsize=11)
-            ax.set_ylabel('Theta (deg)', fontsize=11)
-            ax.set_title(f'{plot_title} @ {freq / 1e6:.1f} MHz', fontsize=12)
+            extent = [phi_deg.min(), phi_deg.max(), theta_deg.max(), theta_deg.min()]
+            Theta, Phi = np.meshgrid(theta_deg, phi_deg, indexing='ij')
 
-            stats_text = f"Stats:\nMax: {rcs_max:.2f} dBsm\nMin: {rcs_min:.2f} dBsm\nMean: {rcs_mean:.2f} dBsm"
-            ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=9, va='top',
-                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+            for ax, data, title in axes:
+                d_min, d_max = np.nanmin(data), np.nanmax(data)
+                if np.isclose(d_min, d_max):
+                    d_max = d_min + 1.0 # Ensure range for constant data
+                
+                # Check shape for contourf suitability
+                if data.shape[0] < 2 or data.shape[1] < 2:
+                    current_style = 'pixel'
+                else:
+                    current_style = style
+
+                if current_style == 'pixel':
+                    im = ax.imshow(data, extent=extent, aspect='equal', origin='upper', cmap='jet')
+                else:
+                    levels = np.linspace(d_min, d_max, 50)
+                    im = ax.contourf(Phi, Theta, data, levels=levels, cmap='jet')
+                    ax.contour(Phi, Theta, data, levels=15, colors='k', linewidths=0.3, alpha=0.3)
+                    ax.invert_yaxis()
+                    ax.set_aspect('equal')
+
+                cbar = fig.colorbar(im, ax=ax, shrink=0.7, location='bottom', pad=0.1)
+                cbar.set_label('dBsm')
+                
+                ax.set_title(f"{title}\nMax: {d_max:.1f} dBsm", fontsize=10)
+                ax.set_xlabel('Phi')
+                ax.set_ylabel('Theta')
+
+            fig.suptitle(f'Monostatic RCS @ {freq / 1e6:.1f} MHz', fontsize=12)
 
             # 工具栏
             toolbar_frame = ttk.Frame(self.rcs_frame)
@@ -680,9 +761,8 @@ class VisualizationManager:
 
             canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
 
-            fig.tight_layout()
             canvas.draw()
-            self.log(f"2D RCS displayed ({style}) - Max: {rcs_max:.2f}dBsm")
+            self.log(f"2D RCS displayed ({style})")
 
         except Exception as e:
             self.log(f"2D RCS Plot Error: {e}")
