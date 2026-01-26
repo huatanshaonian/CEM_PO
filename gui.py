@@ -973,27 +973,79 @@ class CEMPoGUI:
         """根据当前配置构建几何对象"""
         geo_type = self.geo_type_var.get()
         
+        # 1. 构建议当前的参数指纹 (用于对比是否需要重新加载)
+        current_params = {'type': geo_type}
+        
         try:
+            # 收集关键几何参数
+            if geo_type in ["Analytic Cylinder", "OCC Cylinder (NURBS)"]:
+                current_params.update({'r': self.geo_radius.get(), 'h': self.geo_height.get()})
+            elif geo_type == "Analytic Plate":
+                current_params.update({'w': self.geo_width.get(), 'h': self.geo_height.get()})
+            elif geo_type == "Analytic Sphere":
+                current_params.update({'r': self.geo_radius.get()})
+            elif geo_type == "Standard Wedge (PTD Test)":
+                current_params.update({'l': self.geo_length.get(), 'w': self.geo_width.get(), 'h': self.geo_height.get()})
+            elif geo_type == "Standard Brick (PTD Test)":
+                current_params.update({'l': self.geo_length.get(), 'w': self.geo_width.get(), 'h': self.geo_height.get()})
+            elif geo_type == "STEP File":
+                if not self.step_file_path: return None
+                # STEP 特有参数
+                step_unit = self.step_unit_var.get() if hasattr(self, 'step_unit_var') else 'mm'
+                invert_idx = self.invert_indices_var.get() if hasattr(self, 'invert_indices_var') else ''
+                current_params.update({
+                    'path': self.step_file_path,
+                    'unit': step_unit,
+                    'invert': invert_idx
+                })
+
+            # 2. 检查缓存：如果参数完全一致且几何对象存在，直接返回缓存对象 (跳过 IO)
+            if (self.current_geometry is not None and 
+                self.current_geo_params == current_params):
+                # Log only if it's a heavy STEP file to confirm cache usage
+                if geo_type == "STEP File": 
+                    pass # self.log("Using cached geometry (Skip IO).") 
+                return self.current_geometry
+
+        except Exception as e:
+            print(f"Param build error: {e}")
+            pass
+
+        # 3. 缓存未命中，开始重新构建/加载
+        try:
+            geom = None
             if geo_type == "Analytic Cylinder":
                 r = self.geo_radius.get()
                 h = self.geo_height.get()
-                return AnalyticCylinder(r, h)
-            
+                geom = AnalyticCylinder(r, h)
             elif geo_type == "Analytic Plate":
                 w = self.geo_width.get()
                 h = self.geo_height.get()
-                return AnalyticPlate(w, h)
-            
+                geom = AnalyticPlate(w, h)
             elif geo_type == "Analytic Sphere":
                 r = self.geo_radius.get()
-                return AnalyticSphere(r)
-            
+                geom = AnalyticSphere(r)
+            elif geo_type == "Standard Wedge (PTD Test)":
+                l = self.geo_length.get()
+                w = self.geo_width.get()
+                h = self.geo_height.get()
+                surfaces, ptd_id = create_analytic_wedge(l, w, h)
+                self.ptd_edges_var.set(ptd_id)
+                self.log(f"Created Analytic Wedge: L={l}, W={w}, H={h}")
+                geom = surfaces
+            elif geo_type == "Standard Brick (PTD Test)":
+                l = self.geo_length.get()
+                w = self.geo_width.get()
+                h = self.geo_height.get()
+                surfaces, ptd_id = create_analytic_brick(l, w, h)
+                self.ptd_edges_var.set(ptd_id)
+                self.log(f"Created Analytic Brick: L={l}, W={w}, H={h}")
+                geom = surfaces
             elif geo_type == "OCC Cylinder (NURBS)":
                 r = self.geo_radius.get()
                 h = self.geo_height.get()
                 occ_geom = create_occ_cylinder(r, h)
-                return OCCSurface(occ_geom)
-            
+                geom = OCCSurface(occ_geom)
             elif geo_type == "STEP File":
                 if not self.step_file_path:
                     raise ValueError("请先选择 STEP 文件")
@@ -1013,8 +1065,16 @@ class CEMPoGUI:
                 self.log(f"Loading STEP file: {self.step_file_path} (scale: {scale}, invert: {invert_indices})...")
                 surfaces = load_step_file(self.step_file_path, scale=scale, invert_indices=invert_indices)
                 self.log(f"Loaded {len(surfaces)} surfaces.")
-                return surfaces
-                
+                geom = surfaces
+
+            # 4. 更新全局几何缓存
+            if geom:
+                self.current_geometry = geom
+                self.current_geo_params = current_params
+                # 几何变了，之前的网格缓存必须作废
+                self.cached_mesh_data = None
+                self.cached_mesh_params = {}
+            return geom
         except Exception as e:
             self.log(f"Error building geometry: {str(e)}")
             messagebox.showerror("Geometry Error", str(e))
@@ -1155,29 +1215,58 @@ class CEMPoGUI:
             self.log(f"Visualization Error: {e}")
 
     def plot_multi_surface_mesh(self, surfaces, freq, samples):
-        """后台线程：计算数据并汇报进度"""
+        """
+        后台线程：生成全量网格数据。
+        优化：
+        1. 使用 'precompute_mesh' 而不是 'get_mesh_data'，这样生成的数据不仅能画图，还能直接给 Solver 用。
+        2. 将生成的 CachedMeshData 对象存入全局缓存 'self.cached_mesh_data'。
+        """
         try:
+            from physics.constants import C0
             solver = RibbonIntegrator()
+            # wave 仅用于提供波长，precompute 不依赖角度
             wave = IncidentWave(freq, 0, 0)
-
-            # 收集所有曲面的网格数据
-            mesh_data_list = []
+            wavelength = C0 / freq
+            
+            mesh_data_list = []      # 用于画图的轻量数据 (dict)
+            cached_surfaces = []     # 用于计算的重型数据 (CachedMeshData objects)
+            
             total_points = 0
             n_total = len(surfaces)
+            
+            # 记录当前计算的参数签名，用于后续校验缓存有效性
+            current_params = {
+                'freq': freq,
+                'samples': samples,
+                'surfaces_id': id(surfaces) # 绑定到当前的几何对象实例
+            }
 
             for i, surf in enumerate(surfaces):
-                points, normals, (nu, nv) = solver.get_mesh_data(surf, wave, samples)
+                # 关键修改：调用 precompute_mesh 生成全量物理数据 (points, normals, jacobians, derivatives)
+                cached_data = solver.precompute_mesh(surf, wavelength, samples)
+                cached_surfaces.append(cached_data)
+                
+                # 提取画图所需数据
+                points = cached_data.points
+                normals = cached_data.normals
+                nu, nv = points.shape[1], points.shape[0]
+                
                 total_points += nu * nv
-                mesh_data_list.append({
-                    'points': points,
-                    'normals': normals,
-                    'nu': nu,
-                    'nv': nv
-                })
+                mesh_data_list.append({'points': points, 'normals': normals, 'nu': nu, 'nv': nv})
                 
                 # 汇报进度 (降低刷新频率以减少开销)
                 if n_total < 100 or i % 5 == 0 or i == n_total - 1:
                     self._update_progress(i + 1, n_total, f"生成网格数据: {i+1}/{n_total}")
+
+            # 关键修改：将全量数据回写到 GUI 主类中进行持久化缓存
+            # 注意：在线程中直接修改 self 变量通常是不安全的，但 Python 的 GIL 和 list 赋值的原子性让这里风险可控。
+            # 为了保险，使用 after 回调到主线程更新
+            def update_cache():
+                self.cached_mesh_data = cached_surfaces
+                self.cached_mesh_params = current_params
+                # self.log("Mesh data cached for calculation.") # Optional debug log
+            
+            self.root.after(0, update_cache)
 
             # 数据计算完成，通知主线程开始绘图
             self.root.after(0, lambda: self._do_update_progress(100, "正在渲染 3D 图形 (这可能需要几秒钟)..."))
@@ -1186,9 +1275,12 @@ class CEMPoGUI:
             ))
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             self.root.after(0, lambda: self.log(f"Vis Error: {e}"))
 
     def run_calculation(self):
+        # 1. 获取几何对象 (如果之前加载过且参数没变，build_geometry 会直接返回缓存，秒开)
         geo = self.build_geometry()
         if not geo:
             return
@@ -1216,10 +1308,36 @@ class CEMPoGUI:
 
         # 判断1D还是2D扫描
         is_2d = n_phi > 1
+        
+        enable_ptd = self.ptd_enabled_var.get()
+        ptd_edge_identifiers = []
+        ptd_pol = "VV"
+        if enable_ptd:
+            raw_edges = self.ptd_edges_var.get()
+            ptd_edge_identifiers = [s.strip() for s in raw_edges.split(',') if s.strip()]
+            ptd_pol = self.pol_var.get()
 
         # 获取几何类型和参数（用于解析解）
         geo_type = self.geo_type_var.get()
         geo_params = self._get_geometry_params()
+        
+        # 2. 检查是否有现成的网格缓存
+        cached_mesh = None
+        current_algo_id = self._get_selected_algorithm_id()
+        
+        # 只有离散类算法支持复用网格缓存
+        if 'discrete_po' in current_algo_id and self.cached_mesh_data is not None:
+            # 校验缓存是否匹配当前参数
+            check_params = {
+                'freq': freq,
+                'samples': samples,
+                'surfaces_id': id(geo) # 确保是同一个几何对象实例
+            }
+            if check_params == self.cached_mesh_params:
+                cached_mesh = self.cached_mesh_data
+                self.log("🚀 Optimization: Using pre-calculated mesh from visualization cache.")
+            else:
+                pass # self.log("Cache mismatch, re-calculating mesh...")
 
         # 重置进度条
         self.progress_var.set(0)
@@ -1229,10 +1347,11 @@ class CEMPoGUI:
             self.log(f"Starting 2D scan: {n_theta}×{n_phi} angles, {freq/1e6} MHz...")
             if is_parallel:
                 self.log(f"Parallel mode enabled: {n_workers} workers")
+            if enable_ptd: self.log(f"PTD Enabled: {len(ptd_edge_identifiers)} edges ({ptd_pol})")
             
             t = threading.Thread(
                 target=self._calc_thread_2d,
-                args=(geo, freq, theta_rad, theta_deg, phi_rad, phi_deg, samples, geo_type, geo_params, is_parallel, n_workers),
+                args=(geo, freq, theta_rad, theta_deg, phi_rad, phi_deg, samples, geo_type, geo_params, is_parallel, n_workers, enable_ptd, ptd_edge_identifiers, cached_mesh, ptd_pol),
                 daemon=True
             )
             t.start()
@@ -1240,10 +1359,11 @@ class CEMPoGUI:
             self.log(f"Starting 1D scan: {n_theta} angles, {freq/1e6} MHz...")
             if is_parallel:
                 self.log(f"Parallel mode enabled: {n_workers} workers")
+            if enable_ptd: self.log(f"PTD Enabled: {len(ptd_edge_identifiers)} edges ({ptd_pol})")
 
             t = threading.Thread(
                 target=self._calc_thread,
-                args=(geo, freq, theta_rad, theta_deg, samples, geo_type, geo_params, phi_rad[0], is_parallel, n_workers),
+                args=(geo, freq, theta_rad, theta_deg, samples, geo_type, geo_params, phi_rad[0], is_parallel, n_workers, enable_ptd, ptd_edge_identifiers, cached_mesh, ptd_pol),
                 daemon=True
             )
             t.start()
