@@ -687,16 +687,24 @@ class RCSAnalyzer:
             from physics.ptd_core import compute_ptd_contribution
             compute_ptd = compute_ptd_contribution
 
+        # 检查是否为合并的大网格 (GPU 批处理模式)
+        is_merged = isinstance(geometry_data, MergedMeshData)
+
         for i, theta in enumerate(angles):
             wave = self._make_wave(wave_params['frequency'], theta, wave_params['phi'])
             
             total_I_po = 0j
-            for obj in geometry_data:
-                # 根据是否缓存选择不同的积分接口
-                if is_cached:
-                    total_I_po += self.solver.integrate_cached(obj, wave)
-                else:
-                    total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
+            
+            if is_merged:
+                # GPU 批处理模式：一次积分即可计算所有贡献
+                total_I_po = self.solver.integrate_cached(geometry_data, wave)
+            else:
+                for obj in geometry_data:
+                    # 根据是否缓存选择不同的积分接口
+                    if is_cached:
+                        total_I_po += self.solver.integrate_cached(obj, wave)
+                    else:
+                        total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
 
             total_I_ptd = 0j
             # 添加 PTD
@@ -862,9 +870,12 @@ class RCSAnalyzer:
 
         # GPU 迁移
         if gpu and is_cached:
-            if show_progress: print("  正在将几何数据迁移到 GPU...")
-            for mesh in geometry_data:
-                mesh.to_gpu()
+            if isinstance(geometry_data, MergedMeshData):
+                if show_progress: print("  [GPU Batching] Merged mesh ready.")
+            else:
+                if show_progress: print("  正在将几何数据迁移到 GPU...")
+                for mesh in geometry_data:
+                    mesh.to_gpu()
 
         # ---------------------------------------------------------------------
         # 分发计算
@@ -894,17 +905,25 @@ class RCSAnalyzer:
             'ptd': np.zeros((n_theta, n_phi))
         }
         
+        # 检查是否为合并的大网格 (GPU 批处理模式)
+        is_merged = isinstance(geometry_data, MergedMeshData)
+
         computed = 0
         for i, theta in enumerate(theta_array):
             for j, phi in enumerate(phi_array):
                 wave = self._make_wave(frequency, theta, phi)
                 
                 total_I_po = 0j
-                for obj in geometry_data:
-                    if is_cached:
-                        total_I_po += self.solver.integrate_cached(obj, wave)
-                    else:
-                        total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
+                
+                if is_merged:
+                    # GPU 批处理模式
+                    total_I_po = self.solver.integrate_cached(geometry_data, wave)
+                else:
+                    for obj in geometry_data:
+                        if is_cached:
+                            total_I_po += self.solver.integrate_cached(obj, wave)
+                        else:
+                            total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
                 
                 total_I_ptd = 0j
                 # 添加 PTD
