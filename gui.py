@@ -6,6 +6,7 @@ import json
 import time
 import numpy as np
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
@@ -29,7 +30,7 @@ from geometry.wedge import create_analytic_wedge
 from geometry.brick import create_analytic_brick
 from physics.wave import IncidentWave
 from physics.analytical_rcs import get_analytical_solution, compute_error_stats
-from solver.ribbon_solver import RibbonIntegrator, RCSAnalyzer, get_integrator, list_algorithms, AVAILABLE_ALGORITHMS
+from solver.ribbon_solver import RibbonIntegrator, RCSAnalyzer, get_integrator, list_algorithms, AVAILABLE_ALGORITHMS, HAS_GPU, merge_meshes
 from tools.visualize_mesh import create_occ_cylinder
 from ui.plotting import VisualizationManager
 
@@ -430,7 +431,7 @@ class CEMPoGUI:
             variable=self.compare_analytical_var
         ).pack(anchor=tk.W, pady=(5, 0))
 
-        # === 并行计算设置 ===
+        # === 并行计算与 GPU 设置 ===
         parallel_frame = ttk.LabelFrame(parent, text="性能 Performance", padding=(10, 5))
         parallel_frame.pack(fill=tk.X, pady=(0, 10))
 
@@ -438,16 +439,27 @@ class CEMPoGUI:
         max_cpu = os.cpu_count() or 4
         self.parallel_var = tk.BooleanVar(value=False)
         self.workers_var = tk.IntVar(value=max_cpu)
+        self.gpu_var = tk.BooleanVar(value=False)
 
         def toggle_workers():
             if self.parallel_var.get():
                 spin_workers.configure(state='normal')
+                # CPU 并行开启时，关闭 GPU（通常不混用）
+                if self.gpu_var.get():
+                    self.gpu_var.set(False)
             else:
                 spin_workers.configure(state='disabled')
 
+        def toggle_gpu():
+            if self.gpu_var.get():
+                # GPU 开启时，关闭 CPU 并行
+                if self.parallel_var.get():
+                    self.parallel_var.set(False)
+                    spin_workers.configure(state='disabled')
+
         chk_parallel = ttk.Checkbutton(
             parallel_frame,
-            text="启用并行计算 (Parallel)",
+            text="启用 CPU 并行 (CPU Parallel)",
             variable=self.parallel_var,
             command=toggle_workers
         )
@@ -465,6 +477,20 @@ class CEMPoGUI:
             state='disabled'
         )
         spin_workers.pack(side=tk.LEFT, padx=5)
+
+        # GPU Checkbox
+        gpu_text = "启用 GPU 加速 (Cupy)"
+        if not HAS_GPU:
+            gpu_text += " [不可用 - 需安装 cupy]"
+        
+        chk_gpu = ttk.Checkbutton(
+            parallel_frame,
+            text=gpu_text,
+            variable=self.gpu_var,
+            command=toggle_gpu,
+            state='normal' if HAS_GPU else 'disabled'
+        )
+        chk_gpu.pack(anchor=tk.W, pady=(5, 0))
 
         btn_gen_mesh = ttk.Button(parent, text="📊 生成网格 (Generate Mesh)", command=self.generate_mesh_stats)
         btn_gen_mesh.pack(fill=tk.X, pady=(0, 8))
@@ -885,39 +911,112 @@ class CEMPoGUI:
         threading.Thread(target=self._compute_mesh_stats, args=(surfaces, freq, samples), daemon=True).start()
 
     def _compute_mesh_stats(self, surfaces, freq, samples):
+        """
+        后台线程：[升级版] 并行全量预计算几何与网格。
+        目标：
+        1. 并行调用 'precompute_mesh' 生成完整物理数据。
+        2. 将数据缓存到 'self.cached_mesh_data' 供 RCS 计算复用。
+        3. 统计网格信息并显示。
+        4. 记录并显示耗时。
+        """
         try:
+            import time
             from solver.ribbon_solver import RibbonIntegrator
             from physics.wave import IncidentWave
+            from physics.constants import C0
+            import os
+
+            t_start = time.time()
+            
             solver = RibbonIntegrator()
             wave = IncidentWave(freq, 0, 0)
-            total_cells = 0
-            total_vertices = 0
+            wavelength = C0 / freq
+            
             n_total = len(surfaces)
-            face_stats = []
+            cached_surfaces = [None] * n_total
+            face_stats = [None] * n_total
+            
             all_min = np.array([np.inf, np.inf, np.inf])
             all_max = np.array([-np.inf, -np.inf, -np.inf])
-            for i, surf in enumerate(surfaces):
-                nu, nv = solver.get_mesh_size(surf, wave, samples)
+            
+            max_workers = os.cpu_count() or 4
+            completed_count = 0
+            
+            self._update_progress(0, n_total, f"正在并行预计算网格 (Workers={max_workers})...")
+
+            def process_full_precompute(idx, surf):
+                # 1. 全量预计算 (耗时步骤)
+                cached_data = solver.precompute_mesh(surf, wavelength, samples)
+                
+                # 2. 提取统计信息
+                points = cached_data.points
+                nu, nv = points.shape[1], points.shape[0]
                 n_cells = nu * nv
-                n_vertices = (nu + 1) * (nv + 1)
-                total_cells += n_cells
-                total_vertices += n_vertices
-                u_min, u_max = surf.u_domain
-                v_min, v_max = surf.v_domain
-                corners_uv = [(u_min, v_min), (u_max, v_min), (u_min, v_max), (u_max, v_max)]
-                for u, v in corners_uv:
-                    pt = surf.evaluate(np.array([u]), np.array([v]))[0]
-                    all_min = np.minimum(all_min, pt)
-                    all_max = np.maximum(all_max, pt)
-                step_id = getattr(surf, 'step_id', i)
-                face_stats.append({'index': i, 'step_id': step_id, 'nu': nu, 'nv': nv, 'cells': n_cells})
-                if n_total < 100 or i % 10 == 0 or i == n_total - 1:
-                    self._update_progress(i + 1, n_total, f"计算网格: {i+1}/{n_total}")
+                # 简单估算包围盒 (取所有点太慢，只取角点或边缘点，或者如果points不大就直接取)
+                # 为了速度，这里只取4个角点做包围盒估算
+                # (precompute_mesh 已经生成了所有点，直接用 points.min/max 其实也很快，因为是 numpy)
+                # 但考虑到 points 可能很大，我们还是只取角点，或者降采样
+                # 这里为了准确性，尝试直接计算 cached_data.points 的 bound
+                pts_flat = points.reshape(-1, 3)
+                l_min = pts_flat.min(axis=0)
+                l_max = pts_flat.max(axis=0)
+                
+                step_id = getattr(surf, 'step_id', idx)
+                stats = {'index': idx, 'step_id': step_id, 'nu': nu, 'nv': nv, 'cells': n_cells}
+                
+                return idx, cached_data, stats, l_min, l_max
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(process_full_precompute, i, s) for i, s in enumerate(surfaces)]
+                
+                for future in as_completed(futures):
+                    idx, cached_data, stats, l_min, l_max = future.result()
+                    
+                    cached_surfaces[idx] = cached_data
+                    face_stats[idx] = stats
+                    
+                    all_min = np.minimum(all_min, l_min)
+                    all_max = np.maximum(all_max, l_max)
+                    
+                    completed_count += 1
+                    if n_total < 100 or completed_count % 5 == 0 or completed_count == n_total:
+                        self._update_progress(completed_count, n_total, f"预计算进度: {completed_count}/{n_total}")
+            
+            t_end = time.time()
+            duration = t_end - t_start
+            
+            total_cells = sum(s['cells'] for s in face_stats)
+            total_vertices = sum((s['nu']+1)*(s['nv']+1) for s in face_stats)
             model_size = all_max - all_min
-            self.root.after(0, lambda: self._show_mesh_stats(n_total, total_cells, total_vertices, wave.wavelength, face_stats, model_size))
+
+            # 记录缓存参数
+            current_params = {
+                'freq': freq,
+                'samples': samples,
+                'surfaces_id': id(surfaces)
+            }
+
+            def update_ui_and_cache():
+                # 存入缓存
+                self.cached_mesh_data = cached_surfaces
+                self.cached_mesh_params = current_params
+                
+                # 显示日志
+                self.log(f"✅ 网格生成与预计算完成 (Mesh Generation Done)")
+                self.log(f"   - 耗时 (Time): {duration:.4f} s")
+                self.log(f"   - 速度 (Speed): {total_vertices/duration/1000:.1f} kPts/s")
+                self.log(f"   - 缓存 (Cache): 已就绪 (Ready for RCS calc)")
+                
+                # 显示统计弹窗
+                self._show_mesh_stats(n_total, total_cells, total_vertices, wavelength, face_stats, model_size)
+
+            self.root.after(0, update_ui_and_cache)
+            
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             err_msg = str(e)
-            self.root.after(0, lambda msg=err_msg: self.log(f"Mesh Stats Error: {msg}"))
+            self.root.after(0, lambda msg=err_msg: self.log(f"Mesh Gen Error: {msg}"))
 
     def _show_mesh_stats(self, n_surfaces, total_cells, total_vertices, wavelength, face_stats, model_size=None):
         self.progress_var.set(100)
@@ -953,19 +1052,61 @@ class CEMPoGUI:
         优化：
         1. 使用 'precompute_mesh' 而不是 'get_mesh_data'，这样生成的数据不仅能画图，还能直接给 Solver 用。
         2. 将生成的 CachedMeshData 对象存入全局缓存 'self.cached_mesh_data'。
+        3. [新增] 使用多线程并行生成，加速几何评估。
+        4. [新增] 增加详细计时功能。
         """
         try:
+            import time
             from physics.constants import C0
+            import os
+            
+            t_start = time.time()
+            
             solver = RibbonIntegrator()
             # wave 仅用于提供波长，precompute 不依赖角度
             wave = IncidentWave(freq, 0, 0)
             wavelength = C0 / freq
 
-            mesh_data_list = []      # 用于画图的轻量数据 (dict)
-            cached_surfaces = []     # 用于计算的重型数据 (CachedMeshData objects)
-
-            total_points = 0
             n_total = len(surfaces)
+            cached_surfaces = [None] * n_total
+            mesh_data_list = [None] * n_total
+            
+            total_points = 0
+            
+            # 多线程处理
+            max_workers = os.cpu_count() or 4
+            completed_count = 0
+            
+            self._update_progress(0, n_total, f"正在并行预计算几何与网格 (Workers={max_workers})...")
+
+            def process_mesh_gen(idx, surf):
+                # 调用 precompute_mesh 生成全量物理数据 (这是最耗时的一步)
+                cached_data = solver.precompute_mesh(surf, wavelength, samples)
+                
+                # 提取画图所需数据
+                points = cached_data.points
+                normals = cached_data.normals
+                nu, nv = points.shape[1], points.shape[0]
+                
+                return idx, cached_data, {'points': points, 'normals': normals, 'nu': nu, 'nv': nv}, nu * nv
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(process_mesh_gen, i, s) for i, s in enumerate(surfaces)]
+                
+                for future in as_completed(futures):
+                    idx, cached_data, viz_data, n_pts = future.result()
+                    
+                    cached_surfaces[idx] = cached_data
+                    mesh_data_list[idx] = viz_data
+                    total_points += n_pts
+                    
+                    completed_count += 1
+                    # 汇报进度
+                    if n_total < 100 or completed_count % 5 == 0 or completed_count == n_total:
+                        self._update_progress(completed_count, n_total, f"并行预计算: {completed_count}/{n_total}")
+
+            t_compute_end = time.time()
+            compute_duration = t_compute_end - t_start
 
             # 记录当前计算的参数签名，用于后续校验缓存有效性
             current_params = {
@@ -974,27 +1115,15 @@ class CEMPoGUI:
                 'surfaces_id': id(surfaces) # 绑定到当前的几何对象实例
             }
 
-            for i, surf in enumerate(surfaces):
-                # 关键修改：调用 precompute_mesh 生成全量物理数据 (points, normals, jacobians, derivatives)
-                cached_data = solver.precompute_mesh(surf, wavelength, samples)
-                cached_surfaces.append(cached_data)
-
-                # 提取画图所需数据
-                points = cached_data.points
-                normals = cached_data.normals
-                nu, nv = points.shape[1], points.shape[0]
-
-                total_points += nu * nv
-                mesh_data_list.append({'points': points, 'normals': normals, 'nu': nu, 'nv': nv})
-
-                # 汇报进度 (降低刷新频率以减少开销)
-                if n_total < 100 or i % 5 == 0 or i == n_total - 1:
-                    self._update_progress(i + 1, n_total, f"生成网格数据: {i+1}/{n_total}")
-
             # 关键修改：将全量数据回写到 GUI 主类中进行持久化缓存
             def update_cache():
                 self.cached_mesh_data = cached_surfaces
                 self.cached_mesh_params = current_params
+                # 在主线程打印显眼的耗时日志
+                self.log(f"✅ 几何预计算完成 (Geometry Precomputation Done)")
+                self.log(f"   - 耗时 (Time): {compute_duration:.4f} s")
+                self.log(f"   - 速度 (Speed): {total_points/compute_duration/1000:.1f} kPts/s")
+                self.log(f"   - 缓存 (Cache): 已存储，后续 RCS 计算将直接复用。")
 
             self.root.after(0, update_cache)
 
@@ -1014,6 +1143,8 @@ class CEMPoGUI:
         samples = self.density_var.get()
         is_parallel = self.parallel_var.get()
         n_workers = self.workers_var.get()
+        use_gpu = self.gpu_var.get()  # 获取 GPU 设置
+
         theta_start = self.theta_start.get()
         theta_end = self.theta_end.get()
         n_theta = self.theta_n.get()
@@ -1054,6 +1185,19 @@ class CEMPoGUI:
             if check_params == self.cached_mesh_params:
                 cached_mesh = self.cached_mesh_data
                 self.log("🚀 Optimization: Using pre-calculated mesh from visualization cache.")
+                
+                # [GPU 优化] 如果启用 GPU，将所有网格合并为一个大批次
+                if use_gpu:
+                    self.log("🚀 GPU Batching: Merging meshes for high-performance VRAM processing...")
+                    # merge_meshes 会将数据转换为 Cupy 数组并传到 GPU
+                    # 注意：如果 cached_mesh 已经是列表，则合并。如果已经是 MergedMeshData，则跳过
+                    if isinstance(cached_mesh, list):
+                        try:
+                            # 转换为 MergedMeshData
+                            cached_mesh = merge_meshes(cached_mesh, to_gpu=True)
+                            self.log(f"   Merged {cached_mesh.num_surfaces} surfaces into VRAM.")
+                        except Exception as e:
+                            self.log(f"   Merge failed ({e}), falling back to serial GPU.")
             else:
                 pass # self.log("Cache mismatch, re-calculating mesh...")
 
@@ -1062,14 +1206,18 @@ class CEMPoGUI:
         self.progress_label.config(text="准备计算...")
         if is_2d:
             self.log(f"Starting 2D scan: {n_theta}×{n_phi} angles, {freq/1e6} MHz...")
-            if is_parallel: self.log(f"Parallel mode enabled: {n_workers} workers")
+            if use_gpu: self.log("🚀 GPU Acceleration Enabled")
+            elif is_parallel: self.log(f"Parallel mode enabled: {n_workers} workers")
+            
             if enable_ptd: self.log(f"PTD Enabled: {len(ptd_edge_identifiers)} edges ({ptd_pol})")
-            threading.Thread(target=self._calc_thread_2d, args=(geo, freq, theta_rad, theta_deg, phi_rad, phi_deg, samples, geo_type, geo_params, is_parallel, n_workers, enable_ptd, ptd_edge_identifiers, cached_mesh, ptd_pol), daemon=True).start()
+            threading.Thread(target=self._calc_thread_2d, args=(geo, freq, theta_rad, theta_deg, phi_rad, phi_deg, samples, geo_type, geo_params, is_parallel, n_workers, enable_ptd, ptd_edge_identifiers, cached_mesh, ptd_pol, use_gpu), daemon=True).start()
         else:
             self.log(f"Starting 1D scan: {n_theta} angles, {freq/1e6} MHz...")
-            if is_parallel: self.log(f"Parallel mode enabled: {n_workers} workers")
+            if use_gpu: self.log("🚀 GPU Acceleration Enabled")
+            elif is_parallel: self.log(f"Parallel mode enabled: {n_workers} workers")
+            
             if enable_ptd: self.log(f"PTD Enabled: {len(ptd_edge_identifiers)} edges ({ptd_pol})")
-            threading.Thread(target=self._calc_thread, args=(geo, freq, theta_rad, theta_deg, samples, geo_type, geo_params, phi_rad[0], is_parallel, n_workers, enable_ptd, ptd_edge_identifiers, cached_mesh, ptd_pol), daemon=True).start()
+            threading.Thread(target=self._calc_thread, args=(geo, freq, theta_rad, theta_deg, samples, geo_type, geo_params, phi_rad[0], is_parallel, n_workers, enable_ptd, ptd_edge_identifiers, cached_mesh, ptd_pol, use_gpu), daemon=True).start()
 
     def _get_geometry_params(self):
         geo_type = self.geo_type_var.get()
@@ -1102,7 +1250,7 @@ class CEMPoGUI:
         display_name = self.algorithm_var.get()
         return self._algo_name_to_id.get(display_name, 'discrete_po_sinc_dual')
 
-    def _calc_thread(self, geo, freq, angles_rad, angles_deg, samples, geo_type, geo_params, phi_rad=0.0, parallel=False, n_workers=None, enable_ptd=False, ptd_edge_identifiers=None, cached_mesh_data=None, polarization='VV'):
+    def _calc_thread(self, geo, freq, angles_rad, angles_deg, samples, geo_type, geo_params, phi_rad=0.0, parallel=False, n_workers=None, enable_ptd=False, ptd_edge_identifiers=None, cached_mesh_data=None, polarization='VV', gpu=False):
         """1D扫描线程"""
         try:
             start_time = time.time()
@@ -1110,7 +1258,21 @@ class CEMPoGUI:
             solver = get_integrator(algo_id)
             analyzer = RCSAnalyzer(solver)
             self.root.after(0, lambda: self.log(f"Using algorithm: {AVAILABLE_ALGORITHMS[algo_id]['name']}"))
-            rcs_result = analyzer.compute_monostatic_rcs(geo, {'frequency': freq, 'phi': phi_rad}, angles_rad, samples_per_lambda=samples, parallel=parallel, n_workers=n_workers, show_progress=False, progress_callback=self._update_progress, enable_ptd=enable_ptd, ptd_edge_identifiers=ptd_edge_identifiers, cached_mesh_data=cached_mesh_data, polarization=polarization)
+            rcs_result = analyzer.compute_monostatic_rcs(
+                geo, 
+                {'frequency': freq, 'phi': phi_rad}, 
+                angles_rad, 
+                samples_per_lambda=samples, 
+                parallel=parallel, 
+                n_workers=n_workers, 
+                show_progress=False, 
+                progress_callback=self._update_progress, 
+                enable_ptd=enable_ptd, 
+                ptd_edge_identifiers=ptd_edge_identifiers, 
+                cached_mesh_data=cached_mesh_data, 
+                polarization=polarization,
+                gpu=gpu
+            )
             end_time = time.time()
             elapsed_time = end_time - start_time
             if isinstance(rcs_result, dict):
@@ -1142,7 +1304,7 @@ class CEMPoGUI:
             self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
             self.root.after(0, lambda: self.progress_label.config(text="计算失败"))
 
-    def _calc_thread_2d(self, geo, freq, theta_rad, theta_deg, phi_rad, phi_deg, samples, geo_type, geo_params, parallel=False, n_workers=None, enable_ptd=False, ptd_edge_identifiers=None, cached_mesh_data=None, polarization='VV'):
+    def _calc_thread_2d(self, geo, freq, theta_rad, theta_deg, phi_rad, phi_deg, samples, geo_type, geo_params, parallel=False, n_workers=None, enable_ptd=False, ptd_edge_identifiers=None, cached_mesh_data=None, polarization='VV', gpu=False):
         """2D扫描线程"""
         try:
             start_time = time.time()
@@ -1150,7 +1312,22 @@ class CEMPoGUI:
             solver = get_integrator(algo_id)
             analyzer = RCSAnalyzer(solver)
             self.root.after(0, lambda: self.log(f"Using algorithm: {AVAILABLE_ALGORITHMS[algo_id]['name']}"))
-            rcs_2d_result = analyzer.compute_monostatic_rcs_2d(geo, freq, theta_rad, phi_rad, samples_per_lambda=samples, parallel=parallel, n_workers=n_workers, show_progress=False, progress_callback=self._update_progress, enable_ptd=enable_ptd, ptd_edge_identifiers=ptd_edge_identifiers, cached_mesh_data=cached_mesh_data, polarization=polarization)
+            rcs_2d_result = analyzer.compute_monostatic_rcs_2d(
+                geo, 
+                freq, 
+                theta_rad, 
+                phi_rad, 
+                samples_per_lambda=samples, 
+                parallel=parallel, 
+                n_workers=n_workers, 
+                show_progress=False, 
+                progress_callback=self._update_progress, 
+                enable_ptd=enable_ptd, 
+                ptd_edge_identifiers=ptd_edge_identifiers, 
+                cached_mesh_data=cached_mesh_data, 
+                polarization=polarization,
+                gpu=gpu
+            )
             end_time = time.time()
             elapsed_time = end_time - start_time
             if isinstance(rcs_2d_result, dict):
