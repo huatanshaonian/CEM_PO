@@ -37,3 +37,31 @@ class AnalyticPlate(Surface):
     def get_jacobian(self, u, v):
         u, v = np.broadcast_arrays(u, v)
         return self.width * self.height * np.ones_like(u)
+
+    def get_edge_by_index(self, index, n_samples=2):
+        """
+        获取矩形板的边缘
+        0: u=-0.5 (x = -width/2)
+        1: u= 0.5 (x = +width/2)
+        2: v=-0.5 (y = -height/2)
+        3: v= 0.5 (y = +height/2)
+        """
+        u_vals = None
+        v_vals = None
+        
+        if index == 0: # u = -0.5
+            u_vals = np.full(n_samples, -0.5)
+            v_vals = np.linspace(-0.5, 0.5, n_samples)
+        elif index == 1: # u = 0.5
+            u_vals = np.full(n_samples, 0.5)
+            v_vals = np.linspace(-0.5, 0.5, n_samples)
+        elif index == 2: # v = -0.5
+            u_vals = np.linspace(-0.5, 0.5, n_samples)
+            v_vals = np.full(n_samples, -0.5)
+        elif index == 3: # v = 0.5
+            u_vals = np.linspace(-0.5, 0.5, n_samples)
+            v_vals = np.full(n_samples, 0.5)
+        else:
+            raise IndexError(f"Plate edge index {index} out of range (0-3)")
+            
+        return self.evaluate(u_vals, v_vals)

@@ -106,18 +106,92 @@ def sphere_rcs(radius, frequency=None):
     return 10 * np.log10(sigma)
 
 
-def get_analytical_solution(geometry_type, geometry_params, frequency, theta_rad):
+def wedge_gtd_rcs(length, phi_deg_array, frequency, polarization='VV'):
+    """
+    直角楔形 (90度) 的 GTD 解析解 (仅用于非奇点区域参考)
+    假设侧面入射 (beta=90)，单站 RCS。
+    
+    参数:
+        length: 棱边长度 (m)
+        phi_deg_array: 观察角度数组 (度)
+            定义: 0度=Face1法向, 90度=Face1切向(Face2法向?), 
+            Check consistency: 
+            In code: Face 1 Normal is at 90 deg (pi/2).
+            User inputs: theta. theta=0 is Face 1 Normal.
+            So phi_local = theta + 90.
+    
+    返回:
+        RCS (dBsm)
+    """
+    wavelength = C0 / frequency
+    k = 2 * np.pi / wavelength
+    n = 1.5 # 90 deg wedge
+    
+    phi_rad = np.radians(phi_deg_array)
+    # 转换: 用户输入 theta (0=Face1 Normal).
+    # Ufimtsev phi: Face 1 is at phi=0. Normal is at phi=90 (pi/2).
+    # So phi_ufimtsev = theta + pi/2.
+    phi = phi_rad + np.pi/2
+    
+    sin_pi_n = np.sin(np.pi/n)
+    cos_pi_n = np.cos(np.pi/n)
+    
+    # 1. Incident term (f)
+    denom_f = cos_pi_n - 1.0 # cos(pi/n) - cos(0)
+    term_f = (1.0/n) * sin_pi_n / denom_f
+    
+    # 2. Reflection term (g)
+    # cos(pi/n) - cos(2*phi/n)
+    denom_g = cos_pi_n - np.cos(2*phi/n)
+    
+    # Avoid singularity for plotting
+    denom_g[np.abs(denom_g) < 1e-6] = 1e-6
+    
+    term_g = (1.0/n) * sin_pi_n / denom_g
+    
+    if polarization == 'VV':
+        # Hard: D = f + g
+        D = term_f + term_g
+    else:
+        # Soft: D = f - g
+        D = term_f - term_g
+        
+    # GTD RCS Formula for finite length edge (Normal incidence)
+    # sigma = L^2 / pi * |D|^2 * (something?)
+    # Standard formula for finite cylinder: 2pi R L^2 / lambda.
+    # For edge:
+    # E_s = E_i * D * exp(-jkr)/sqrt(r)
+    # This D is 2D diffraction coeff (units 1/sqrt(k)? No, Ufimtsev D is dimensionless? No).
+    # Ufimtsev D as defined in code is Dimensionless?
+    # Let's check code: pre_factor = 2pi / (jk).
+    # So Total Field ~ (2pi/k) * D * L.
+    # Sigma = 4pi * |Total|^2 = 4pi * (4pi^2/k^2) * |D|^2 * L^2
+    #       = 16 pi^3 / k^2 * L^2 * |D|^2
+    #       = 4 pi * lambda^2 * L^2 * |D|^2 ?
+    # Let's re-verify unit.
+    # Code D is dimensionless (pure trig).
+    # Result is Area (Sigma).
+    # Code uses: sigma = k^2/pi * |I|^2.
+    # I = (2pi/k) * D * L.
+    # |I|^2 = 4pi^2/k^2 * |D|^2 * L^2.
+    # Sigma = (k^2/pi) * (4pi^2/k^2 * |D|^2 * L^2)
+    #       = 4 * pi * L^2 * |D|^2.
+    
+    sigma = 4 * np.pi * length**2 * np.abs(D)**2
+    
+    return 10 * np.log10(np.maximum(sigma, 1e-20))
+
+
+def get_analytical_solution(geometry_type, geometry_params, frequency, theta_rad, polarization='VV'):
     """
     统一接口：根据几何类型获取解析解
 
     参数:
     geometry_type: 几何类型字符串 ('cylinder', 'plate', 'sphere')
     geometry_params: 几何参数字典
-        - cylinder: {'radius': R, 'height': H}
-        - plate: {'width': W, 'height': H}
-        - sphere: {'radius': R}
     frequency: 频率 (Hz)
     theta_rad: 角度数组 (弧度)
+    polarization: 'VV' or 'HH'
 
     返回:
     (rcs_analytical, label) 或 (None, None) 如果不支持
@@ -141,7 +215,7 @@ def get_analytical_solution(geometry_type, geometry_params, frequency, theta_rad
             frequency,
             theta_rad
         )
-        label = f"解析解 (平板 {geometry_params['width']}×{geometry_params['height']}m)"
+        label = f"解析解 (平板 PO)"
         return rcs, label
 
     elif geometry_type == 'sphere':
@@ -149,6 +223,14 @@ def get_analytical_solution(geometry_type, geometry_params, frequency, theta_rad
         rcs_val = sphere_rcs(geometry_params['radius'], frequency)
         rcs = np.full_like(theta_rad, rcs_val, dtype=float)
         label = f"解析解 (球体 R={geometry_params['radius']}m)"
+        return rcs, label
+        
+    elif 'wedge' in geometry_type:
+        # Standard Wedge GTD
+        length = geometry_params.get('length', 10.0)
+        phi_deg = np.degrees(theta_rad)
+        rcs = wedge_gtd_rcs(length, phi_deg, frequency, polarization)
+        label = f"参考解 (GTD Edge Only, {polarization})"
         return rcs, label
 
     else:
