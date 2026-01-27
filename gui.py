@@ -1497,68 +1497,68 @@ class CEMPoGUI:
             self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
             self.root.after(0, lambda: self.progress_label.config(text="计算失败"))
 
-        def _calc_thread_2d(self, geo, freq, theta_rad, theta_deg, phi_rad, phi_deg, samples, geo_type, geo_params, parallel=False, n_workers=None, enable_ptd=False, ptd_edge_identifiers=None, cached_mesh_data=None, polarization='VV'):
-            """2D扫描线程"""
-            try:
-                start_time = time.time()
-                algo_id = self._get_selected_algorithm_id()
-                solver = get_integrator(algo_id)
-                analyzer = RCSAnalyzer(solver)
-                self.root.after(0, lambda: self.log(f"Using algorithm: {AVAILABLE_ALGORITHMS[algo_id]['name']}"))
-    
-                # 2D扫描
-                rcs_2d_result = analyzer.compute_monostatic_rcs_2d(
-                    geo,
-                    freq,
-                    theta_rad,
-                    phi_rad,
-                    samples_per_lambda=samples,
-                    parallel=parallel,
-                    n_workers=n_workers,
-                    show_progress=False,
-                    progress_callback=self._update_progress,
-                    enable_ptd=enable_ptd,
-                    ptd_edge_identifiers=ptd_edge_identifiers,
-                    cached_mesh_data=cached_mesh_data,
-                    polarization=polarization
-                )
-    
-                end_time = time.time()
-                elapsed_time = end_time - start_time
-    
-                # 处理返回结果
-                if isinstance(rcs_2d_result, dict):
-                    rcs_2d_total = rcs_2d_result['total']
-                    rcs_2d_po = rcs_2d_result.get('po')
-                    rcs_2d_ptd = rcs_2d_result.get('ptd')
-                else:
-                    rcs_2d_total = rcs_2d_result
-                    rcs_2d_po = None
-                    rcs_2d_ptd = None
-    
-                # 准备结果数据
-                result_data = {
-                    'mode': '2d',
-                    'theta_deg': theta_deg,
-                    'theta_rad': theta_rad,
-                    'phi_deg': phi_deg,
-                    'phi_rad': phi_rad,
-                    'rcs_2d': rcs_2d_total,
-                    'rcs_2d_po': rcs_2d_po,
-                    'rcs_2d_ptd': rcs_2d_ptd,
-                    'freq': freq,
-                    'geo_type': geo_type,
-                    'geo_params': geo_params,
-                    'elapsed_time': elapsed_time
-                }
-    
-                self.root.after(0, lambda: self.show_results(result_data))
-                self.root.after(0, lambda: self.log(f"2D Calculation finished. Time elapsed: {elapsed_time:.2f} s"))
-    
-            except Exception as e:
-                self.root.after(0, lambda: self.log(f"2D Calculation Error: {e}"))
-                self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
-                self.root.after(0, lambda: self.progress_label.config(text="计算失败"))
+    def _calc_thread_2d(self, geo, freq, theta_rad, theta_deg, phi_rad, phi_deg, samples, geo_type, geo_params, parallel=False, n_workers=None, enable_ptd=False, ptd_edge_identifiers=None, cached_mesh_data=None, polarization='VV'):
+        """2D扫描线程"""
+        try:
+            start_time = time.time()
+            algo_id = self._get_selected_algorithm_id()
+            solver = get_integrator(algo_id)
+            analyzer = RCSAnalyzer(solver)
+            self.root.after(0, lambda: self.log(f"Using algorithm: {AVAILABLE_ALGORITHMS[algo_id]['name']}"))
+
+            # 2D扫描
+            rcs_2d_result = analyzer.compute_monostatic_rcs_2d(
+                geo,
+                freq,
+                theta_rad,
+                phi_rad,
+                samples_per_lambda=samples,
+                parallel=parallel,
+                n_workers=n_workers,
+                show_progress=False,
+                progress_callback=self._update_progress,
+                enable_ptd=enable_ptd,
+                ptd_edge_identifiers=ptd_edge_identifiers,
+                cached_mesh_data=cached_mesh_data,
+                polarization=polarization
+            )
+
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+
+            # 处理返回结果
+            if isinstance(rcs_2d_result, dict):
+                rcs_2d_total = rcs_2d_result['total']
+                rcs_2d_po = rcs_2d_result.get('po')
+                rcs_2d_ptd = rcs_2d_result.get('ptd')
+            else:
+                rcs_2d_total = rcs_2d_result
+                rcs_2d_po = None
+                rcs_2d_ptd = None
+
+            # 准备结果数据
+            result_data = {
+                'mode': '2d',
+                'theta_deg': theta_deg,
+                'theta_rad': theta_rad,
+                'phi_deg': phi_deg,
+                'phi_rad': phi_rad,
+                'rcs_2d': rcs_2d_total,
+                'rcs_2d_po': rcs_2d_po,
+                'rcs_2d_ptd': rcs_2d_ptd,
+                'freq': freq,
+                'geo_type': geo_type,
+                'geo_params': geo_params,
+                'elapsed_time': elapsed_time
+            }
+
+            self.root.after(0, lambda: self.show_results(result_data))
+            self.root.after(0, lambda: self.log(f"2D Calculation finished. Time elapsed: {elapsed_time:.2f} s"))
+
+        except Exception as e:
+            self.root.after(0, lambda: self.log(f"2D Calculation Error: {e}"))
+            self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
+            self.root.after(0, lambda: self.progress_label.config(text="计算失败"))
     def show_results(self, result_data):
         """显示计算结果，支持1D线图和2D热图"""
         self.last_result = result_data  # 保存计算结果以便导出
