@@ -581,7 +581,16 @@ class VisualizationManager:
             # 检查是否有分量
             rcs_po = result_data.get('rcs_po')
             rcs_ptd = result_data.get('rcs_ptd')
+
+            # 只有当开启了 PTD 且两个分量都有数据时，才显示分量图
+            # 如果 PTD 未开启，即使后端返回了全零或空的分量，我们也不显示它们
             has_components = (rcs_po is not None) and (rcs_ptd is not None)
+
+            # 额外检查：如果 PTD 分量全部为 0 (通常意味着未计算 PTD)，则不显示分量图
+            if has_components:
+                # 检查 PTD 是否有意义的数据（在 dB 域，如果全是 -200 左右或 10*log10(1e-20)，说明没算）
+                if np.all(rcs_ptd <= -190):
+                    has_components = False
 
             freq = result_data['freq']
             geo_type = result_data['geo_type']
@@ -697,8 +706,15 @@ class VisualizationManager:
             
             rcs_po = result_data.get('rcs_2d_po')
             rcs_ptd = result_data.get('rcs_2d_ptd')
+
+            # 只有当开启了 PTD 且两个分量都有数据时，才显示分量图
             has_components = (rcs_po is not None) and (rcs_ptd is not None)
-            
+
+            # 额外检查：如果 PTD 分量无意义（未计算），则降级为单图模式
+            if has_components:
+                if np.all(rcs_ptd <= -190):
+                    has_components = False
+
             freq = result_data['freq']
             geo_type = result_data['geo_type']
 
