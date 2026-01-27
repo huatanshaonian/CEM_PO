@@ -644,7 +644,7 @@ class CEMPoGUI:
         ttk.Entry(frame_ref_params, textvariable=self.comp_model_id, width=6).pack(side=tk.LEFT, padx=5)
         ttk.Label(frame_ref_params, text="频率:").pack(side=tk.LEFT)
         self.comp_freq_suffix = tk.StringVar(value="1.5G")
-        combo_freq = ttk.Combobox(frame_ref_params, textvariable=self.comp_freq_suffix, values=["1.5G", "3G"], width=6)
+        combo_freq = ttk.Combobox(frame_ref_params, textvariable=self.comp_freq_suffix, values=["1.5G", "3G", "6G"], width=6)
         combo_freq.pack(side=tk.LEFT, padx=5)
 
         action_group = ttk.Frame(control_frame, padding=5)
@@ -1397,10 +1397,10 @@ class CEMPoGUI:
         geo_type = self.last_result.get('geo_type', 'unknown')
 
         # 如果是 STEP 模式，尝试使用文件名作为标识
-        if geo_type.lower() == 'step' and hasattr(self, 'step_file_path') and self.step_file_path:
+        if geo_type == 'STEP File' and self.step_file_path:
             geo_label = os.path.splitext(os.path.basename(self.step_file_path))[0]
         else:
-            geo_label = geo_type
+            geo_label = geo_type.replace(" ", "_")
 
         default_filename = f"rcs_{mode}_{geo_label}_{freq_mhz:.1f}MHz.csv"
         file_path = filedialog.asksaveasfilename(
@@ -1452,6 +1452,13 @@ class CEMPoGUI:
                     self.phi_end.set(config.get('phi_end', 0.0))
                     self.phi_n.set(config.get('phi_n', 1))
                     self.step_file_path = config.get('step_file_path', None)
+                    
+                    # Comparison Tab Settings
+                    self.ref_data_dir.set(config.get('ref_data_dir', r"F:\data\parameter\csv_output"))
+                    self.comp_model_id.set(config.get('comp_model_id', "001"))
+                    self.comp_freq_suffix.set(config.get('comp_freq_suffix', "1.5G"))
+                    self.plot_style_var.set(config.get('plot_style', "pixel"))
+
                     if self.step_file_path and os.path.exists(self.step_file_path):
                         if hasattr(self, 'step_label'):
                             self.step_label.config(text=os.path.basename(self.step_file_path))
@@ -1468,7 +1475,13 @@ class CEMPoGUI:
             'phi_start': self.phi_start.get(),
             'phi_end': self.phi_end.get(),
             'phi_n': self.phi_n.get(),
-            'step_file_path': self.step_file_path
+            'step_file_path': self.step_file_path,
+            
+            # Comparison Tab Settings
+            'ref_data_dir': self.ref_data_dir.get(),
+            'comp_model_id': self.comp_model_id.get(),
+            'comp_freq_suffix': self.comp_freq_suffix.get(),
+            'plot_style': self.plot_style_var.get()
         }
         try:
             with open(CONFIG_FILE, 'w') as f:

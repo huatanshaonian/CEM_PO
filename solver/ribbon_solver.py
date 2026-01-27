@@ -217,8 +217,11 @@ class DiscretePOIntegrator:
         p_u = surface.evaluate(u_samples, v_mid)
         dist_u = np.sum(np.sqrt(np.sum(np.diff(p_u, axis=0)**2, axis=-1)))
 
-        nv = int(max(20, (dist_v / wavelength) * samples_per_lambda))
-        nu = int(max(20, (dist_u / wavelength) * samples_per_lambda))
+        # 3. 根据波长和采样率计算网格数
+        # 即使波长很长，也需要保证一定的几何逼近度 (最低点数限制)
+        min_points = 20
+        nv = int(max(min_points, (dist_v / wavelength) * samples_per_lambda))
+        nu = int(max(min_points, (dist_u / wavelength) * samples_per_lambda))
         
         return nu, nv
 
