@@ -331,7 +331,12 @@ class RCSAnalyzer:
             elif can_cache:
                 wavelength = C0 / wave_params['frequency']
                 if show_progress: print("  正在预计算几何网格 (加速模式)...")
-                geometry_data = [self.solver.precompute_mesh(s, wavelength, samples_per_lambda) for s in surfaces]
+                geometry_data = []
+                n_surfs = len(surfaces)
+                for i, s in enumerate(surfaces):
+                    geometry_data.append(self.solver.precompute_mesh(s, wavelength, samples_per_lambda))
+                    if progress_callback and (i % 5 == 0 or i == n_surfs - 1):
+                         progress_callback(0, n_angles, f"预计算几何: {i+1}/{n_surfs}")
                 is_cached = True
         except Exception as e:
             print(f"  预计算失败: {e}, 回退到实时模式")
@@ -418,7 +423,17 @@ class RCSAnalyzer:
                 is_cached = True
             elif can_cache:
                 wavelength = C0 / frequency
-                geometry_data = [self.solver.precompute_mesh(s, wavelength, samples_per_lambda) for s in surfaces]
+                if show_progress: print("  正在预计算2D几何网格 (加速模式)...")
+                
+                geometry_data = []
+                n_surfs = len(surfaces)
+                for i, s in enumerate(surfaces):
+                    geometry_data.append(self.solver.precompute_mesh(s, wavelength, samples_per_lambda))
+                    
+                    # 汇报预计算进度
+                    if progress_callback and (i % 5 == 0 or i == n_surfs - 1):
+                         progress_callback(0, total_points, f"预计算几何: {i+1}/{n_surfs}")
+
                 is_cached = True
         except Exception as e:
             is_cached = False
