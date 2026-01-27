@@ -240,22 +240,34 @@ class DiscretePOIntegrator:
         
         uu, vv = np.meshgrid(u_centers, v_centers)
         
-        # 1. 基础几何数据
-        points, normals, jacobians = surface.get_data(uu, vv)
+        # 1. 尝试一次性获取点、法向、Jacobian 及导数
+        # 兼容旧接口 (仅返回 3 个值) 和新接口 (返回 5 个值)
+        data = surface.get_data(uu, vv)
         
-        # 2. 计算 dP/du (用于 alpha 计算)
-        eps_u = du * 1e-4
-        p_plus_u = surface.evaluate(uu + eps_u, vv)
-        p_minus_u = surface.evaluate(uu - eps_u, vv)
-        dP_du = (p_plus_u - p_minus_u) / (2 * eps_u)
+        direct_derivatives = False
+        if len(data) == 5:
+            # 标记使用了优化路径
+            direct_derivatives = True
+            points, normals, jacobians, dP_du, dP_dv = data
+        else:
+            # print(f"  [Solver] !!! Falling back to Finite Difference (Slow Path) !!!")
+            points, normals, jacobians = data
+            
+            # 2. 回退方案：使用有限差分计算 dP/du (用于 alpha 计算)
+            eps_u = du * 1e-4
+            p_plus_u = surface.evaluate(uu + eps_u, vv)
+            p_minus_u = surface.evaluate(uu - eps_u, vv)
+            dP_du = (p_plus_u - p_minus_u) / (2 * eps_u)
 
-        # 3. 计算 dP/dv (用于 beta 计算)
-        eps_v = dv * 1e-4
-        p_plus_v = surface.evaluate(uu, vv + eps_v)
-        p_minus_v = surface.evaluate(uu, vv - eps_v)
-        dP_dv = (p_plus_v - p_minus_v) / (2 * eps_v)
+            # 3. 回退方案：使用有限差分计算 dP/dv (用于 beta 计算)
+            eps_v = dv * 1e-4
+            p_plus_v = surface.evaluate(uu, vv + eps_v)
+            p_minus_v = surface.evaluate(uu, vv - eps_v)
+            dP_dv = (p_plus_v - p_minus_v) / (2 * eps_v)
 
-        return CachedMeshData(points, normals, jacobians, dP_du, dP_dv, du, dv)
+        res = CachedMeshData(points, normals, jacobians, dP_du, dP_dv, du, dv)
+        res.direct_derivatives = direct_derivatives
+        return res
 
     def integrate_cached(self, cached_data, wave):
         """

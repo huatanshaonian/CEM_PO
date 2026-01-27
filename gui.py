@@ -989,6 +989,9 @@ class CEMPoGUI:
             total_vertices = sum((s['nu']+1)*(s['nv']+1) for s in face_stats)
             model_size = all_max - all_min
 
+            # 检查是否有任何曲面使用了导数加速
+            any_optimized = any(getattr(m, 'direct_derivatives', False) for m in cached_surfaces)
+
             # 记录缓存参数
             current_params = {
                 'freq': freq,
@@ -1003,6 +1006,11 @@ class CEMPoGUI:
                 
                 # 显示日志
                 self.log(f"✅ 网格生成与预计算完成 (Mesh Generation Done)")
+                if any_optimized:
+                    self.log(f"   - 优化 (Opt): 已启用 OCC 直接导数加速 (Direct Derivatives)")
+                else:
+                    self.log(f"   - 警告 (Warn): 未检测到导数加速，使用慢速路径")
+                
                 self.log(f"   - 耗时 (Time): {duration:.4f} s")
                 self.log(f"   - 速度 (Speed): {total_vertices/duration/1000:.1f} kPts/s")
                 self.log(f"   - 缓存 (Cache): 已就绪 (Ready for RCS calc)")

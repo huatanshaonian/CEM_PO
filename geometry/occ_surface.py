@@ -56,7 +56,7 @@ class OCCSurface(Surface):
 
     def get_data(self, u_grid, v_grid):
         """
-        利用 OCC 的属性计算类 (SLProps) 一次性获取点、法线和一阶偏导。
+        利用 OCC 的属性计算类 (SLProps) 一次性获取点、法线、Jacobian 以及导数。
         """
         u, v = np.broadcast_arrays(u_grid, v_grid)
         shape = u.shape
@@ -66,10 +66,10 @@ class OCCSurface(Surface):
         points = []
         normals = []
         jacobians = []
+        dP_du_list = []
+        dP_dv_list = []
         
         # SLProps (Surface Local Properties)
-        # 参数 2 表示我们要计算到二阶导数（虽然这里只需一阶）
-        # 1e-7 是解析精度
         props = GeomLProp_SLProps(self.surf, 2, 1e-7)
         
         for ui, vi in zip(u_flat, v_flat):
@@ -79,7 +79,15 @@ class OCCSurface(Surface):
             pnt = props.Value()
             points.append([pnt.X(), pnt.Y(), pnt.Z()])
             
-            # 2. 获取法线 (OCC 会处理法线朝向问题)
+            # 2. 获取切向量
+            du = props.D1U()
+            dv = props.D1V()
+            du_vec = np.array([du.X(), du.Y(), du.Z()])
+            dv_vec = np.array([dv.X(), dv.Y(), dv.Z()])
+            dP_du_list.append(du_vec)
+            dP_dv_list.append(dv_vec)
+            
+            # 3. 获取法线
             if props.IsNormalDefined():
                 n_dir = props.Normal()
                 n_vec = [n_dir.X(), n_dir.Y(), n_dir.Z()]
@@ -89,22 +97,17 @@ class OCCSurface(Surface):
             else:
                 normals.append([0.0, 0.0, 0.0])
             
-            # 3. 计算 Jacobian |Du x Dv|
-            du = props.D1U()
-            dv = props.D1V()
-            # 叉乘模长
-            # OCC 的向量没有内置 cross 后的模长？我们转为 numpy 计算
-            du_vec = np.array([du.X(), du.Y(), du.Z()])
-            dv_vec = np.array([dv.X(), dv.Y(), dv.Z()])
+            # 4. 计算 Jacobian |Du x Dv|
             cross_prod = np.cross(du_vec, dv_vec)
             jacobians.append(np.linalg.norm(cross_prod))
             
         points = np.array(points).reshape(shape + (3,))
         normals = np.array(normals).reshape(shape + (3,))
         jacobians = np.array(jacobians).reshape(shape)
+        dP_du = np.array(dP_du_list).reshape(shape + (3,))
+        dP_dv = np.array(dP_dv_list).reshape(shape + (3,))
 
-        return points, normals, jacobians
-
+        return points, normals, jacobians, dP_du, dP_dv
 
 class OCCFaceSurface(Surface):
     """
@@ -160,51 +163,70 @@ class OCCFaceSurface(Surface):
 
     def get_data(self, u_grid, v_grid):
         """
-        使用 BRepLProp_SLProps 获取点、法线和 Jacobian。
-        坐标和 Jacobian 会根据 scale 参数进行缩放。
+        使用 BRepLProp_SLProps 获取点、法线、Jacobian 以及导数。
+        优化：预分配 numpy 数组以减少循环内开销。
         """
         u, v = np.broadcast_arrays(u_grid, v_grid)
+        num_pts = u.size
         shape = u.shape
         u_flat = u.ravel()
         v_flat = v.ravel()
 
-        points = []
-        normals = []
-        jacobians = []
+        points = np.empty((num_pts, 3))
+        normals = np.empty((num_pts, 3))
+        jacobians = np.empty(num_pts)
+        dP_du = np.empty((num_pts, 3))
+        dP_dv = np.empty((num_pts, 3))
 
         # BRepLProp_SLProps 用于 BRepAdaptor_Surface
         props = BRepLProp_SLProps(self.adaptor, 2, 1e-7)
 
-        for ui, vi in zip(u_flat, v_flat):
-            props.SetParameters(ui, vi)
+        for i in range(num_pts):
+            props.SetParameters(u_flat[i], v_flat[i])
 
-            # 1. 获取坐标点（应用缩放）
+            # 1. 获取坐标点
             pnt = props.Value()
-            points.append([pnt.X() * self.scale, pnt.Y() * self.scale, pnt.Z() * self.scale])
+            points[i, 0] = pnt.X() * self.scale
+            points[i, 1] = pnt.Y() * self.scale
+            points[i, 2] = pnt.Z() * self.scale
 
-            # 2. 获取法线（单位向量，不需要缩放）
-            if props.IsNormalDefined():
-                n_dir = props.Normal()
-                n_vec = [n_dir.X(), n_dir.Y(), n_dir.Z()]
-                if self.invert_normal:
-                    n_vec = [-x for x in n_vec]
-                normals.append(n_vec)
-            else:
-                normals.append([0.0, 0.0, 0.0])
-
-            # 3. 计算 Jacobian |Du x Dv|（应用 scale^2 因为是面积元素）
+            # 2. 获取切向量
             du = props.D1U()
             dv = props.D1V()
-            du_vec = np.array([du.X(), du.Y(), du.Z()])
-            dv_vec = np.array([dv.X(), dv.Y(), dv.Z()])
-            cross_prod = np.cross(du_vec, dv_vec)
-            jacobians.append(np.linalg.norm(cross_prod) * self.scale * self.scale)
+            du_x, du_y, du_z = du.X() * self.scale, du.Y() * self.scale, du.Z() * self.scale
+            dv_x, dv_y, dv_z = dv.X() * self.scale, dv.Y() * self.scale, dv.Z() * self.scale
+            
+            dP_du[i, 0] = du_x
+            dP_du[i, 1] = du_y
+            dP_du[i, 2] = du_z
+            dP_dv[i, 0] = dv_x
+            dP_dv[i, 1] = dv_y
+            dP_dv[i, 2] = dv_z
 
-        points = np.array(points).reshape(shape + (3,))
-        normals = np.array(normals).reshape(shape + (3,))
-        jacobians = np.array(jacobians).reshape(shape)
+            # 3. 获取法线
+            if props.IsNormalDefined():
+                n_dir = props.Normal()
+                normals[i, 0] = n_dir.X()
+                normals[i, 1] = n_dir.Y()
+                normals[i, 2] = n_dir.Z()
+            else:
+                normals[i, :] = 0.0
 
-        return points, normals, jacobians
+            # 4. 计算 Jacobian (叉乘模长)
+            # 直接展开计算以减少 np.cross 的调用开销
+            cx = du_y * dv_z - du_z * dv_y
+            cy = du_z * dv_x - du_x * dv_z
+            cz = du_x * dv_y - du_y * dv_x
+            jacobians[i] = (cx*cx + cy*cy + cz*cz)**0.5
+
+        if self.invert_normal:
+            normals *= -1.0
+
+        return (points.reshape(shape + (3,)), 
+                normals.reshape(shape + (3,)), 
+                jacobians.reshape(shape), 
+                dP_du.reshape(shape + (3,)), 
+                dP_dv.reshape(shape + (3,)))
 
     def get_edges(self, n_samples=20):
         """
