@@ -1,4 +1,34 @@
 import numpy as np
+import os
+import sys
+
+# --- CUDA 环境自动配置 (针对 Windows) ---
+if sys.platform == 'win32' and 'CUDA_PATH' not in os.environ:
+    # 尝试自动探测 CUDA 安装路径
+    base_path = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+    if os.path.exists(base_path):
+        versions = [d for d in os.listdir(base_path) if d.startswith('v')]
+        if versions:
+            # 取版本号最高的
+            latest_v = sorted(versions, key=lambda x: [int(c) for c in x[1:].split('.')])[-1]
+            cuda_root = os.path.join(base_path, latest_v)
+            os.environ['CUDA_PATH'] = cuda_root
+            
+            # 将 bin 和 bin\x64 加入 PATH 以确保 DLL 能被找到
+            bin_path = os.path.join(cuda_root, 'bin')
+            bin_x64_path = os.path.join(cuda_root, 'bin', 'x64')
+            
+            if bin_path not in os.environ['PATH']:
+                os.environ['PATH'] = bin_path + os.pathsep + os.environ['PATH']
+            if os.path.exists(bin_x64_path) and bin_x64_path not in os.environ['PATH']:
+                os.environ['PATH'] = bin_x64_path + os.pathsep + os.environ['PATH']
+
+try:
+    import cupy as cp
+    HAS_GPU = True
+except ImportError:
+    cp = None
+    HAS_GPU = False
 from physics.constants import ETA0, C0
 
 
@@ -58,6 +88,104 @@ class CachedMeshData:
         self.du = du
         self.dv = dv
 
+    def to_gpu(self):
+        """将数据迁移到 GPU"""
+        if not HAS_GPU:
+            return self
+        self.points = cp.asarray(self.points)
+        self.normals = cp.asarray(self.normals)
+        self.jacobians = cp.asarray(self.jacobians)
+        self.dP_du = cp.asarray(self.dP_du)
+        self.dP_dv = cp.asarray(self.dP_dv)
+        # du, dv 是标量，通常不需要 cp.asarray，除非需要参与 GPU 运算
+        return self
+
+    def to_cpu(self):
+        """将数据迁移回 CPU"""
+        if hasattr(self.points, 'get'):
+            self.points = self.points.get()
+            self.normals = self.normals.get()
+            self.jacobians = self.jacobians.get()
+            self.dP_du = self.dP_du.get()
+            self.dP_dv = self.dP_dv.get()
+        return self
+
+class MergedMeshData:
+    """
+    [GPU 优化核心] 合并后的网格数据
+    利用大显存优势，将多个小曲面的网格合并为一个巨大的数组。
+    这样 GPU 只需要执行一次 Kernel Launch 即可计算所有曲面的贡献，
+    极大地减少了 Python 循环开销和 CPU-GPU 通信延迟。
+    """
+    def __init__(self, mesh_list, to_gpu=True):
+        self.num_surfaces = len(mesh_list)
+        
+        # 1. 收集所有数据并扁平化
+        # 注意：这里我们只保留积分所需的必要数据，减少显存占用
+        # 如果需要 sinc 插值，需要 dP_du, dP_dv。如果只是基础 PO，只需要 points, normals, jacobians
+        
+        # 预先计算总点数以分配内存
+        total_points = sum(m.points.size // 3 for m in mesh_list) # points shape is (nv, nu, 3)
+        
+        # 使用 list comprehension 快速收集
+        # Flatten all arrays to (N, 3) or (N,)
+        all_points = [m.points.reshape(-1, 3) for m in mesh_list]
+        all_normals = [m.normals.reshape(-1, 3) for m in mesh_list]
+        
+        # 处理标量权重：jacobians * du * dv
+        # 原始公式: contribution = illum * jac * exp(...) * sinc * du * dv
+        # 我们可以把 du * dv 预乘到 jacobians 里，简化后续计算
+        all_weights = []
+        all_dP_du = []
+        all_dP_dv = []
+        all_du = []
+        all_dv = []
+        
+        has_derivs = hasattr(mesh_list[0], 'dP_du')
+        
+        for m in mesh_list:
+            # 预乘面积元 du * dv
+            w = m.jacobians * m.du * m.dv
+            all_weights.append(w.reshape(-1))
+            
+            if has_derivs:
+                all_dP_du.append(m.dP_du.reshape(-1, 3))
+                all_dP_dv.append(m.dP_dv.reshape(-1, 3))
+                # du, dv 对于 sinc 计算是必须的，但每个面不一样
+                # 为了向量化，我们需要把 du, dv 扩展到每个点上
+                all_du.append(np.full(m.points.shape[:2], m.du).reshape(-1))
+                all_dv.append(np.full(m.points.shape[:2], m.dv).reshape(-1))
+
+        # 2. 合并大数组 (CPU 端操作)
+        self.points = np.vstack(all_points)
+        self.normals = np.vstack(all_normals)
+        self.weights = np.hstack(all_weights) # 1D array
+        
+        self.has_derivs = has_derivs
+        if has_derivs:
+            self.dP_du = np.vstack(all_dP_du)
+            self.dP_dv = np.vstack(all_dP_dv)
+            self.du = np.hstack(all_du)
+            self.dv = np.hstack(all_dv)
+
+        # 3. 立即传输到 GPU (如果请求)
+        if to_gpu and HAS_GPU:
+            self.points = cp.asarray(self.points)
+            self.normals = cp.asarray(self.normals)
+            self.weights = cp.asarray(self.weights)
+            if has_derivs:
+                self.dP_du = cp.asarray(self.dP_du)
+                self.dP_dv = cp.asarray(self.dP_dv)
+                self.du = cp.asarray(self.du)
+                self.dv = cp.asarray(self.dv)
+            # print(f"  [GPU Memory] Merged mesh uploaded: {total_points} points")
+
+def merge_meshes(mesh_list, to_gpu=True):
+    """工具函数：将网格列表合并为 MergedMeshData"""
+    if not mesh_list:
+        return None
+    return MergedMeshData(mesh_list, to_gpu)
+
 class DiscretePOIntegrator:
     """
     离散物理光学 (PO) 积分器，支持多种 sinc 校正模式
@@ -89,8 +217,11 @@ class DiscretePOIntegrator:
         p_u = surface.evaluate(u_samples, v_mid)
         dist_u = np.sum(np.sqrt(np.sum(np.diff(p_u, axis=0)**2, axis=-1)))
 
-        nv = int(max(20, (dist_v / wavelength) * samples_per_lambda))
-        nu = int(max(20, (dist_u / wavelength) * samples_per_lambda))
+        # 3. 根据波长和采样率计算网格数
+        # 即使波长很长，也需要保证一定的几何逼近度 (最低点数限制)
+        min_points = 20
+        nv = int(max(min_points, (dist_v / wavelength) * samples_per_lambda))
+        nu = int(max(min_points, (dist_u / wavelength) * samples_per_lambda))
         
         return nu, nv
 
@@ -112,27 +243,124 @@ class DiscretePOIntegrator:
         
         uu, vv = np.meshgrid(u_centers, v_centers)
         
-        # 1. 基础几何数据
-        points, normals, jacobians = surface.get_data(uu, vv)
+        # 1. 尝试一次性获取点、法向、Jacobian 及导数
+        # 兼容旧接口 (仅返回 3 个值) 和新接口 (返回 5 个值)
+        data = surface.get_data(uu, vv)
         
-        # 2. 计算 dP/du (用于 alpha 计算)
-        eps_u = du * 1e-4
-        p_plus_u = surface.evaluate(uu + eps_u, vv)
-        p_minus_u = surface.evaluate(uu - eps_u, vv)
-        dP_du = (p_plus_u - p_minus_u) / (2 * eps_u)
+        direct_derivatives = False
+        if len(data) == 5:
+            # 标记使用了优化路径
+            direct_derivatives = True
+            points, normals, jacobians, dP_du, dP_dv = data
+        else:
+            # print(f"  [Solver] !!! Falling back to Finite Difference (Slow Path) !!!")
+            points, normals, jacobians = data
+            
+            # 2. 回退方案：使用有限差分计算 dP/du (用于 alpha 计算)
+            eps_u = du * 1e-4
+            p_plus_u = surface.evaluate(uu + eps_u, vv)
+            p_minus_u = surface.evaluate(uu - eps_u, vv)
+            dP_du = (p_plus_u - p_minus_u) / (2 * eps_u)
 
-        # 3. 计算 dP/dv (用于 beta 计算)
-        eps_v = dv * 1e-4
-        p_plus_v = surface.evaluate(uu, vv + eps_v)
-        p_minus_v = surface.evaluate(uu, vv - eps_v)
-        dP_dv = (p_plus_v - p_minus_v) / (2 * eps_v)
+            # 3. 回退方案：使用有限差分计算 dP/dv (用于 beta 计算)
+            eps_v = dv * 1e-4
+            p_plus_v = surface.evaluate(uu, vv + eps_v)
+            p_minus_v = surface.evaluate(uu, vv - eps_v)
+            dP_dv = (p_plus_v - p_minus_v) / (2 * eps_v)
 
-        return CachedMeshData(points, normals, jacobians, dP_du, dP_dv, du, dv)
+        res = CachedMeshData(points, normals, jacobians, dP_du, dP_dv, du, dv)
+        res.direct_derivatives = direct_derivatives
+        return res
 
     def integrate_cached(self, cached_data, wave):
         """
-        使用预计算的 CachedMeshData 进行积分。
+        使用预计算的 CachedMeshData 或 MergedMeshData 进行积分。
         """
+        # --- 分支 1: 处理合并的大批次网格 (GPU 极速模式) ---
+        if isinstance(cached_data, MergedMeshData):
+            xp = cp.get_array_module(cached_data.points) if HAS_GPU else np
+            
+            points = cached_data.points
+            normals = cached_data.normals
+            weights = cached_data.weights # 包含了 jac * du * dv
+            
+            k_vec = wave.k_vector
+            k_dir = wave.k_dir
+
+            # 确保波矢量在正确的设备上
+            if xp is not np:
+                k_vec_xp = cp.asarray(k_vec)
+                k_dir_xp = cp.asarray(k_dir)
+            else:
+                k_vec_xp = k_vec
+                k_dir_xp = k_dir
+
+            # 相位计算 (全局相位，无需 ref_point 相对计算，因为数值精度在 float64 下通常足够，
+            # 或者如果是 float32，可能需要中心化。这里假设 float64 或 GPU 精度足够)
+            # 为了数值稳定性，我们取第一个点作为参考点 (仅仅为了减小 exp 的指数大小)
+            ref_point = points[0]
+            phase_ref = 2.0 * xp.sum(ref_point * k_vec_xp)
+            phase_local = 2.0 * xp.sum((points - ref_point) * k_vec_xp, axis=-1)
+
+            # 照射检测
+            n_dot_k = xp.sum(normals * k_dir_xp, axis=-1)
+            # lit_mask = n_dot_k < 0 
+            # 优化: 直接用计算出的 illumination_factor (0 if shadowed)
+            # illumination_factor = -n_dot_k
+            # illumination_factor[illumination_factor < 0] = 0
+            
+            # 更快的方法: clip
+            illumination_factor = xp.maximum(-n_dot_k, 0.0)
+
+            # Sinc 校正
+            sinc_factor = 1.0
+            if self.sinc_mode != 'none' and cached_data.has_derivs:
+                dP_du = cached_data.dP_du
+                du = cached_data.du
+                alpha = 2.0 * xp.sum(dP_du * k_vec_xp, axis=-1)
+                
+                if self.sinc_mode == 'u_only':
+                    sinc_factor = xp.sinc(alpha * du / (2.0 * xp.pi))
+                else: # dual
+                    dP_dv = cached_data.dP_dv
+                    dv = cached_data.dv
+                    beta = 2.0 * xp.sum(dP_dv * k_vec_xp, axis=-1)
+                    sinc_u = xp.sinc(alpha * du / (2.0 * xp.pi))
+                    sinc_v = xp.sinc(beta * dv / (2.0 * xp.pi))
+                    sinc_factor = sinc_u * sinc_v
+
+            # 积分求和
+            # contributions = illumination_factor * weights * exp(1j * phase) * sinc
+            # 利用 mask 避免对背光面进行复杂运算 (exp)
+            
+            # 全局运算模式 (VRAM 足够大时，直接算可能比 boolean indexing 更快，避免 warp divergence)
+            # 但 exp 比较贵，还是筛选一下好
+            lit_indices = illumination_factor > 1e-6
+            
+            if xp.any(lit_indices):
+                # 只计算亮区
+                lit_illum = illumination_factor[lit_indices]
+                lit_weights = weights[lit_indices]
+                lit_phase = phase_local[lit_indices]
+                
+                if isinstance(sinc_factor, float):
+                    lit_sinc = sinc_factor
+                else:
+                    lit_sinc = sinc_factor[lit_indices]
+
+                contributions = (lit_illum * lit_weights * 
+                                xp.exp(1j * lit_phase) * 
+                                lit_sinc)
+                
+                result = xp.sum(contributions) * xp.exp(1j * phase_ref)
+            else:
+                result = 0.0 + 0.0j
+
+            if hasattr(result, 'get'):
+                return complex(result.get())
+            return complex(result)
+
+        # --- 分支 2: 原始逐个曲面处理逻辑 ---
         points = cached_data.points
         normals = cached_data.normals
         jacobians = cached_data.jacobians
@@ -141,38 +369,57 @@ class DiscretePOIntegrator:
         du = cached_data.du
         dv = cached_data.dv
 
+        # 自动选择 numpy 或 cupy
+        xp = np
+        if HAS_GPU:
+            xp = cp.get_array_module(points)
+
         k_vec = wave.k_vector
         k_dir = wave.k_dir
 
         # 相位稳定化
         nv, nu = points.shape[:2]
         ref_point = points[nv // 2, nu // 2]
-        phase_ref = 2.0 * np.sum(ref_point * k_vec)
-        phase_local = 2.0 * np.sum((points - ref_point) * k_vec, axis=-1)
+
+        # 确保 k_vec 是正确的后端数组
+        if xp is not np:
+            k_vec_xp = cp.asarray(k_vec)
+            k_dir_xp = cp.asarray(k_dir)
+        else:
+            k_vec_xp = k_vec
+            k_dir_xp = k_dir
+
+        phase_ref = 2.0 * xp.sum(ref_point * k_vec_xp)
+        phase_local = 2.0 * xp.sum((points - ref_point) * k_vec_xp, axis=-1)
 
         # 照射检测
-        n_dot_k = np.sum(normals * k_dir, axis=-1)
+        n_dot_k = xp.sum(normals * k_dir_xp, axis=-1)
         lit_mask = n_dot_k < 0
         illumination_factor = -n_dot_k
 
         if self.sinc_mode == 'none':
             sinc_factor = 1.0
         elif self.sinc_mode == 'u_only':
-            alpha = 2.0 * np.sum(dP_du * k_vec, axis=-1)
-            sinc_factor = np.sinc(alpha * du / (2.0 * np.pi))
+            alpha = 2.0 * xp.sum(dP_du * k_vec_xp, axis=-1)
+            sinc_factor = xp.sinc(alpha * du / (2.0 * xp.pi))
         else:  # 'dual'
-            alpha = 2.0 * np.sum(dP_du * k_vec, axis=-1)
-            beta = 2.0 * np.sum(dP_dv * k_vec, axis=-1)
-            sinc_u = np.sinc(alpha * du / (2.0 * np.pi))
-            sinc_v = np.sinc(beta * dv / (2.0 * np.pi))
+            alpha = 2.0 * xp.sum(dP_du * k_vec_xp, axis=-1)
+            beta = 2.0 * xp.sum(dP_dv * k_vec_xp, axis=-1)
+            sinc_u = xp.sinc(alpha * du / (2.0 * xp.pi))
+            sinc_v = xp.sinc(beta * dv / (2.0 * xp.pi))
             sinc_factor = sinc_u * sinc_v
 
         contributions = (illumination_factor * jacobians *
-                        np.exp(1j * phase_local) *
+                        xp.exp(1j * phase_local) *
                         sinc_factor *
                         du * dv)
 
-        return np.sum(contributions[lit_mask]) * np.exp(1j * phase_ref)
+        # 在 GPU 上求和后，如果是 GPU 数组，需要 get() 回来
+        result = xp.sum(contributions[lit_mask]) * xp.exp(1j * phase_ref)
+
+        if hasattr(result, 'get'):
+            return complex(result.get())
+        return complex(result)
 
     def integrate_surface(self, surface, wave, samples_per_lambda=None):
         """(旧接口) 直接计算，不缓存"""
@@ -341,7 +588,12 @@ class RCSAnalyzer:
                                show_progress=True,
                                progress_callback=None,
                                enable_ptd=False, ptd_edge_identifiers=None,
-                               cached_mesh_data=None, polarization='VV'):
+                               cached_mesh_data=None, polarization='VV',
+                               gpu=False):
+        if gpu and not HAS_GPU:
+            print("  [Warning] GPU 不可用 (未安装 cupy)，回退到 CPU 模式")
+            gpu = False
+
         if isinstance(geometry, list):
             surfaces = geometry
         else:
@@ -365,6 +617,8 @@ class RCSAnalyzer:
                     f"f={wave_params['frequency']/1e9:.2f}GHz")
         if enable_ptd:
             info_msg += f" (PTD: {len(ptd_edges)} edges, {polarization})"
+        if gpu:
+            info_msg += " (GPU 加速模式)"
 
         if show_progress:
             print(info_msg)
@@ -401,14 +655,20 @@ class RCSAnalyzer:
             geometry_data = surfaces
             is_cached = False
 
-        if parallel:
+        # GPU 模式下的额外处理
+        if gpu and is_cached:
+            if show_progress: print("  正在将几何数据迁移到 GPU...")
+            for mesh in geometry_data:
+                mesh.to_gpu()
+
+        if parallel and not gpu: # 并行与 GPU 互斥（除非特别处理，此处选择互斥以保证稳定性）
             if not is_cached:
                 if show_progress: print("  并行模式仅支持可缓存的求解器 (DiscretePO)，回退到串行模式。")
                 # Fall through to serial logic
             else:
                 # 只有 is_cached=True 才进入并行
                 return self._compute_parallel(
-                    geometry_data, wave_params, angles, k_mag, 
+                    geometry_data, wave_params, angles, k_mag,
                     n_workers, show_progress, progress_callback, ptd_edges, polarization,
                     is_cached=is_cached
                 )
@@ -430,16 +690,24 @@ class RCSAnalyzer:
             from physics.ptd_core import compute_ptd_contribution
             compute_ptd = compute_ptd_contribution
 
+        # 检查是否为合并的大网格 (GPU 批处理模式)
+        is_merged = isinstance(geometry_data, MergedMeshData)
+
         for i, theta in enumerate(angles):
             wave = self._make_wave(wave_params['frequency'], theta, wave_params['phi'])
             
             total_I_po = 0j
-            for obj in geometry_data:
-                # 根据是否缓存选择不同的积分接口
-                if is_cached:
-                    total_I_po += self.solver.integrate_cached(obj, wave)
-                else:
-                    total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
+            
+            if is_merged:
+                # GPU 批处理模式：一次积分即可计算所有贡献
+                total_I_po = self.solver.integrate_cached(geometry_data, wave)
+            else:
+                for obj in geometry_data:
+                    # 根据是否缓存选择不同的积分接口
+                    if is_cached:
+                        total_I_po += self.solver.integrate_cached(obj, wave)
+                    else:
+                        total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
 
             total_I_ptd = 0j
             # 添加 PTD
@@ -533,7 +801,12 @@ class RCSAnalyzer:
                                    show_progress=True,
                                    progress_callback=None,
                                    enable_ptd=False, ptd_edge_identifiers=None,
-                                   cached_mesh_data=None, polarization='VV'):
+                                   cached_mesh_data=None, polarization='VV',
+                                   gpu=False):
+        if gpu and not HAS_GPU:
+            print("  [Warning] GPU 不可用 (未安装 cupy)，回退到 CPU 模式")
+            gpu = False
+
         if isinstance(geometry, list):
             surfaces = geometry
         else:
@@ -560,6 +833,8 @@ class RCSAnalyzer:
                     f"f={frequency/1e9:.2f}GHz")
         if enable_ptd:
             info_msg += f" (PTD: Enabled)"
+        if gpu:
+            info_msg += " (GPU 加速模式)"
 
         if show_progress: print(info_msg)
         if progress_callback: progress_callback(0, total_points, info_msg)
@@ -596,10 +871,19 @@ class RCSAnalyzer:
             geometry_data = surfaces
             is_cached = False
 
+        # GPU 迁移
+        if gpu and is_cached:
+            if isinstance(geometry_data, MergedMeshData):
+                if show_progress: print("  [GPU Batching] Merged mesh ready.")
+            else:
+                if show_progress: print("  正在将几何数据迁移到 GPU...")
+                for mesh in geometry_data:
+                    mesh.to_gpu()
+
         # ---------------------------------------------------------------------
         # 分发计算
         # ---------------------------------------------------------------------
-        if parallel:
+        if parallel and not gpu:
             if not is_cached:
                 if show_progress: print("  并行模式仅支持可缓存的求解器 (DiscretePO)，回退到串行模式。")
                 # Fall through to serial logic
@@ -624,17 +908,25 @@ class RCSAnalyzer:
             'ptd': np.zeros((n_theta, n_phi))
         }
         
+        # 检查是否为合并的大网格 (GPU 批处理模式)
+        is_merged = isinstance(geometry_data, MergedMeshData)
+
         computed = 0
         for i, theta in enumerate(theta_array):
             for j, phi in enumerate(phi_array):
                 wave = self._make_wave(frequency, theta, phi)
                 
                 total_I_po = 0j
-                for obj in geometry_data:
-                    if is_cached:
-                        total_I_po += self.solver.integrate_cached(obj, wave)
-                    else:
-                        total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
+                
+                if is_merged:
+                    # GPU 批处理模式
+                    total_I_po = self.solver.integrate_cached(geometry_data, wave)
+                else:
+                    for obj in geometry_data:
+                        if is_cached:
+                            total_I_po += self.solver.integrate_cached(obj, wave)
+                        else:
+                            total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
                 
                 total_I_ptd = 0j
                 # 添加 PTD
