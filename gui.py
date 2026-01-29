@@ -403,6 +403,14 @@ class CEMPoGUI:
 
         algo_combo.bind("<<ComboboxSelected>>", on_algo_change)
 
+        # 退化网格选项
+        self.degenerate_mesh_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            algo_frame,
+            text="退化面使用条带网格 (Degenerate Mesh for Triangle Faces)",
+            variable=self.degenerate_mesh_var
+        ).pack(anchor=tk.W, pady=(5, 0))
+
         # === PTD 设置 (Edge Diffraction) ===
         ptd_frame = ttk.LabelFrame(parent, text="PTD 设置 (Edge Diffraction)", padding=(10, 5))
         ptd_frame.pack(fill=tk.X, pady=(0, 10))
@@ -910,18 +918,25 @@ class CEMPoGUI:
             messagebox.showerror("Geometry Error", str(e))
             return None
 
-    def generate_mesh_stats(self):
+    def generate_mesh_stats(self, use_degenerate_mesh=None):
         geo = self.build_geometry()
         if not geo: return
         freq = self.freq_var.get() * 1e6
         samples = self.density_var.get()
+        
+        if use_degenerate_mesh is None:
+            use_degen = self.degenerate_mesh_var.get()
+        else:
+            use_degen = use_degenerate_mesh
+            
         surfaces = geo if isinstance(geo, list) else [geo]
-        self.log("Generating mesh statistics...")
+        mesh_mode = "退化网格模式" if use_degen else "标准网格模式"
+        self.log(f"Generating mesh statistics ({mesh_mode})...")
         self.progress_var.set(0)
         self.progress_label.config(text="正在计算网格统计...")
-        threading.Thread(target=self._compute_mesh_stats, args=(surfaces, freq, samples), daemon=True).start()
+        threading.Thread(target=self._compute_mesh_stats, args=(surfaces, freq, samples, use_degen), daemon=True).start()
 
-    def _compute_mesh_stats(self, surfaces, freq, samples):
+    def _compute_mesh_stats(self, surfaces, freq, samples, use_degenerate_mesh=False):
         """
         后台线程：[升级版] 并行全量预计算几何与网格。
         目标：
@@ -929,102 +944,123 @@ class CEMPoGUI:
         2. 将数据缓存到 'self.cached_mesh_data' 供 RCS 计算复用。
         3. 统计网格信息并显示。
         4. 记录并显示耗时。
+        5. [新增] 支持退化网格选项。
         """
         try:
             import time
             from solvers.po import DiscretePOIntegrator as RibbonIntegrator
             from physics.wave import IncidentWave
             from physics.constants import C0
+            from core.mesh_data import detect_degenerate_edge
             import os
 
             t_start = time.time()
-            
+
             solver = RibbonIntegrator()
             wave = IncidentWave(freq, 0, 0)
             wavelength = C0 / freq
-            
+
             n_total = len(surfaces)
             cached_surfaces = [None] * n_total
+            viz_data_list = [None] * n_total  # 存储可视化所需数据
             face_stats = [None] * n_total
-            
+
             all_min = np.array([np.inf, np.inf, np.inf])
             all_max = np.array([-np.inf, -np.inf, -np.inf])
-            
+
             max_workers = os.cpu_count() or 4
             completed_count = 0
-            
-            self._update_progress(0, n_total, f"正在并行预计算网格 (Workers={max_workers})...")
+
+            mesh_mode = "退化网格" if use_degenerate_mesh else "标准网格"
+            self._update_progress(0, n_total, f"正在并行预计算网格 ({mesh_mode}, Workers={max_workers})...")
 
             def process_full_precompute(idx, surf):
-                # 1. 全量预计算 (耗时步骤)
-                cached_data = solver.precompute_mesh(surf, wavelength, samples)
-                
-                # 2. 提取统计信息
+                # 1. 全量预计算 (耗时步骤) - 使用条带网格选项
+                cached_data = solver.precompute_mesh(surf, wavelength, samples,
+                                                      use_degenerate_mesh=use_degenerate_mesh)
+
+                # 2. 提取统计信息 - 支持规则网格和退化网格
                 points = cached_data.points
-                nu, nv = points.shape[1], points.shape[0]
-                n_cells = nu * nv
-                # 简单估算包围盒 (取所有点太慢，只取角点或边缘点，或者如果points不大就直接取)
-                # 为了速度，这里只取4个角点做包围盒估算
-                # (precompute_mesh 已经生成了所有点，直接用 points.min/max 其实也很快，因为是 numpy)
-                # 但考虑到 points 可能很大，我们还是只取角点，或者降采样
-                # 这里为了准确性，尝试直接计算 cached_data.points 的 bound
+                if points.ndim == 3:
+                    # 规则网格
+                    nu, nv = points.shape[1], points.shape[0]
+                    n_cells = nu * nv
+                    viz_data = {'points': points, 'normals': cached_data.normals,
+                                'nu': nu, 'nv': nv, 'is_degenerate': False}
+                else:
+                    # 退化网格 (一维)
+                    n_cells = len(points)
+                    nu, nv = n_cells, 1
+                    # 获取单元角点用于可视化（使用较低密度）
+                    degen_edge = detect_degenerate_edge(surf)
+                    vis_a = min(samples, 40)
+                    vis_b = min(samples, 40)
+                    mesh_cells, _, _ = solver.get_triangle_mesh_cells(surf, degen_edge, vis_a, vis_b)
+                    viz_data = {'points': points, 'normals': cached_data.normals,
+                                'nu': nu, 'nv': nv, 'is_degenerate': True,
+                                'mesh_cells': mesh_cells, 'surface': surf}
+
+                # 包围盒
                 pts_flat = points.reshape(-1, 3)
                 l_min = pts_flat.min(axis=0)
                 l_max = pts_flat.max(axis=0)
-                
+
                 step_id = getattr(surf, 'step_id', idx)
                 stats = {'index': idx, 'step_id': step_id, 'nu': nu, 'nv': nv, 'cells': n_cells}
-                
-                return idx, cached_data, stats, l_min, l_max
+
+                return idx, cached_data, viz_data, stats, l_min, l_max
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = [executor.submit(process_full_precompute, i, s) for i, s in enumerate(surfaces)]
-                
+
                 for future in as_completed(futures):
-                    idx, cached_data, stats, l_min, l_max = future.result()
-                    
+                    idx, cached_data, viz_data, stats, l_min, l_max = future.result()
+
                     cached_surfaces[idx] = cached_data
+                    viz_data_list[idx] = viz_data
                     face_stats[idx] = stats
-                    
+
                     all_min = np.minimum(all_min, l_min)
                     all_max = np.maximum(all_max, l_max)
-                    
+
                     completed_count += 1
                     if n_total < 100 or completed_count % 5 == 0 or completed_count == n_total:
                         self._update_progress(completed_count, n_total, f"预计算进度: {completed_count}/{n_total}")
-            
+
             t_end = time.time()
             duration = t_end - t_start
-            
+
             total_cells = sum(s['cells'] for s in face_stats)
-            total_vertices = sum((s['nu']+1)*(s['nv']+1) for s in face_stats)
+            total_vertices = sum(s['cells'] for s in face_stats)  # 退化网格用单元数代替顶点数
             model_size = all_max - all_min
 
             # 检查是否有任何曲面使用了导数加速
             any_optimized = any(getattr(m, 'direct_derivatives', False) for m in cached_surfaces)
 
-            # 记录缓存参数
+            # 记录缓存参数（包含所有影响网格的参数）
             current_params = {
                 'freq': freq,
                 'samples': samples,
-                'surfaces_id': id(surfaces)
+                'use_degenerate_mesh': use_degenerate_mesh,
+                'n_surfaces': n_total
             }
 
             def update_ui_and_cache():
-                # 存入缓存
+                # 存入缓存（包括可视化数据）
                 self.cached_mesh_data = cached_surfaces
+                self.cached_viz_data = viz_data_list  # 新增：缓存可视化数据
                 self.cached_mesh_params = current_params
-                
+
                 # 显示日志
                 self.log(f"✅ 网格生成与预计算完成 (Mesh Generation Done)")
                 if any_optimized:
                     self.log(f"   - 优化 (Opt): 已启用 OCC 直接导数加速 (Direct Derivatives)")
                 else:
                     self.log(f"   - 警告 (Warn): 未检测到导数加速，使用慢速路径")
-                
+
                 self.log(f"   - 耗时 (Time): {duration:.4f} s")
-                self.log(f"   - 速度 (Speed): {total_vertices/duration/1000:.1f} kPts/s")
-                self.log(f"   - 缓存 (Cache): 已就绪 (Ready for RCS calc)")
+                self.log(f"   - 速度 (Speed): {total_cells/duration/1000:.1f} kPts/s")
+                self.log(f"   - 缓存 (Cache): 已就绪 (Ready for RCS calc and visualization)")
                 
                 # 显示统计弹窗
                 self._show_mesh_stats(n_total, total_cells, total_vertices, wavelength, face_stats, model_size)
@@ -1056,16 +1092,90 @@ class CEMPoGUI:
         if not geo: return
         freq = self.freq_var.get() * 1e6
         samples = self.density_var.get()
+        use_degen = self.degenerate_mesh_var.get()
         surfaces = geo if isinstance(geo, list) else [geo]
+
+        # 检查缓存是否有效（参数相同则跳过重新生成）
+        current_params = {
+            'freq': freq,
+            'samples': samples,
+            'use_degenerate_mesh': use_degen,
+            'n_surfaces': len(surfaces)
+        }
+        if (hasattr(self, 'cached_mesh_params') and
+            hasattr(self, 'cached_mesh_data') and
+            self.cached_mesh_data is not None and
+            self.cached_mesh_params.get('freq') == freq and
+            self.cached_mesh_params.get('samples') == samples and
+            self.cached_mesh_params.get('use_degenerate_mesh') == use_degen and
+            self.cached_mesh_params.get('n_surfaces') == len(surfaces)):
+            self.log("使用已缓存的网格数据 (Using cached mesh data)...")
+            # 直接使用缓存的数据进行可视化
+            self._visualize_cached_mesh(surfaces, freq)
+            return
+
         if len(surfaces) > 20:
              if not messagebox.askyesno("Warning", f"该模型包含 {len(surfaces)} 个面，可视化可能较慢。是否继续？"): return
         self.log("Generating mesh for visualization...")
         self.progress_var.set(0)
         self.progress_label.config(text="正在生成网格数据...")
-        try: threading.Thread(target=self.plot_multi_surface_mesh, args=(surfaces, freq, samples), daemon=True).start()
+        try: threading.Thread(target=self.plot_multi_surface_mesh, args=(surfaces, freq, samples, use_degen), daemon=True).start()
         except Exception as e: self.log(f"Visualization Error: {e}")
 
-    def plot_multi_surface_mesh(self, surfaces, freq, samples):
+    def _visualize_cached_mesh(self, surfaces, freq):
+        """使用缓存的网格数据进行可视化"""
+        from physics.constants import C0
+        wavelength = C0 / freq
+
+        # 优先使用缓存的可视化数据（包含退化网格的 mesh_cells 和 surface 信息）
+        if hasattr(self, 'cached_viz_data') and self.cached_viz_data is not None:
+            mesh_data_list = self.cached_viz_data
+            total_points = sum(d['points'].reshape(-1, 3).shape[0] for d in mesh_data_list)
+        else:
+            # 回退：从 cached_mesh_data 构建（不支持退化网格的完整可视化）
+            mesh_data_list = []
+            total_points = 0
+            
+            # 为了生成 mesh_cells，可能需要 solver
+            from solvers.po import DiscretePOIntegrator as RibbonIntegrator
+            from core.mesh_data import detect_degenerate_edge
+            solver = RibbonIntegrator()
+            
+            for i, cached_data in enumerate(self.cached_mesh_data):
+                points = cached_data.points
+                normals = cached_data.normals
+                
+                # 尝试获取对应的 surface 对象（如果有）
+                surf = surfaces[i] if i < len(surfaces) else None
+                
+                if points.ndim == 3:
+                    nu, nv = points.shape[1], points.shape[0]
+                    n_pts = nu * nv
+                    mesh_data_list.append({'points': points, 'normals': normals, 'nu': nu, 'nv': nv, 'is_degenerate': False})
+                else:
+                    # 退化网格处理
+                    nu, nv = len(points), 1
+                    n_pts = len(points)
+                    
+                    viz_item = {'points': points, 'normals': normals, 'nu': nu, 'nv': nv, 'is_degenerate': True}
+                    
+                    # 尝试重新生成 mesh_cells 用于显示
+                    if surf:
+                        degen_edge = detect_degenerate_edge(surf)
+                        # 这里没有原始 samples 信息，使用默认值或估算值
+                        vis_a = 20 
+                        vis_b = 20
+                        mesh_cells, _, _ = solver.get_triangle_mesh_cells(surf, degen_edge, vis_a, vis_b)
+                        viz_item['mesh_cells'] = mesh_cells
+                        viz_item['surface'] = surf
+                        
+                    mesh_data_list.append(viz_item)
+                    
+                total_points += n_pts
+
+        self.viz_manager.show_mesh_visualization(mesh_data_list, total_points, len(surfaces), wavelength)
+
+    def plot_multi_surface_mesh(self, surfaces, freq, samples, use_degenerate_mesh=False):
         """
         后台线程：生成全量网格数据。
         优化：
@@ -1073,14 +1183,15 @@ class CEMPoGUI:
         2. 将生成的 CachedMeshData 对象存入全局缓存 'self.cached_mesh_data'。
         3. [新增] 使用多线程并行生成，加速几何评估。
         4. [新增] 增加详细计时功能。
+        5. [新增] 支持退化网格选项。
         """
         try:
             import time
             from physics.constants import C0
             import os
-            
+
             t_start = time.time()
-            
+
             solver = RibbonIntegrator()
             # wave 仅用于提供波长，precompute 不依赖角度
             wave = IncidentWave(freq, 0, 0)
@@ -1089,25 +1200,50 @@ class CEMPoGUI:
             n_total = len(surfaces)
             cached_surfaces = [None] * n_total
             mesh_data_list = [None] * n_total
-            
+
             total_points = 0
-            
+
             # 多线程处理
             max_workers = os.cpu_count() or 4
             completed_count = 0
-            
-            self._update_progress(0, n_total, f"正在并行预计算几何与网格 (Workers={max_workers})...")
+
+            mesh_mode = "退化网格模式" if use_degenerate_mesh else "标准网格模式"
+            self._update_progress(0, n_total, f"正在并行预计算几何与网格 ({mesh_mode}, Workers={max_workers})...")
 
             def process_mesh_gen(idx, surf):
+                from core.mesh_data import detect_degenerate_edge
+
                 # 调用 precompute_mesh 生成全量物理数据 (这是最耗时的一步)
-                cached_data = solver.precompute_mesh(surf, wavelength, samples)
-                
+                cached_data = solver.precompute_mesh(surf, wavelength, samples,
+                                                      use_degenerate_mesh=use_degenerate_mesh)
+
                 # 提取画图所需数据
                 points = cached_data.points
                 normals = cached_data.normals
-                nu, nv = points.shape[1], points.shape[0]
-                
-                return idx, cached_data, {'points': points, 'normals': normals, 'nu': nu, 'nv': nv}, nu * nv
+
+                # 支持退化网格（一维）和规则网格（二维）
+                if points.ndim == 3:
+                    nu, nv = points.shape[1], points.shape[0]
+                    n_pts = nu * nv
+                    viz_data = {'points': points, 'normals': normals, 'nu': nu, 'nv': nv, 'is_degenerate': False}
+                else:
+                    n_pts = len(points)
+                    # 退化网格：获取单元角点用于绘制（使用较低密度以加速）
+                    degen_edge = detect_degenerate_edge(surf)
+                    # 可视化用较低密度（最多 40x40）
+                    vis_a = min(samples, 40)
+                    vis_b = min(samples, 40)
+                    mesh_cells, _, _ = solver.get_triangle_mesh_cells(surf, degen_edge, vis_a, vis_b)
+                    viz_data = {
+                        'points': points,
+                        'normals': normals,
+                        'nu': n_pts, 'nv': 1,
+                        'is_degenerate': True,
+                        'mesh_cells': mesh_cells,
+                        'surface': surf
+                    }
+
+                return idx, cached_data, viz_data, n_pts
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = [executor.submit(process_mesh_gen, i, s) for i, s in enumerate(surfaces)]
@@ -1131,12 +1267,14 @@ class CEMPoGUI:
             current_params = {
                 'freq': freq,
                 'samples': samples,
-                'surfaces_id': id(surfaces) # 绑定到当前的几何对象实例
+                'use_degenerate_mesh': use_degenerate_mesh,
+                'n_surfaces': n_total
             }
 
             # 关键修改：将全量数据回写到 GUI 主类中进行持久化缓存
             def update_cache():
                 self.cached_mesh_data = cached_surfaces
+                self.cached_viz_data = mesh_data_list  # 同时缓存可视化数据
                 self.cached_mesh_params = current_params
                 # 在主线程打印显眼的耗时日志
                 self.log(f"✅ 几何预计算完成 (Geometry Precomputation Done)")
@@ -1196,10 +1334,12 @@ class CEMPoGUI:
         # 只有离散类算法支持复用网格缓存
         if 'discrete_po' in current_algo_id and self.cached_mesh_data is not None:
             # 校验缓存是否匹配当前参数
+            use_degen = self.degenerate_mesh_var.get()
             check_params = {
                 'freq': freq,
                 'samples': samples,
-                'surfaces_id': id(geo) # 确保是同一个几何对象实例
+                'use_degenerate_mesh': use_degen,
+                'n_surfaces': len(geo) if isinstance(geo, list) else 1
             }
             if check_params == self.cached_mesh_params:
                 cached_mesh = self.cached_mesh_data
@@ -1278,19 +1418,20 @@ class CEMPoGUI:
             analyzer = RCSAnalyzer(solver)
             self.root.after(0, lambda: self.log(f"Using algorithm: {AVAILABLE_ALGORITHMS[algo_id]['name']}"))
             rcs_result = analyzer.compute_monostatic_rcs(
-                geo, 
-                {'frequency': freq, 'phi': phi_rad}, 
-                angles_rad, 
-                samples_per_lambda=samples, 
-                parallel=parallel, 
-                n_workers=n_workers, 
-                show_progress=False, 
-                progress_callback=self._update_progress, 
-                enable_ptd=enable_ptd, 
-                ptd_edge_identifiers=ptd_edge_identifiers, 
-                cached_mesh_data=cached_mesh_data, 
+                geo,
+                {'frequency': freq, 'phi': phi_rad},
+                angles_rad,
+                samples_per_lambda=samples,
+                parallel=parallel,
+                n_workers=n_workers,
+                show_progress=False,
+                progress_callback=self._update_progress,
+                enable_ptd=enable_ptd,
+                ptd_edge_identifiers=ptd_edge_identifiers,
+                cached_mesh_data=cached_mesh_data,
                 polarization=polarization,
-                gpu=gpu
+                gpu=gpu,
+                use_degenerate_mesh=self.degenerate_mesh_var.get()
             )
             end_time = time.time()
             elapsed_time = end_time - start_time
@@ -1332,20 +1473,21 @@ class CEMPoGUI:
             analyzer = RCSAnalyzer(solver)
             self.root.after(0, lambda: self.log(f"Using algorithm: {AVAILABLE_ALGORITHMS[algo_id]['name']}"))
             rcs_2d_result = analyzer.compute_monostatic_rcs_2d(
-                geo, 
-                freq, 
-                theta_rad, 
-                phi_rad, 
-                samples_per_lambda=samples, 
-                parallel=parallel, 
-                n_workers=n_workers, 
-                show_progress=False, 
-                progress_callback=self._update_progress, 
-                enable_ptd=enable_ptd, 
-                ptd_edge_identifiers=ptd_edge_identifiers, 
-                cached_mesh_data=cached_mesh_data, 
+                geo,
+                freq,
+                theta_rad,
+                phi_rad,
+                samples_per_lambda=samples,
+                parallel=parallel,
+                n_workers=n_workers,
+                show_progress=False,
+                progress_callback=self._update_progress,
+                enable_ptd=enable_ptd,
+                ptd_edge_identifiers=ptd_edge_identifiers,
+                cached_mesh_data=cached_mesh_data,
                 polarization=polarization,
-                gpu=gpu
+                gpu=gpu,
+                use_degenerate_mesh=self.degenerate_mesh_var.get()
             )
             end_time = time.time()
             elapsed_time = end_time - start_time
@@ -1464,19 +1606,51 @@ class CEMPoGUI:
                     self.phi_n.set(config.get('phi_n', 1))
                     self.step_file_path = config.get('step_file_path', None)
                     
-                    # Comparison Tab Settings
+                    # Algorithm & Mesh
+                    self.algorithm_var.set(config.get('algorithm', 'Discrete PO (Dual-Sinc)'))
+                    self.degenerate_mesh_var.set(config.get('degenerate_mesh', False))
+                    
+                    # PTD
+                    self.ptd_enabled_var.set(config.get('ptd_enabled', False))
+                    self.ptd_edges_var.set(config.get('ptd_edges', ''))
+                    self.pol_var.set(config.get('polarization', 'VV'))
+                    if self.ptd_enabled_var.get():
+                        self.ptd_entry.configure(state='normal')
+                    
+                    # Comparison
+                    self.compare_analytical_var.set(config.get('compare_analytical', True))
                     self.ref_data_dir.set(config.get('ref_data_dir', r"F:\data\parameter\csv_output"))
                     self.comp_model_id.set(config.get('comp_model_id', "001"))
                     self.comp_freq_suffix.set(config.get('comp_freq_suffix', "1.5G"))
                     self.plot_style_var.set(config.get('plot_style', "pixel"))
+                    
+                    # Performance
+                    self.parallel_var.set(config.get('parallel', False))
+                    self.workers_var.set(config.get('workers', 4))
+                    self.gpu_var.set(config.get('gpu', False))
+                    
+                    # Geometry
+                    self.geo_type_var.set(config.get('geo_type', 'STEP File'))
+                    self.step_unit_var.set(config.get('step_unit', 'mm'))
+                    self.invert_indices_var.set(config.get('invert_indices', '0,1,3,5'))
+                    
+                    saved_geo_params = config.get('geo_params_cache', {})
+                    if saved_geo_params:
+                        self.geo_params_cache.update(saved_geo_params)
+                    
+                    # Trigger UI update for geometry inputs
+                    self.update_geo_inputs()
 
                     if self.step_file_path and os.path.exists(self.step_file_path):
                         if hasattr(self, 'step_label'):
                             self.step_label.config(text=os.path.basename(self.step_file_path))
-            except:
-                pass
+            except Exception as e:
+                print(f"Config load error: {e}")
 
     def save_config(self):
+        # Ensure latest geo params are in cache
+        self.save_geo_params()
+        
         config = {
             'freq': self.freq_var.get(),
             'density': self.density_var.get(),
@@ -1488,15 +1662,36 @@ class CEMPoGUI:
             'phi_n': self.phi_n.get(),
             'step_file_path': self.step_file_path,
             
-            # Comparison Tab Settings
+            # Algorithm & Mesh
+            'algorithm': self.algorithm_var.get(),
+            'degenerate_mesh': self.degenerate_mesh_var.get(),
+            
+            # PTD
+            'ptd_enabled': self.ptd_enabled_var.get(),
+            'ptd_edges': self.ptd_edges_var.get(),
+            'polarization': self.pol_var.get(),
+            
+            # Comparison
+            'compare_analytical': self.compare_analytical_var.get(),
             'ref_data_dir': self.ref_data_dir.get(),
             'comp_model_id': self.comp_model_id.get(),
             'comp_freq_suffix': self.comp_freq_suffix.get(),
-            'plot_style': self.plot_style_var.get()
+            'plot_style': self.plot_style_var.get(),
+            
+            # Performance
+            'parallel': self.parallel_var.get(),
+            'workers': self.workers_var.get(),
+            'gpu': self.gpu_var.get(),
+            
+            # Geometry
+            'geo_type': self.geo_type_var.get(),
+            'step_unit': self.step_unit_var.get(),
+            'invert_indices': self.invert_indices_var.get(),
+            'geo_params_cache': self.geo_params_cache
         }
         try:
             with open(CONFIG_FILE, 'w') as f:
-                json.dump(config, f)
+                json.dump(config, f, indent=4)
         except:
             pass
 

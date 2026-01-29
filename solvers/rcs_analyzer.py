@@ -62,7 +62,7 @@ class RCSAnalyzer:
                                progress_callback=None,
                                enable_ptd=False, ptd_edge_identifiers=None,
                                cached_mesh_data=None, polarization='VV',
-                               gpu=False):
+                               gpu=False, use_degenerate_mesh=False):
         if gpu and not HAS_GPU:
             print("  [Warning] GPU 不可用 (未安装 cupy)，回退到 CPU 模式")
             gpu = False
@@ -117,7 +117,8 @@ class RCSAnalyzer:
                 geometry_data = []
                 n_surfs = len(surfaces)
                 for i, s in enumerate(surfaces):
-                    geometry_data.append(self.solver.precompute_mesh(s, wavelength, samples_per_lambda))
+                    geometry_data.append(self.solver.precompute_mesh(
+                        s, wavelength, samples_per_lambda, use_degenerate_mesh=use_degenerate_mesh))
                     if progress_callback and (i % 5 == 0 or i == n_surfs - 1):
                          progress_callback(0, n_angles, f"预计算几何: {i+1}/{n_surfs}")
                 is_cached = True
@@ -258,7 +259,7 @@ class RCSAnalyzer:
                                    progress_callback=None,
                                    enable_ptd=False, ptd_edge_identifiers=None,
                                    cached_mesh_data=None, polarization='VV',
-                                   gpu=False):
+                                   gpu=False, use_degenerate_mesh=False):
         # 2D 扫描逻辑 (此处略做简化，完整逻辑与 compute_monostatic_rcs 类似，但遍历 2D 数组)
         # 为节省篇幅，这里暂不展开所有代码，主要逻辑已在 compute_monostatic_rcs 中体现
         # 实际项目中应完整迁移 2D 逻辑，或将其与 1D 逻辑统一
@@ -311,7 +312,8 @@ class RCSAnalyzer:
                 geometry_data = []
                 n_surfs = len(surfaces)
                 for i, s in enumerate(surfaces):
-                    geometry_data.append(self.solver.precompute_mesh(s, wavelength, samples_per_lambda))
+                    geometry_data.append(self.solver.precompute_mesh(
+                        s, wavelength, samples_per_lambda, use_degenerate_mesh=use_degenerate_mesh))
                     if progress_callback and (i % 5 == 0 or i == n_surfs - 1):
                          progress_callback(0, total_points, f"预计算几何: {i+1}/{n_surfs}")
                 is_cached = True

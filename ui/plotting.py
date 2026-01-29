@@ -441,31 +441,73 @@ class VisualizationManager:
                 normals = data['normals']
                 nu, nv = data['nu'], data['nv']
 
-                stride_u = max(1, nu // 40)
-                stride_v = max(1, nv // 40)
+                # 检查是否为退化网格
+                is_degenerate = data.get('is_degenerate', points.ndim == 2)
 
-                X = points[::stride_v, ::stride_u, 0]
-                Y = points[::stride_v, ::stride_u, 1]
-                Z = points[::stride_v, ::stride_u, 2]
-                rows, cols = X.shape
+                if is_degenerate and 'mesh_cells' in data and 'surface' in data:
+                    # 退化网格：使用单元角点绘制网格线
+                    mesh_cells = data['mesh_cells']
+                    surf = data['surface']
 
-                for r in range(rows):
-                    for c in range(cols - 1):
-                        all_lines.append([(X[r, c], Y[r, c], Z[r, c]), (X[r, c + 1], Y[r, c + 1], Z[r, c + 1])])
+                    # mesh_cells 已经是降采样后的（最多 40x40）
+                    for cell in mesh_cells:
+                        # 获取角点的 3D 坐标
+                        u_corners = np.array([c[0] for c in cell] + [cell[0][0]])
+                        v_corners = np.array([c[1] for c in cell] + [cell[0][1]])
+                        pts_3d = surf.evaluate(u_corners, v_corners)
 
-                for r in range(rows - 1):
-                    for c in range(cols):
-                        all_lines.append([(X[r, c], Y[r, c], Z[r, c]), (X[r + 1, c], Y[r + 1, c], Z[r + 1, c])])
+                        # 添加单元边界线
+                        for j in range(len(cell)):
+                            all_lines.append([
+                                (pts_3d[j, 0], pts_3d[j, 1], pts_3d[j, 2]),
+                                (pts_3d[j + 1, 0], pts_3d[j + 1, 1], pts_3d[j + 1, 2])
+                            ])
 
-                # 绘制法线
-                target_arrows = 6
-                skip_u = max(1, nu // target_arrows)
-                skip_v = max(1, nv // target_arrows)
+                    # 绘制部分法线
+                    target_arrows = 6
+                    skip = max(1, len(points) // (target_arrows * target_arrows))
+                    ax.quiver(points[::skip, 0], points[::skip, 1], points[::skip, 2],
+                              normals[::skip, 0], normals[::skip, 1], normals[::skip, 2],
+                              length=wavelength / 6, color='#FF5555', alpha=0.8, linewidth=0.8)
 
-                ax.quiver(points[::skip_v, ::skip_u, 0], points[::skip_v, ::skip_u, 1], points[::skip_v, ::skip_u, 2],
-                          normals[::skip_v, ::skip_u, 0], normals[::skip_v, ::skip_u, 1],
-                          normals[::skip_v, ::skip_u, 2],
-                          length=wavelength / 6, color='#FF5555', alpha=0.8, linewidth=0.8)
+                elif is_degenerate:
+                    # 退化网格但没有单元信息：绘制散点
+                    stride = max(1, len(points) // 200)
+                    ax.scatter(points[::stride, 0], points[::stride, 1], points[::stride, 2],
+                              c='#007ACC', s=1, alpha=0.5)
+
+                    target_arrows = 6
+                    skip = max(1, len(points) // (target_arrows * target_arrows))
+                    ax.quiver(points[::skip, 0], points[::skip, 1], points[::skip, 2],
+                              normals[::skip, 0], normals[::skip, 1], normals[::skip, 2],
+                              length=wavelength / 6, color='#FF5555', alpha=0.8, linewidth=0.8)
+                else:
+                    # 规则网格：绘制网格线
+                    stride_u = max(1, nu // 40)
+                    stride_v = max(1, nv // 40)
+
+                    X = points[::stride_v, ::stride_u, 0]
+                    Y = points[::stride_v, ::stride_u, 1]
+                    Z = points[::stride_v, ::stride_u, 2]
+                    rows, cols = X.shape
+
+                    for r in range(rows):
+                        for c in range(cols - 1):
+                            all_lines.append([(X[r, c], Y[r, c], Z[r, c]), (X[r, c + 1], Y[r, c + 1], Z[r, c + 1])])
+
+                    for r in range(rows - 1):
+                        for c in range(cols):
+                            all_lines.append([(X[r, c], Y[r, c], Z[r, c]), (X[r + 1, c], Y[r + 1, c], Z[r + 1, c])])
+
+                    # 绘制法线
+                    target_arrows = 6
+                    skip_u = max(1, nu // target_arrows)
+                    skip_v = max(1, nv // target_arrows)
+
+                    ax.quiver(points[::skip_v, ::skip_u, 0], points[::skip_v, ::skip_u, 1], points[::skip_v, ::skip_u, 2],
+                              normals[::skip_v, ::skip_u, 0], normals[::skip_v, ::skip_u, 1],
+                              normals[::skip_v, ::skip_u, 2],
+                              length=wavelength / 6, color='#FF5555', alpha=0.8, linewidth=0.8)
 
             if all_lines:
                 line_collection = Line3DCollection(all_lines, colors='#007ACC', linewidths=0.5, alpha=0.4)

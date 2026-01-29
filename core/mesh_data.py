@@ -59,6 +59,10 @@ class CachedMeshData:
     """
     预计算的网格数据，用于加速计算和并行传输。
     包含积分所需的所有几何信息（纯 NumPy 数组）。
+
+    支持两种模式：
+    1. 规则网格：du/dv 为标量，points 形状为 (nv, nu, 3)
+    2. 退化网格：du/dv 为数组 (N,)，points 形状为 (N, 3)
     """
     def __init__(self, points, normals, jacobians, dP_du, dP_dv, du, dv):
         self.points = points
@@ -66,8 +70,8 @@ class CachedMeshData:
         self.jacobians = jacobians
         self.dP_du = dP_du  # Partial derivative dP/du for alpha calc
         self.dP_dv = dP_dv  # Partial derivative dP/dv for beta calc
-        self.du = du
-        self.dv = dv
+        self.du = du  # 标量或数组 (N,)
+        self.dv = dv  # 标量或数组 (N,)
         self.direct_derivatives = False # 标记是否直接从几何体获取了导数
 
     def to_gpu(self):
@@ -79,7 +83,10 @@ class CachedMeshData:
         self.jacobians = cp.asarray(self.jacobians)
         self.dP_du = cp.asarray(self.dP_du)
         self.dP_dv = cp.asarray(self.dP_dv)
-        # du, dv 是标量，通常不需要 cp.asarray，除非需要参与 GPU 运算
+        # du, dv 可能是标量或数组
+        if isinstance(self.du, np.ndarray):
+            self.du = cp.asarray(self.du)
+            self.dv = cp.asarray(self.dv)
         return self
 
     def to_cpu(self):
@@ -90,6 +97,9 @@ class CachedMeshData:
             self.jacobians = self.jacobians.get()
             self.dP_du = self.dP_du.get()
             self.dP_dv = self.dP_dv.get()
+            if hasattr(self.du, 'get'):
+                self.du = self.du.get()
+                self.dv = self.dv.get()
         return self
 
 class MergedMeshData:
@@ -119,16 +129,23 @@ class MergedMeshData:
         has_derivs = hasattr(mesh_list[0], 'dP_du')
         
         for m in mesh_list:
-            # 预乘面积元 du * dv
+            # 预乘面积元 du * dv（支持标量或数组）
             w = m.jacobians * m.du * m.dv
             all_weights.append(w.reshape(-1))
-            
+
             if has_derivs:
                 all_dP_du.append(m.dP_du.reshape(-1, 3))
                 all_dP_dv.append(m.dP_dv.reshape(-1, 3))
                 # 为了向量化，我们需要把 du, dv 扩展到每个点上
-                all_du.append(np.full(m.points.shape[:2], m.du).reshape(-1))
-                all_dv.append(np.full(m.points.shape[:2], m.dv).reshape(-1))
+                # 支持标量或数组形式的 du/dv
+                if isinstance(m.du, np.ndarray):
+                    # 退化网格：du/dv 已经是数组
+                    all_du.append(m.du.reshape(-1))
+                    all_dv.append(m.dv.reshape(-1))
+                else:
+                    # 规则网格：du/dv 是标量，需要扩展
+                    all_du.append(np.full(m.points.shape[:2], m.du).reshape(-1))
+                    all_dv.append(np.full(m.points.shape[:2], m.dv).reshape(-1))
 
         # 2. 合并大数组 (CPU 端操作)
         self.points = np.vstack(all_points)
