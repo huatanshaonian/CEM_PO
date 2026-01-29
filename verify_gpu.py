@@ -21,7 +21,8 @@ except ImportError:
     print("Cupy NOT detected. GPU tests will be skipped or simulated.")
 
 from geometry.plate import AnalyticPlate
-from solver.ribbon_solver import get_integrator, RCSAnalyzer
+from solvers.api import get_integrator
+from solvers.rcs_analyzer import RCSAnalyzer
 from physics.constants import C0
 
 def verify_gpu_implementation():

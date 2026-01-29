@@ -44,6 +44,39 @@ class VisualizationManager:
         self.compare_canvas = None
         self.compare_toolbar = None
 
+        # 可视化状态标志
+        self.show_normals = False
+        self.show_incidence = False
+        self.normal_quivers = [] # 存储法向箭头对象列表 (每个 subplot 或 patch 一个)
+        self.incidence_quivers = [] # 存储入射波箭头对象
+
+    def set_normals_visible(self, visible):
+        self.show_normals = visible
+        # 尝试直接更新现有图形
+        for q in self.normal_quivers:
+            try:
+                # Quiver 不支持 set_visible 的 bug workaround: 设置 alpha
+                alpha = 0.6 if visible else 0.0
+                q.set_alpha(alpha)
+            except:
+                pass
+        
+        # 触发重绘
+        if self.preview_canvas:
+            self.preview_canvas.draw()
+
+    def set_incidence_visible(self, visible):
+        self.show_incidence = visible
+        for q in self.incidence_quivers:
+            try:
+                alpha = 1.0 if visible else 0.0
+                q.set_alpha(alpha)
+            except:
+                pass
+
+        if self.preview_canvas:
+            self.preview_canvas.draw()
+
     def log(self, msg):
         self.log_callback(msg)
 
@@ -115,69 +148,66 @@ class VisualizationManager:
         ax.set_zlim3d([z_middle - plot_radius, z_middle + plot_radius])
         ax.set_box_aspect((1, 1, 1))
 
-    def show_step_preview(self, mesh_data_list, total_points, scan_params=None, ptd_edges_data=None):
-        """显示 STEP 模型预览，带交互式面选择侧边栏（嵌入式）"""
+    def show_step_preview(self, mesh_data_list, total_points, scan_params, ptd_edges_data=None, incident_dir=None):
+        """显示整体几何预览（所有面）"""
         try:
-            if scan_params is None:
-                scan_params = {}
-
-            # 清除旧内容并切换到预览 Tab
             self._clear_frame(self.preview_frame)
             self._switch_to_preview_tab()
 
-            if not self.preview_frame:
-                self.log("Error: No preview frame available")
-                return
+            # 重置箭头
+            self.normal_quivers = []
+            self.incidence_quivers = []
 
-            # --- 布局：左侧绘图，右侧控制 ---
-            plot_frame = ttk.Frame(self.preview_frame)
-            plot_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-            control_frame = ttk.Frame(self.preview_frame, width=200, padding=5)
-            control_frame.pack(side=tk.RIGHT, fill=tk.Y)
-
-            ttk.Label(control_frame, text="面可见性控制", font=("Microsoft YaHei UI", 10, "bold")).pack(pady=(0, 5))
-
-            # 全选/全不选按钮
-            btn_frame = ttk.Frame(control_frame)
-            btn_frame.pack(fill=tk.X, pady=5)
-
-            # 滚动区域容器
-            canvas_container = ttk.Frame(control_frame)
-            canvas_container.pack(fill=tk.BOTH, expand=True)
-
-            # 滚动条和 Canvas
-            scrollbar = ttk.Scrollbar(canvas_container, orient="vertical")
-            scroll_canvas = tk.Canvas(canvas_container, yscrollcommand=scrollbar.set, width=180)
-
-            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-            scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-            scrollbar.config(command=scroll_canvas.yview)
-
-            # 复选框容器 Frame
-            chk_frame = ttk.Frame(scroll_canvas)
-            scroll_canvas.create_window((0, 0), window=chk_frame, anchor="nw")
-
-            def on_frame_configure(event):
-                scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
-            chk_frame.bind("<Configure>", on_frame_configure)
-
-            # --- Matplotlib 设置 ---
-            fig = plt.Figure(figsize=(6, 6), dpi=100)
-            canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+            fig = plt.Figure(figsize=(10, 6), dpi=100, facecolor=self.colors["bg_main"])
+            canvas = FigureCanvasTkAgg(fig, master=self.preview_frame)
             self.preview_canvas = canvas
 
             ax = fig.add_subplot(111, projection='3d')
             self._add_scroll_zoom(ax, fig, canvas)
 
             # 工具栏框架
-            toolbar_frame = ttk.Frame(plot_frame)
+            toolbar_frame = ttk.Frame(self.preview_frame)
             toolbar_frame.pack(side=tk.BOTTOM, fill=tk.X)
             toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
             toolbar.update()
             self.preview_toolbar = toolbar
 
             canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+
+            # --- 右侧控制面板 ---
+            right_panel = ttk.Frame(self.preview_frame) # 不指定宽度，靠内容撑开或 pack 属性
+            # 注意：之前 canvas 是 pack(side=TOP)，这会占据整个宽度。
+            # 如果想要右侧面板，canvas 应该 pack(side=LEFT, expand=1)。
+            # 但为了不破坏现有布局（可能是上下结构？），我先把 canvas 改为 LEFT，或者 right_panel 改为 BOTTOM？
+            # 看原代码逻辑，preview_frame 是主容器。
+            # 让我们把 canvas 改为 LEFT，right_panel 改为 RIGHT。
+            canvas.get_tk_widget().pack_forget() # 先忘记之前可能 pack 的
+            canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            
+            right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5)
+
+            # 按钮区
+            btn_frame = ttk.Frame(right_panel)
+            btn_frame.pack(fill=tk.X, pady=5)
+            
+            # 滚动列表区
+            list_frame = ttk.Frame(right_panel)
+            list_frame.pack(fill=tk.BOTH, expand=True)
+            
+            chk_canvas = tk.Canvas(list_frame, width=200) # 给个默认宽度
+            scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=chk_canvas.yview)
+            chk_frame = ttk.Frame(chk_canvas)
+
+            chk_frame.bind(
+                "<Configure>",
+                lambda e: chk_canvas.configure(scrollregion=chk_canvas.bbox("all"))
+            )
+
+            chk_canvas.create_window((0, 0), window=chk_frame, anchor="nw")
+            chk_canvas.configure(yscrollcommand=scrollbar.set)
+
+            chk_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
             # --- 预计算 ---
             if mesh_data_list:
@@ -232,9 +262,11 @@ class VisualizationManager:
                 skip_u = max(1, nu // target_arrows)
                 skip_v = max(1, nv // target_arrows)
 
+                init_alpha = 0.7 if self.show_normals else 0.0
                 q_artist = ax.quiver(points[::skip_v, ::skip_u, 0], points[::skip_v, ::skip_u, 1], points[::skip_v, ::skip_u, 2],
                                      normals[::skip_v, ::skip_u, 0], normals[::skip_v, ::skip_u, 1], normals[::skip_v, ::skip_u, 2],
-                                     length=normal_len, color='#FF5555', alpha=0.7, linewidth=0.8)
+                                     length=normal_len, color='#FF5555', alpha=init_alpha, linewidth=0.8)
+                self.normal_quivers.append(q_artist)
 
                 # 绘制标签
                 center_i, center_j = nv // 2, nu // 2
@@ -287,6 +319,26 @@ class VisualizationManager:
             ttk.Button(btn_frame, text="全选", command=lambda: select_all(True), width=6).pack(side=tk.LEFT, padx=2)
             ttk.Button(btn_frame, text="全不选", command=lambda: select_all(False), width=8).pack(side=tk.LEFT, padx=2)
 
+            # --- 全局显示控制 ---
+            # 放在 right_panel 的最上面 (before btn_frame) 或者下面
+            # 由于 btn_frame 已经 pack 了，我们再 pack 一个 ctrl_frame 到 right_panel
+            ctrl_frame = ttk.Frame(right_panel)
+            ctrl_frame.pack(side=tk.TOP, fill=tk.X, pady=5, before=btn_frame)
+            
+            # 显示法向
+            var_norm = tk.BooleanVar(value=self.show_normals)
+            def toggle_norm():
+                self.set_normals_visible(var_norm.get())
+            cb_norm = ttk.Checkbutton(ctrl_frame, text="显示法向", variable=var_norm, command=toggle_norm)
+            cb_norm.pack(anchor="w", padx=5)
+
+            # 显示入射波
+            var_inc = tk.BooleanVar(value=self.show_incidence)
+            def toggle_inc():
+                self.set_incidence_visible(var_inc.get())
+            cb_inc = ttk.Checkbutton(ctrl_frame, text="显示入射波", variable=var_inc, command=toggle_inc)
+            cb_inc.pack(anchor="w", padx=5)
+
             # 绘制入射波方向
             if mesh_data_list and scan_params:
                 theta_s = scan_params.get('theta_start', 0)
@@ -332,8 +384,10 @@ class VisualizationManager:
                     Vq.append(k[1] * arrow_len)
                     Wq.append(k[2] * arrow_len)
 
-                ax.quiver(Xq, Yq, Zq, Uq, Vq, Wq, color='#FF8C00', linewidth=0.6,
-                          arrow_length_ratio=0.3, alpha=0.8)
+                init_inc_alpha = 0.8 if self.show_incidence else 0.0
+                q_inc = ax.quiver(Xq, Yq, Zq, Uq, Vq, Wq, color='#FF8C00', linewidth=0.6,
+                          arrow_length_ratio=0.3, alpha=init_inc_alpha)
+                self.incidence_quivers.append(q_inc)
 
                 ax.text2D(0.05, 0.95, f"{scan_mode}\nDirs: {total_dirs}\nRange: T[{theta_s:.0f}:{theta_e:.0f}], P[{phi_s:.0f}:{phi_e:.0f}]",
                           transform=ax.transAxes, color='#FF8C00', fontsize=10, fontweight='bold',
@@ -430,35 +484,29 @@ class VisualizationManager:
         except Exception as e:
             self.log(f"Plot Error: {e}")
 
-    def show_single_face_preview(self, surf, face_idx, degen_edge, edges_data, solver=None):
-        """显示单个面的详细预览（嵌入式，带参数域视图）"""
+    def show_single_face_preview(self, surf, face_idx, degen_edge, edges_data, solver, incident_dir=None):
+        """显示单面详细预览（带参数域和拓扑检查）"""
         try:
-            # 清除旧内容并切换到预览 Tab
             self._clear_frame(self.preview_frame)
             self._switch_to_preview_tab()
 
-            if not self.preview_frame:
-                self.log("Error: No preview frame available")
-                return
+            # 重置箭头列表
+            self.normal_quivers = []
+            self.incidence_quivers = []
 
-            face_type = "四边形" if degen_edge is None else f"三角形({degen_edge}退化)" if degen_edge != 'degenerate' else "完全退化"
-            step_id = getattr(surf, 'step_id', -1)
-            n_edges = len(edges_data)
-
-            self.log(f"Preview face [idx={face_idx}] STEP#{step_id}: {face_type}, {n_edges} edges")
-
-            # 创建 Figure
-            fig = plt.Figure(figsize=(12, 5), dpi=100)
+            fig = plt.Figure(figsize=(12, 6), dpi=100, facecolor=self.colors["bg_main"])
             canvas = FigureCanvasTkAgg(fig, master=self.preview_frame)
             self.preview_canvas = canvas
 
-            # 左图：3D 网格 + 边
+            # 左图：3D 几何
             ax1 = fig.add_subplot(121, projection='3d')
-
-            # 获取边界边颜色
-            edge_colors = plt.cm.Set1(np.linspace(0, 1, max(n_edges, 1)))
+            # ...
 
             # 根据面类型显示不同网格
+            u_min, u_max = surf.u_domain
+            v_min, v_max = surf.v_domain
+            face_type = "Quad"
+            step_id = getattr(surf, 'step_id', -1)
             if degen_edge is not None and degen_edge != 'degenerate' and solver:
                 # 三角形面：使用条带状网格
                 mesh_cells, a, b = solver.get_triangle_mesh_cells(
@@ -481,17 +529,55 @@ class VisualizationManager:
             else:
                 # 四边形面：使用矩形网格
                 nu, nv = 20, 20
-                u = np.linspace(surf.u_min, surf.u_max, nu)
-                v = np.linspace(surf.v_min, surf.v_max, nv)
+                u = np.linspace(u_min, u_max, nu)
+                v = np.linspace(v_min, v_max, nv)
                 uu, vv = np.meshgrid(u, v)
-                points, normals, jacobians = surf.get_data(uu, vv)
+
+                data_res = surf.get_data(uu, vv)
+                if len(data_res) == 5:
+                    points, normals, jacobians, _, _ = data_res
+                else:
+                    points, normals, jacobians = data_res
 
                 X, Y, Z = points[..., 0], points[..., 1], points[..., 2]
                 ax1.plot_wireframe(X, Y, Z, color='#007ACC', linewidth=0.3, rstride=2, cstride=2, alpha=0.5)
 
                 ax2_data = {'U': uu, 'V': vv, 'jac': jacobians, 'type': 'quad', 'points': points}
 
+            # --- 绘制法向和入射波 ---
+            if 'points' in locals() and points is not None and 'normals' in locals() and normals is not None:
+                # 降采样
+                try:
+                    step_u = max(1, points.shape[1] // 8)
+                    step_v = max(1, points.shape[0] // 8)
+                    pts_sub = points[::step_v, ::step_u].reshape(-1, 3)
+                    nrm_sub = normals[::step_v, ::step_u].reshape(-1, 3)
+                    
+                    # 法向 (Red)
+                    alpha_n = 0.6 if self.show_normals else 0.0
+                    q_norm = ax1.quiver(pts_sub[:, 0], pts_sub[:, 1], pts_sub[:, 2],
+                                        nrm_sub[:, 0], nrm_sub[:, 1], nrm_sub[:, 2],
+                                        length=0.2 * np.max(np.ptp(points.reshape(-1,3), axis=0)), 
+                                        color='red', pivot='tail', alpha=alpha_n)
+                    self.normal_quivers.append(q_norm)
+                    
+                    # 入射波 (Green)
+                    if incident_dir is not None:
+                        alpha_i = 1.0 if self.show_incidence else 0.0
+                        k_sub = np.tile(incident_dir, (len(pts_sub), 1))
+                        # 让箭头指向点：起点 = 点 - dir * length
+                        length = 0.2 * np.max(np.ptp(points.reshape(-1,3), axis=0))
+                        starts = pts_sub - k_sub * length
+                        q_inc = ax1.quiver(starts[:, 0], starts[:, 1], starts[:, 2],
+                                           k_sub[:, 0], k_sub[:, 1], k_sub[:, 2],
+                                           length=length, color='green', pivot='tail', alpha=alpha_i)
+                        self.incidence_quivers.append(q_inc)
+                except Exception as e:
+                    self.log(f"Vector drawing error: {e}")
+
             # 绘制边并标注局部索引
+            n_edges = len(edges_data) if edges_data else 0
+            edge_colors = plt.cm.Set1(np.linspace(0, 1, max(n_edges, 1))) if n_edges > 0 else []
             all_edge_pts = []
             for edge_idx, edge in enumerate(edges_data):
                 ep = edge['points']

@@ -23,7 +23,7 @@ from physics.analytical_rcs import cylinder_rcs, plate_rcs, sphere_rcs, compute_
 from geometry.cylinder import AnalyticCylinder
 from geometry.plate import AnalyticPlate
 from geometry.sphere import AnalyticSphere
-from solver.ribbon_solver import AVAILABLE_ALGORITHMS, get_integrator
+from solvers.api import AVAILABLE_ALGORITHMS, get_integrator
 
 
 def compute_rcs_single_angle(solver, surface, wave):

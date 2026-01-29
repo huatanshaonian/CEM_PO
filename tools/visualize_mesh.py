@@ -13,7 +13,7 @@ from geometry.plate import AnalyticPlate
 from geometry.sphere import AnalyticSphere
 from geometry.cylinder import AnalyticCylinder
 from geometry.occ_surface import OCCSurface
-from solver.ribbon_solver import RibbonIntegrator
+from solvers.po import DiscretePOIntegrator as RibbonIntegrator
 from physics.wave import IncidentWave
 
 # OCC Imports

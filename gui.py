@@ -30,7 +30,11 @@ from geometry.wedge import create_analytic_wedge
 from geometry.brick import create_analytic_brick
 from physics.wave import IncidentWave
 from physics.analytical_rcs import get_analytical_solution, compute_error_stats
-from solver.ribbon_solver import RibbonIntegrator, RCSAnalyzer, get_integrator, list_algorithms, AVAILABLE_ALGORITHMS, HAS_GPU, merge_meshes
+from core.env import HAS_GPU
+from core.mesh_data import merge_meshes, detect_degenerate_edge
+from solvers.api import get_integrator, list_algorithms, AVAILABLE_ALGORITHMS
+from solvers.rcs_analyzer import RCSAnalyzer
+from solvers.po import DiscretePOIntegrator as RibbonIntegrator 
 from tools.visualize_mesh import create_occ_cylinder
 from ui.plotting import VisualizationManager
 
@@ -261,7 +265,10 @@ class CEMPoGUI:
             messagebox.showwarning("Warning", "请先选择 STEP 文件")
             return
         try:
-            from solver.ribbon_solver import detect_degenerate_edge, RibbonIntegrator
+            # 重新导入以防模块更新
+            from solvers.po import DiscretePOIntegrator as RibbonIntegrator
+            from core.mesh_data import detect_degenerate_edge
+            
             surfaces = load_step_file(self.step_file_path)
             face_idx = self.step_face_idx.get()
             if face_idx < 0 or face_idx >= len(surfaces):
@@ -319,7 +326,11 @@ class CEMPoGUI:
                     v = np.linspace(v_min, v_max, fixed_nv)
                     uu, vv = np.meshgrid(u, v)
 
-                    points, normals, jacobians = surf.get_data(uu, vv)
+                    data_res = surf.get_data(uu, vv)
+                    if len(data_res) == 5:
+                        points, normals, jacobians, _, _ = data_res
+                    else:
+                        points, normals, jacobians = data_res
 
                     step_id = getattr(surf, 'step_id', -1)
                     mesh_data_list.append({
@@ -338,8 +349,8 @@ class CEMPoGUI:
             ptd_edges_data = []
             if enable_ptd and ptd_identifiers:
                 try:
-                    from solver.manual_edges import extract_manual_edges
-                    ptd_edges = extract_manual_edges(surfaces, ptd_identifiers)
+                    from solvers.ptd import PTDProcessor
+                    ptd_edges = PTDProcessor.extract_edges(surfaces, ptd_identifiers)
                     for edge in ptd_edges:
                         if hasattr(edge, 'points'):
                             ptd_edges_data.append({'name': edge.name, 'points': edge.points})
@@ -921,7 +932,7 @@ class CEMPoGUI:
         """
         try:
             import time
-            from solver.ribbon_solver import RibbonIntegrator
+            from solvers.po import DiscretePOIntegrator as RibbonIntegrator
             from physics.wave import IncidentWave
             from physics.constants import C0
             import os

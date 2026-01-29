@@ -28,7 +28,11 @@ class RibbonPolynomialCalculator:
         v_arr = np.full_like(u_samples, v_center)
 
         # 获取几何数据
-        points, normals, jacobians = surface.get_data(u_samples, v_arr)
+        data = surface.get_data(u_samples, v_arr)
+        if len(data) == 5:
+            points, normals, jacobians, _, _ = data
+        else:
+            points, normals, jacobians = data
 
         k_vec = wave.k_vector
         k_dir = wave.k_dir

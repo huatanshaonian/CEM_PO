@@ -5,7 +5,8 @@ import matplotlib.pyplot as plt
 from geometry.cylinder import AnalyticCylinder
 from physics.wave import IncidentWave
 from physics.constants import C0
-from solver.ribbon_solver import RibbonIntegrator, RCSAnalyzer
+from solvers.po import DiscretePOIntegrator as RibbonIntegrator
+from solvers.rcs_analyzer import RCSAnalyzer
 
 def main():
     # 参数设置

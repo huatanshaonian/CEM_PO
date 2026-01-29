@@ -11,7 +11,8 @@ from geomdl import NURBS
 # 项目导入
 from geometry.nurbs_surface import NURBSSurface
 from geometry.cylinder import AnalyticCylinder
-from solver.ribbon_solver import RibbonIntegrator, RCSAnalyzer
+from solvers.po import DiscretePOIntegrator as RibbonIntegrator
+from solvers.rcs_analyzer import RCSAnalyzer
 from physics.constants import C0
 
 def generate_nurbs_cylinder(radius, height):

@@ -11,7 +11,8 @@ from OCC.Core.GeomConvert import geomconvert
 # 项目导入
 from geometry.occ_surface import OCCSurface
 from geometry.cylinder import AnalyticCylinder
-from solver.ribbon_solver import RibbonIntegrator, RCSAnalyzer
+from solvers.po import DiscretePOIntegrator as RibbonIntegrator
+from solvers.rcs_analyzer import RCSAnalyzer
 from physics.constants import C0
 
 def create_occ_nurbs_cylinder(radius, height):
