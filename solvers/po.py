@@ -9,10 +9,11 @@ class DiscretePOIntegrator:
     离散物理光学 (PO) 积分器，支持多种 sinc 校正模式
     """
 
-    def __init__(self, nu=None, nv=None, samples_per_lambda=10, sinc_mode='dual'):
+    def __init__(self, nu=None, nv=None, samples_per_lambda=10, sinc_mode='dual', min_points=18):
         self.nu_manual = nu
         self.nv_manual = nv
         self.default_samples_per_lambda = samples_per_lambda
+        self.min_points = min_points
         if sinc_mode not in ('none', 'u_only', 'dual'):
             raise ValueError(f"sinc_mode 必须是 'none', 'u_only' 或 'dual'，收到: {sinc_mode}")
         self.sinc_mode = sinc_mode
@@ -36,9 +37,8 @@ class DiscretePOIntegrator:
         dist_u = np.sum(np.sqrt(np.sum(np.diff(p_u, axis=0)**2, axis=-1)))
 
         # 3. 根据波长和采样率计算网格数
-        min_points = 20
-        nv = int(max(min_points, (dist_v / wavelength) * samples_per_lambda))
-        nu = int(max(min_points, (dist_u / wavelength) * samples_per_lambda))
+        nv = int(max(self.min_points, (dist_v / wavelength) * samples_per_lambda))
+        nu = int(max(self.min_points, (dist_u / wavelength) * samples_per_lambda))
         
         return nu, nv
 
@@ -139,14 +139,38 @@ class DiscretePOIntegrator:
             dP_dv = (p_plus_v - p_minus_v) / (2 * eps_v)
 
         # 使用 cell_areas 作为 du，dv=1，这样 du*dv = cell_areas
-        # sinc 校正对退化网格使用平均值
+        # sinc 校正使用逐单元的真实步长
         avg_du = (u_max - u_min) / a
         avg_dv = (v_max - v_min) / b
+
+        # 计算逐单元的 sinc 校正步长
+        sinc_du_list = []
+        sinc_dv_list = []
+        for layer_idx, n_cells in enumerate(layer_sizes):
+            if degen_edge in ['u_min', 'u_max']:
+                # u 方向退化：u 步长固定，v 步长随层变化
+                n_segments = max(1, b - layer_idx)
+                du_layer = avg_du
+                dv_layer = (v_max - v_min) / n_segments
+            elif degen_edge in ['v_min', 'v_max']:
+                # v 方向退化：v 步长固定，u 步长随层变化
+                n_segments = max(1, b - layer_idx)
+                du_layer = (u_max - u_min) / n_segments
+                dv_layer = avg_dv
+            else:  # u_both, v_both
+                # 双边退化：使用平均值（简化处理）
+                du_layer = avg_du
+                dv_layer = avg_dv
+            for _ in range(n_cells):
+                sinc_du_list.append(du_layer)
+                sinc_dv_list.append(dv_layer)
 
         res = CachedMeshData(points, normals, jacobians, dP_du, dP_dv,
                              cell_areas, np.ones_like(cell_areas))
         res.direct_derivatives = direct_derivatives
-        res.avg_du = avg_du  # 用于 sinc 校正
+        res.sinc_du = np.array(sinc_du_list)  # 逐单元 sinc 校正步长
+        res.sinc_dv = np.array(sinc_dv_list)
+        res.avg_du = avg_du  # 保留用于兼容
         res.avg_dv = avg_dv
         res.layer_sizes = layer_sizes  # 用于可视化
         return res
@@ -266,8 +290,13 @@ class DiscretePOIntegrator:
         lit_mask = n_dot_k < 0
         illumination_factor = -n_dot_k
 
-        # 退化网格使用平均步长进行 sinc 校正
-        if is_degenerate and hasattr(cached_data, 'avg_du'):
+        # sinc 校正步长：优先使用逐单元步长，其次平均步长
+        if is_degenerate and hasattr(cached_data, 'sinc_du'):
+            # 逐单元 sinc 步长（精度更高）
+            sinc_du = cached_data.sinc_du
+            sinc_dv = cached_data.sinc_dv
+        elif is_degenerate and hasattr(cached_data, 'avg_du'):
+            # 兼容旧版：平均步长
             sinc_du = cached_data.avg_du
             sinc_dv = cached_data.avg_dv
         else:

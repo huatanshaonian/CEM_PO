@@ -87,6 +87,10 @@ class CachedMeshData:
         if isinstance(self.du, np.ndarray):
             self.du = cp.asarray(self.du)
             self.dv = cp.asarray(self.dv)
+        # sinc_du, sinc_dv 用于退化网格的 sinc 校正
+        if hasattr(self, 'sinc_du') and isinstance(self.sinc_du, np.ndarray):
+            self.sinc_du = cp.asarray(self.sinc_du)
+            self.sinc_dv = cp.asarray(self.sinc_dv)
         return self
 
     def to_cpu(self):
@@ -100,6 +104,9 @@ class CachedMeshData:
             if hasattr(self.du, 'get'):
                 self.du = self.du.get()
                 self.dv = self.dv.get()
+            if hasattr(self, 'sinc_du') and hasattr(self.sinc_du, 'get'):
+                self.sinc_du = self.sinc_du.get()
+                self.sinc_dv = self.sinc_dv.get()
         return self
 
 class MergedMeshData:
@@ -137,15 +144,24 @@ class MergedMeshData:
                 all_dP_du.append(m.dP_du.reshape(-1, 3))
                 all_dP_dv.append(m.dP_dv.reshape(-1, 3))
                 # 为了向量化，我们需要把 du, dv 扩展到每个点上
-                # 支持标量或数组形式的 du/dv
-                if isinstance(m.du, np.ndarray):
-                    # 退化网格：du/dv 已经是数组
+                # 注意：对于 sinc 校正，需要使用真正的步长，不是 cell_areas
+                n_pts = m.points.reshape(-1, 3).shape[0]
+                if hasattr(m, 'sinc_du'):
+                    # 退化网格：使用逐单元的 sinc 校正步长
+                    all_du.append(m.sinc_du.reshape(-1))
+                    all_dv.append(m.sinc_dv.reshape(-1))
+                elif hasattr(m, 'avg_du'):
+                    # 兼容旧版：使用平均步长
+                    all_du.append(np.full(n_pts, m.avg_du))
+                    all_dv.append(np.full(n_pts, m.avg_dv))
+                elif isinstance(m.du, np.ndarray):
+                    # 其他情况的数组形式 du/dv
                     all_du.append(m.du.reshape(-1))
                     all_dv.append(m.dv.reshape(-1))
                 else:
                     # 规则网格：du/dv 是标量，需要扩展
-                    all_du.append(np.full(m.points.shape[:2], m.du).reshape(-1))
-                    all_dv.append(np.full(m.points.shape[:2], m.dv).reshape(-1))
+                    all_du.append(np.full(n_pts, m.du))
+                    all_dv.append(np.full(n_pts, m.dv))
 
         # 2. 合并大数组 (CPU 端操作)
         self.points = np.vstack(all_points)

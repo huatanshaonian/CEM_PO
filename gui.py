@@ -121,6 +121,10 @@ class CEMPoGUI:
         self.density_var = tk.IntVar(value=10)
         ttk.Entry(parent, textvariable=self.density_var).pack(fill=tk.X, pady=(0, 10))
 
+        ttk.Label(parent, text="最小网格点数 Min Points per Edge:").pack(anchor=tk.W, pady=(0, 5))
+        self.min_points_var = tk.IntVar(value=18)
+        ttk.Entry(parent, textvariable=self.min_points_var).pack(fill=tk.X, pady=(0, 10))
+
         ttk.Label(parent, text="Theta 范围 (Start, End, Points):").pack(anchor=tk.W, pady=(0, 5))
         theta_frame = ttk.Frame(parent, style="Card.TFrame")
         theta_frame.pack(fill=tk.X, pady=(0, 10))
@@ -277,7 +281,7 @@ class CEMPoGUI:
             surf = surfaces[face_idx]
             degen_edge = detect_degenerate_edge(surf)
             edges_data = surf.get_edges(n_samples=30)
-            solver = RibbonIntegrator()
+            solver = RibbonIntegrator(min_points=self.min_points_var.get())
             self.viz_manager.show_single_face_preview(surf, face_idx, degen_edge, edges_data, solver)
         except Exception as e:
             self.log(f"Single face preview error: {e}")
@@ -956,7 +960,7 @@ class CEMPoGUI:
 
             t_start = time.time()
 
-            solver = RibbonIntegrator()
+            solver = RibbonIntegrator(min_points=self.min_points_var.get())
             wave = IncidentWave(freq, 0, 0)
             wavelength = C0 / freq
 
@@ -1139,7 +1143,7 @@ class CEMPoGUI:
             # 为了生成 mesh_cells，可能需要 solver
             from solvers.po import DiscretePOIntegrator as RibbonIntegrator
             from core.mesh_data import detect_degenerate_edge
-            solver = RibbonIntegrator()
+            solver = RibbonIntegrator(min_points=self.min_points_var.get())
             
             for i, cached_data in enumerate(self.cached_mesh_data):
                 points = cached_data.points
@@ -1192,7 +1196,7 @@ class CEMPoGUI:
 
             t_start = time.time()
 
-            solver = RibbonIntegrator()
+            solver = RibbonIntegrator(min_points=self.min_points_var.get())
             # wave 仅用于提供波长，precompute 不依赖角度
             wave = IncidentWave(freq, 0, 0)
             wavelength = C0 / freq
@@ -1598,6 +1602,7 @@ class CEMPoGUI:
                     config = json.load(f)
                     self.freq_var.set(config.get('freq', 300.0))
                     self.density_var.set(config.get('density', 10))
+                    self.min_points_var.set(config.get('min_points', 18))
                     self.theta_start.set(config.get('theta_start', 0.0))
                     self.theta_end.set(config.get('theta_end', 180.0))
                     self.theta_n.set(config.get('theta_n', 91))
@@ -1654,6 +1659,7 @@ class CEMPoGUI:
         config = {
             'freq': self.freq_var.get(),
             'density': self.density_var.get(),
+            'min_points': self.min_points_var.get(),
             'theta_start': self.theta_start.get(),
             'theta_end': self.theta_end.get(),
             'theta_n': self.theta_n.get(),
