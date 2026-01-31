@@ -32,3 +32,4 @@ venv/
 env/
 
 cem_po_config.json
+*.csv
