@@ -8,15 +8,11 @@
 
 **CEM PO Solver** 是一个高性能的高频电磁散射仿真软件，基于物理光学 (Physical Optics, PO) 近似与物理绕射理论 (PTD) 边缘修正。它专为 RCS (雷达散射截面) 的快速预测、工程验证及算法研究而设计。
 
-本项目目前正处于架构升级阶段，提供了两个版本的图形界面：
-1.  **Professional Edition (New)**: 基于 **PySide6 (Qt)** 和 **PyVista** 的全新现代化界面，支持 GPU 流畅渲染百万级网格、多线程后台计算及更丰富的数据对比功能。
-2.  **Legacy Standard Edition**: 基于 **Tkinter** 的经典界面，轻量级，适合快速测试。
+本项目基于 **PySide6 (Qt)** 和 **PyVista** 构建现代化界面，支持 GPU 流畅渲染百万级网格、多线程后台计算及更丰富的数据对比功能。
 
 ### ✨ 核心特性
 
-*   **🖥️ 双模 GUI**:
-    *   **Qt 版**: 现代暗色/亮色主题，Docker 布局，交互式 3D 旋转/缩放/拾取，支持从 CSV 导入多组数据对比。
-    *   **Tkinter 版**: 简单直接，无需复杂依赖。
+*   **🖥️ 现代化 GUI**: 现代暗色/亮色主题，Docker 布局，交互式 3D 旋转/缩放/拾取，支持从 CSV 导入多组数据对比。
 *   **⚡ 高性能计算**:
     *   **GPU 加速**: 利用 CUDA/CuPy 进行大规模面元积分，计算速度提升 10x-50x。
     *   **并行计算**: 多核 CPU 并行扫描引擎。
@@ -58,28 +54,17 @@ conda install -c conda-forge pythonocc-core=7.9.0
 
 ## 🚀 运行指南
 
-### 启动专业版 (Qt GUI) —— **推荐**
-
-提供更流畅的 3D 体验和完整功能：
+启动程序：
 
 ```bash
 python gui_qt.py
-```
-
-### 启动标准版 (Tkinter GUI)
-
-轻量级启动：
-
-```bash
-python gui.py
 ```
 
 ## 📂 项目结构
 
 ```
 CEM_PO/
-├── gui_qt.py               # [New] 基于 PySide6 的主程序入口
-├── gui.py                  # [Legacy] 基于 Tkinter 的旧版入口
+├── gui_qt.py               # 基于 PySide6 的主程序入口
 ├── core/                   # 核心架构层
 │   ├── solver_bridge.py    # UI 与算法的解耦桥接器
 │   └── mesh_data.py        # 网格数据结构定义
@@ -89,10 +74,10 @@ CEM_PO/
 │   ├── ptd.py              # 物理绕射理论核心
 │   └── rcs_analyzer.py     # RCS 扫描控制器
 ├── geometry/               # 几何建模
-│   ├── factory.py          # [New] 几何工厂模式
+│   ├── factory.py          # 几何工厂模式
 │   ├── step_loader.py      # STEP 文件加载器
 │   └── occ_surface.py      # OCC 曲面封装
-├── gui_managers/           # (旧版) Tkinter 的逻辑管理器
+├── ui/                     # 界面组件
 └── results/                # 计算结果输出目录
 ```
 
