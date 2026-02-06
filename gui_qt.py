@@ -605,6 +605,18 @@ class CEMPoQtWindow(QMainWindow):
             self.iges_invert_indices_input.setPlaceholderText("e.g. 0,1,3,5")
             self.geo_dynamic_layout.addRow("Invert Normals:", self.iges_invert_indices_input)
 
+            self.iges_delete_indices_input = QLineEdit("")
+            self.iges_delete_indices_input.setPlaceholderText("e.g. 1,3")
+            self.geo_dynamic_layout.addRow("Delete Faces:", self.iges_delete_indices_input)
+
+            self.iges_mirror_plane_combo = QComboBox()
+            self.iges_mirror_plane_combo.addItems(["None", "X=0", "Y=0", "Z=0"])
+            self.geo_dynamic_layout.addRow("Mirror Plane:", self.iges_mirror_plane_combo)
+
+            self.iges_rotation_input = QLineEdit("")
+            self.iges_rotation_input.setPlaceholderText("rx, ry, rz (deg), e.g. 90,0,0")
+            self.geo_dynamic_layout.addRow("Rotation:", self.iges_rotation_input)
+
     def add_input(self, label, default, key):
         le = QLineEdit(default)
         self.geo_dynamic_layout.addRow(label, le)
@@ -659,15 +671,30 @@ class CEMPoQtWindow(QMainWindow):
         elif self.geo_type_combo.currentText() == "IGES File":
             params['file_path'] = getattr(self, 'iges_file_path', '')
             params['unit'] = self.iges_unit_combo.currentText() if hasattr(self, 'iges_unit_combo') else 'mm'
-            # Parse invert indices
-            invert_str = self.iges_invert_indices_input.text().strip() if hasattr(self, 'iges_invert_indices_input') else ""
-            if invert_str:
+            # Parse index lists (invert / delete)
+            for attr, key in [('iges_invert_indices_input', 'invert_indices'),
+                              ('iges_delete_indices_input', 'delete_indices')]:
+                text = getattr(self, attr, None)
+                text = text.text().strip() if text else ""
+                if text:
+                    try:
+                        params[key] = [int(x.strip()) for x in text.split(',') if x.strip()]
+                    except ValueError:
+                        params[key] = []
+                else:
+                    params[key] = []
+            # Mirror plane
+            mp = self.iges_mirror_plane_combo.currentText() if hasattr(self, 'iges_mirror_plane_combo') else "None"
+            params['mirror_plane'] = mp if mp != "None" else None
+            # Rotation
+            rot_str = self.iges_rotation_input.text().strip() if hasattr(self, 'iges_rotation_input') else ""
+            if rot_str:
                 try:
-                    params['invert_indices'] = [int(x.strip()) for x in invert_str.split(',') if x.strip()]
-                except:
-                    params['invert_indices'] = []
-            else:
-                params['invert_indices'] = []
+                    parts = [float(x.strip()) for x in rot_str.split(',')]
+                    if len(parts) == 3:
+                        params['rotation'] = tuple(parts)
+                except ValueError:
+                    pass
         return params
 
     def tessellate_surface(self, surface, resolution=30):
@@ -1196,6 +1223,15 @@ class CEMPoQtWindow(QMainWindow):
             iges_invert_indices = ""
             if hasattr(self, 'iges_invert_indices_input'):
                 iges_invert_indices = self.iges_invert_indices_input.text()
+            iges_delete_indices = ""
+            if hasattr(self, 'iges_delete_indices_input'):
+                iges_delete_indices = self.iges_delete_indices_input.text()
+            iges_mirror_plane = "None"
+            if hasattr(self, 'iges_mirror_plane_combo'):
+                iges_mirror_plane = self.iges_mirror_plane_combo.currentText()
+            iges_rotation = ""
+            if hasattr(self, 'iges_rotation_input'):
+                iges_rotation = self.iges_rotation_input.text()
 
             cfg = {
                 "geo_type": self.geo_type_combo.currentText(),
@@ -1206,6 +1242,9 @@ class CEMPoQtWindow(QMainWindow):
                 "iges_file_path": self.iges_file_path,
                 "iges_unit": iges_unit,
                 "iges_invert_indices": iges_invert_indices,
+                "iges_delete_indices": iges_delete_indices,
+                "iges_mirror_plane": iges_mirror_plane,
+                "iges_rotation": iges_rotation,
 
                 "freq": self.freq_input.text(),
                 "mesh_density": self.mesh_density.text(),
@@ -1274,6 +1313,12 @@ class CEMPoQtWindow(QMainWindow):
 
             if hasattr(self, 'iges_invert_indices_input'):
                 self.iges_invert_indices_input.setText(cfg.get("iges_invert_indices", ""))
+            if hasattr(self, 'iges_delete_indices_input'):
+                self.iges_delete_indices_input.setText(cfg.get("iges_delete_indices", ""))
+            if hasattr(self, 'iges_mirror_plane_combo'):
+                self.iges_mirror_plane_combo.setCurrentText(cfg.get("iges_mirror_plane", "None"))
+            if hasattr(self, 'iges_rotation_input'):
+                self.iges_rotation_input.setText(cfg.get("iges_rotation", ""))
 
             # Physics
             self.freq_input.setText(str(cfg.get("freq", "3000.0")))

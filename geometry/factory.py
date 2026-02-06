@@ -89,9 +89,15 @@ class GeometryFactory:
                 scale = 0.01
 
             invert_indices = params.get('invert_indices', [])
+            delete_indices = params.get('delete_indices', [])
+            mirror_plane = params.get('mirror_plane')
+            rotation = params.get('rotation')
 
-            # 调用 IGES 加载逻辑
-            surfaces = load_iges_file(file_path, scale=scale, invert_indices=invert_indices)
+            surfaces = load_iges_file(
+                file_path, scale=scale, invert_indices=invert_indices,
+                delete_indices=delete_indices, mirror_plane=mirror_plane,
+                rotation=rotation
+            )
 
             return surfaces
 
