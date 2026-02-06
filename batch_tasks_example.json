@@ -1,0 +1,73 @@
+{
+  "global_settings": {
+    "output_dir": "results/batch_example",
+    "save_plot": true
+  },
+  "tasks": [
+    {
+      "name": "Benchmark_Cylinder_1GHz",
+      "description": "Standard cylinder RCS validation case.",
+      "geometry": {
+        "type": "Cylinder",
+        "params": {
+          "radius": 0.5,
+          "height": 2.0
+        }
+      },
+      "solver": {
+        "frequency_mhz": 1000.0,
+        "algorithm": "discrete_po_sinc_dual",
+        "mesh_density": 10.0,
+        "min_points": 18,
+        "use_degenerate": true,
+        "workers": 4
+      },
+      "scan": {
+        "theta": [0, 180, 181],
+        "phi": [0, 0, 1]
+      }
+    },
+    {
+      "name": "Plate_VV_Polarization",
+      "geometry": {
+        "type": "Plate",
+        "params": {
+          "width": 1.0,
+          "length": 1.0
+        }
+      },
+      "solver": {
+        "frequency_mhz": 3000.0,
+        "algorithm": "discrete_po_sinc_dual",
+        "mesh_density": 8.0,
+        "ptd": {
+          "enabled": true,
+          "edges": ["0", "1", "2", "3"],
+          "polarization": "VV"
+        }
+      },
+      "scan": {
+        "theta": [-90, 90, 91],
+        "phi": [0, 0, 1]
+      }
+    },
+    {
+      "name": "2D_Scan_Sphere",
+      "geometry": {
+        "type": "Sphere",
+        "params": {
+          "radius": 1.0
+        }
+      },
+      "solver": {
+        "frequency_mhz": 500.0,
+        "algorithm": "discrete_po_sinc_dual",
+        "use_gpu": false
+      },
+      "scan": {
+        "theta": [0, 90, 46],
+        "phi": [0, 90, 46]
+      }
+    }
+  ]
+}

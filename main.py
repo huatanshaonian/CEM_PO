@@ -236,6 +236,16 @@ def main():
                 logger.error("Skipping task: Geometry type missing.")
                 continue
 
+            # Special logging for IGES advanced features
+            if geo_type == "IGES File":
+                logger.info(f"  IGES Config: Unit={geo_params.get('unit','mm')}, "
+                            f"Mirror={geo_params.get('mirror_plane','None')}, "
+                            f"Rotation={geo_params.get('rotation','None')}")
+                if geo_params.get('delete_indices'):
+                    logger.info(f"  Deleting faces: {geo_params['delete_indices']}")
+                if geo_params.get('invert_indices'):
+                    logger.info(f"  Inverting faces: {geo_params['invert_indices']}")
+
             # 2. Solver Params
             sim_params = build_sim_params(task, overrides)
             

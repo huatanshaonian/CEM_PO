@@ -212,6 +212,11 @@ class CEMPoQtWindow(QMainWindow):
         self.iges_file_path = ""
         self.last_result = None
         self.comparison_data = [] # List of dicts: {'name': str, 'data': DataFrame, 'path': str}
+        self._surface_actors = []          # vtkActor per surface index
+        self._actor_to_surface_idx = {}    # actor -> int
+        self._highlighted_idx = -1         # currently highlighted surface
+        self._picking_setup = False
+        self._input_cache = {}             # Cache for dynamic widget values across geo_type switches
 
         self.setup_ui()
         self.setup_menu()
@@ -360,7 +365,8 @@ class CEMPoQtWindow(QMainWindow):
         l_surf = QVBoxLayout()
         self.surface_list = QListWidget()
         self.surface_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.surface_list.itemClicked.connect(self.on_surface_selected)
+        self.surface_list.itemClicked.connect(self.on_surface_clicked)
+        self.surface_list.itemDoubleClicked.connect(self.on_surface_selected)
         l_surf.addWidget(self.surface_list)
         
         h_ops = QHBoxLayout()
@@ -555,11 +561,31 @@ class CEMPoQtWindow(QMainWindow):
 
         self.update_geo_inputs("Cylinder")
 
+    def _cache_dynamic_inputs(self):
+        """Save current dynamic widget values before they are destroyed."""
+        # STEP widgets
+        for attr in ('step_unit_combo', 'invert_indices_input'):
+            w = getattr(self, attr, None)
+            if w:
+                self._input_cache[attr] = w.currentText() if isinstance(w, QComboBox) else w.text()
+        # IGES widgets
+        for attr in ('iges_unit_combo', 'iges_mirror_plane_combo'):
+            w = getattr(self, attr, None)
+            if w:
+                self._input_cache[attr] = w.currentText()
+        for attr in ('iges_invert_indices_input', 'iges_delete_indices_input', 'iges_rotation_input'):
+            w = getattr(self, attr, None)
+            if w:
+                self._input_cache[attr] = w.text()
+
     def update_geo_inputs(self, gtype):
+        # Cache current widget values before destroying them
+        self._cache_dynamic_inputs()
+
         while self.geo_dynamic_layout.count():
             w = self.geo_dynamic_layout.takeAt(0).widget()
             if w: w.deleteLater()
-        
+
         self.geo_inputs = {}
         if gtype == "Cylinder" or gtype == "OCC Cylinder (NURBS)":
             self.add_input("Radius (m):", "1.0", "radius")
@@ -588,6 +614,14 @@ class CEMPoQtWindow(QMainWindow):
             self.invert_indices_input = QLineEdit("")
             self.invert_indices_input.setPlaceholderText("e.g. 0,1,3,5")
             self.geo_dynamic_layout.addRow("Invert Normals:", self.invert_indices_input)
+
+            # Restore cached values
+            if 'step_unit_combo' in self._input_cache:
+                self.step_unit_combo.setCurrentText(self._input_cache['step_unit_combo'])
+            if 'invert_indices_input' in self._input_cache:
+                self.invert_indices_input.setText(self._input_cache['invert_indices_input'])
+            if self.step_file_path and hasattr(self, 'lbl_step'):
+                self.lbl_step.setText(os.path.basename(self.step_file_path))
 
         elif gtype == "IGES File":
             btn = QPushButton("Select IGES...")
@@ -765,13 +799,18 @@ class CEMPoQtWindow(QMainWindow):
 
             self.current_geo = geo_list
             self.plotter.clear()
-            
+            self._surface_actors = []
+            self._actor_to_surface_idx = {}
+            self._highlighted_idx = -1
+
             # 1. Visualize Surface
             for i, surface in enumerate(geo_list):
                 points, faces = self.tessellate_surface(surface, resolution=30)
                 mesh = pv.PolyData(points, faces)
-                self.plotter.add_mesh(mesh, color='lightblue', show_edges=False, 
+                actor = self.plotter.add_mesh(mesh, color='lightblue', show_edges=False,
                                      opacity=0.6, label=f"Surface {i}")
+                self._surface_actors.append(actor)
+                self._actor_to_surface_idx[actor] = i
                 
                 # 2. Visualize Normals
                 if self.chk_show_normals.isChecked():
@@ -843,6 +882,7 @@ class CEMPoQtWindow(QMainWindow):
 
             self.plotter.add_legend()
             self.plotter.reset_camera()
+            self._setup_3d_picking()
             self.update_surface_list() # Sync list with new geometry
             self.log("Preview updated.")
             
@@ -1456,6 +1496,70 @@ class CEMPoQtWindow(QMainWindow):
             item = QListWidgetItem(f"Surface {i}")
             self.surface_list.addItem(item)
 
+    # ---- 3D pick-to-highlight ----
+
+    def _setup_3d_picking(self):
+        """Enable click-to-select in the 3D view (only registers once)."""
+        if self._picking_setup:
+            return
+        try:
+            self.plotter.track_click_position(
+                callback=self._on_3d_click, side='left', viewport=True)
+            self._picking_setup = True
+        except Exception as e:
+            print(f"  Warning: 3D picking not available: {e}")
+
+    def _on_3d_click(self, click_pos):
+        """Callback from 3D viewport click — pick the surface under cursor."""
+        if not self._actor_to_surface_idx:
+            return
+        from vtkmodules.vtkRenderingCore import vtkCellPicker
+        picker = vtkCellPicker()
+        picker.SetTolerance(0.005)
+        picker.Pick(click_pos[0], click_pos[1], 0, self.plotter.renderer)
+        picked_actor = picker.GetActor()
+        if picked_actor in self._actor_to_surface_idx:
+            idx = self._actor_to_surface_idx[picked_actor]
+            self._highlight_surface_3d(idx)
+
+    def _highlight_surface_3d(self, idx):
+        """Highlight one surface in the all-surfaces view, sync list selection."""
+        if idx < 0 or idx >= len(self._surface_actors):
+            return
+
+        # Update actor colours: selected = orange, others = lightblue
+        for i, actor in enumerate(self._surface_actors):
+            prop = actor.GetProperty()
+            if i == idx:
+                prop.SetColor(1.0, 0.65, 0.0)   # orange
+                prop.SetOpacity(0.9)
+            else:
+                prop.SetColor(0.68, 0.85, 0.9)   # lightblue
+                prop.SetOpacity(0.6)
+        self.plotter.render()
+        self._highlighted_idx = idx
+
+        # Sync QListWidget (block signal to avoid loop)
+        self.surface_list.blockSignals(True)
+        self.surface_list.setCurrentRow(idx)
+        self.surface_list.blockSignals(False)
+
+        # Update invert checkbox
+        if self.current_geo and idx < len(self.current_geo):
+            surf = self.current_geo[idx]
+            self.chk_surf_invert.blockSignals(True)
+            self.chk_surf_invert.setEnabled(True)
+            self.chk_surf_invert.setChecked(getattr(surf, 'invert_normal', False))
+            self.chk_surf_invert.blockSignals(False)
+
+    def on_surface_clicked(self, item):
+        """Single click in list — highlight in 3D (if actors available)."""
+        idx = self.surface_list.row(item)
+        if self._surface_actors:
+            self._highlight_surface_3d(idx)
+        else:
+            self.on_surface_selected(item)
+
     def on_surface_selected(self, item):
         idx = self.surface_list.row(item)
         if idx < 0 or idx >= len(self.current_geo): return
@@ -1470,6 +1574,9 @@ class CEMPoQtWindow(QMainWindow):
 
     def preview_single_surface(self, idx, surf):
         self.plotter.clear()
+        self._surface_actors = []
+        self._actor_to_surface_idx = {}
+        self._highlighted_idx = -1
         
         # Surface
         points, faces = self.tessellate_surface(surf, resolution=40)
@@ -1505,7 +1612,12 @@ class CEMPoQtWindow(QMainWindow):
         idx = self.surface_list.row(items[0])
         surf = self.current_geo[idx]
         surf.invert_normal = checked
-        self.preview_single_surface(idx, surf)
+        # Refresh: rebuild all-surfaces view if we have actors, else single view
+        if self._surface_actors:
+            self.on_preview()
+            self._highlight_surface_3d(idx)
+        else:
+            self.preview_single_surface(idx, surf)
 
     def on_show_all_surfaces(self):
         self.surface_list.clearSelection()
