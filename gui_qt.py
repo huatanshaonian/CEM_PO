@@ -209,6 +209,7 @@ class CEMPoQtWindow(QMainWindow):
         self.bridge = SolverBridge()
         self.current_geo = None
         self.step_file_path = ""
+        self.iges_file_path = ""
         self.last_result = None
         self.comparison_data = [] # List of dicts: {'name': str, 'data': DataFrame, 'path': str}
 
@@ -337,7 +338,7 @@ class CEMPoQtWindow(QMainWindow):
         group_geo = QGroupBox("Geometry Definition")
         l_geo = QFormLayout()
         self.geo_type_combo = QComboBox()
-        self.geo_type_combo.addItems(["Cylinder", "Plate", "Sphere", "Wedge", "Brick", "OCC Cylinder (NURBS)", "STEP File"])
+        self.geo_type_combo.addItems(["Cylinder", "Plate", "Sphere", "Wedge", "Brick", "OCC Cylinder (NURBS)", "STEP File", "IGES File"])
         self.geo_type_combo.currentTextChanged.connect(self.update_geo_inputs)
         l_geo.addRow("Type:", self.geo_type_combo)
         
@@ -588,6 +589,22 @@ class CEMPoQtWindow(QMainWindow):
             self.invert_indices_input.setPlaceholderText("e.g. 0,1,3,5")
             self.geo_dynamic_layout.addRow("Invert Normals:", self.invert_indices_input)
 
+        elif gtype == "IGES File":
+            btn = QPushButton("Select IGES...")
+            btn.clicked.connect(self.pick_iges_file)
+            self.geo_dynamic_layout.addRow("File:", btn)
+            self.lbl_iges = QLabel("No file selected")
+            self.lbl_iges.setWordWrap(True)
+            self.geo_dynamic_layout.addRow(self.lbl_iges)
+
+            self.iges_unit_combo = QComboBox()
+            self.iges_unit_combo.addItems(["mm", "cm", "m"])
+            self.geo_dynamic_layout.addRow("Unit:", self.iges_unit_combo)
+
+            self.iges_invert_indices_input = QLineEdit("")
+            self.iges_invert_indices_input.setPlaceholderText("e.g. 0,1,3,5")
+            self.geo_dynamic_layout.addRow("Invert Normals:", self.iges_invert_indices_input)
+
     def add_input(self, label, default, key):
         le = QLineEdit(default)
         self.geo_dynamic_layout.addRow(label, le)
@@ -598,6 +615,12 @@ class CEMPoQtWindow(QMainWindow):
         if path:
             self.step_file_path = path
             self.lbl_step.setText(os.path.basename(path))
+
+    def pick_iges_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Open IGES", "", "IGES Files (*.iges *.igs)")
+        if path:
+            self.iges_file_path = path
+            self.lbl_iges.setText(os.path.basename(path))
 
     def setup_menu(self):
         menubar = self.menuBar()
@@ -626,6 +649,18 @@ class CEMPoQtWindow(QMainWindow):
             params['unit'] = self.step_unit_combo.currentText()
             # Parse invert indices
             invert_str = self.invert_indices_input.text().strip() if hasattr(self, 'invert_indices_input') else ""
+            if invert_str:
+                try:
+                    params['invert_indices'] = [int(x.strip()) for x in invert_str.split(',') if x.strip()]
+                except:
+                    params['invert_indices'] = []
+            else:
+                params['invert_indices'] = []
+        elif self.geo_type_combo.currentText() == "IGES File":
+            params['file_path'] = getattr(self, 'iges_file_path', '')
+            params['unit'] = self.iges_unit_combo.currentText() if hasattr(self, 'iges_unit_combo') else 'mm'
+            # Parse invert indices
+            invert_str = self.iges_invert_indices_input.text().strip() if hasattr(self, 'iges_invert_indices_input') else ""
             if invert_str:
                 try:
                     params['invert_indices'] = [int(x.strip()) for x in invert_str.split(',') if x.strip()]
@@ -673,9 +708,12 @@ class CEMPoQtWindow(QMainWindow):
         gtype = self.geo_type_combo.currentText()
         params = self.get_geo_params()
         
-        # Validation for STEP
+        # Validation for STEP/IGES
         if gtype == "STEP File" and not params.get('file_path'):
             self.log("<font color='red'>Error: Please select a STEP file first.</font>")
+            return
+        if gtype == "IGES File" and not params.get('file_path'):
+            self.log("<font color='red'>Error: Please select an IGES file first.</font>")
             return
 
         self.log(f"Updating preview for {gtype}...")
@@ -1151,12 +1189,23 @@ class CEMPoQtWindow(QMainWindow):
             if hasattr(self, 'invert_indices_input'):
                 invert_indices = self.invert_indices_input.text()
 
+            # IGES settings
+            iges_unit = ""
+            if hasattr(self, 'iges_unit_combo'):
+                iges_unit = self.iges_unit_combo.currentText()
+            iges_invert_indices = ""
+            if hasattr(self, 'iges_invert_indices_input'):
+                iges_invert_indices = self.iges_invert_indices_input.text()
+
             cfg = {
                 "geo_type": self.geo_type_combo.currentText(),
                 "geo_params": geo_params_vals,
                 "step_file_path": self.step_file_path,
                 "step_unit": step_unit,
                 "invert_indices": invert_indices,
+                "iges_file_path": self.iges_file_path,
+                "iges_unit": iges_unit,
+                "iges_invert_indices": iges_invert_indices,
 
                 "freq": self.freq_input.text(),
                 "mesh_density": self.mesh_density.text(),
@@ -1214,6 +1263,17 @@ class CEMPoQtWindow(QMainWindow):
 
             if hasattr(self, 'invert_indices_input'):
                 self.invert_indices_input.setText(cfg.get("invert_indices", ""))
+
+            # IGES settings
+            self.iges_file_path = cfg.get("iges_file_path", "")
+            if self.iges_file_path and hasattr(self, 'lbl_iges'):
+                self.lbl_iges.setText(os.path.basename(self.iges_file_path))
+
+            if hasattr(self, 'iges_unit_combo'):
+                self.iges_unit_combo.setCurrentText(cfg.get("iges_unit", "mm"))
+
+            if hasattr(self, 'iges_invert_indices_input'):
+                self.iges_invert_indices_input.setText(cfg.get("iges_invert_indices", ""))
 
             # Physics
             self.freq_input.setText(str(cfg.get("freq", "3000.0")))

@@ -4,7 +4,7 @@ from geometry.plate import AnalyticPlate
 from geometry.sphere import AnalyticSphere
 from geometry.cylinder import AnalyticCylinder
 from geometry.occ_surface import OCCSurface
-from geometry.step_loader import load_step_file
+from geometry.step_loader import load_step_file, load_iges_file
 from geometry.wedge import create_analytic_wedge
 from geometry.brick import create_analytic_brick
 from tools.visualize_mesh import create_occ_cylinder
@@ -75,6 +75,25 @@ class GeometryFactory:
             surfaces = load_step_file(file_path, scale=scale, invert_indices=invert_indices)
 
             return surfaces
-        
+
+        elif geo_type == "IGES File":
+            file_path = params.get('file_path')
+            if not file_path or not os.path.exists(file_path):
+                raise ValueError(f"IGES file not found: {file_path}")
+
+            unit = params.get('unit', 'mm')
+            scale = 1.0
+            if unit == 'mm':
+                scale = 0.001
+            elif unit == 'cm':
+                scale = 0.01
+
+            invert_indices = params.get('invert_indices', [])
+
+            # 调用 IGES 加载逻辑
+            surfaces = load_iges_file(file_path, scale=scale, invert_indices=invert_indices)
+
+            return surfaces
+
         else:
             raise ValueError(f"Unknown geometry type: {geo_type}")

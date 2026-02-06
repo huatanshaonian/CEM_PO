@@ -33,3 +33,13 @@ env/
 
 cem_po_config.json
 *.csv
+
+# CAD data files and backups
+*.igs
+*.iges
+*.igs.bak
+*.stp
+*.step
+
+# Standalone test/convert scripts
+convert_iges.py
