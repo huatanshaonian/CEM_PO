@@ -206,13 +206,13 @@ def load_iges_file(filename, max_param_range=100, scale=1.0,
     读取 IGES 文件并返回 OCCFaceSurface 对象列表。
     对非标准 IGES（如 Tecplot 导出）自动进行格式预处理后再交给 OCC 读取。
 
-    处理顺序: 读取 → 删面 → 翻转法向 → 镜像 → 旋转
+    处理顺序: 读取 → 删面 → 镜像 → 旋转 → 翻转法向
 
     参数:
         filename: IGES 文件路径 (.igs / .iges)
         max_param_range: 参数域范围阈值，超过此值的面会被跳过
         scale: 坐标缩放系数（例如 0.001 将 mm 转换为 m）
-        invert_indices: 需要翻转法向量的面索引列表 (0-based valid index)
+        invert_indices: 需要翻转法向量的面索引列表 (0-based，基于最终面列表)
         delete_indices: 需要删除的面索引列表 (0-based valid index)
         mirror_plane: 对称面，'X=0'/'Y=0'/'Z=0' 或 None；设置后对所有剩余面生成镜像副本
         rotation: 绕原点旋转角度 (rx, ry, rz)，单位为度，None 表示不旋转
@@ -246,11 +246,25 @@ def load_iges_file(filename, max_param_range=100, scale=1.0,
         raise ValueError(f"Could not extract any faces from IGES file: {filename}")
 
     # 从 TopoDS_Face 构建 OCCFaceSurface
+    from OCC.Core.BRepAdaptor import BRepAdaptor_Surface as _BAS
+    from OCC.Core.GeomAbs import (GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone,
+                                   GeomAbs_Sphere, GeomAbs_Torus, GeomAbs_BezierSurface,
+                                   GeomAbs_BSplineSurface, GeomAbs_SurfaceOfRevolution,
+                                   GeomAbs_SurfaceOfExtrusion, GeomAbs_OtherSurface)
+    _SURF_TYPE_NAMES = {
+        GeomAbs_Plane: "Plane", GeomAbs_Cylinder: "Cylinder", GeomAbs_Cone: "Cone",
+        GeomAbs_Sphere: "Sphere", GeomAbs_Torus: "Torus",
+        GeomAbs_BezierSurface: "Bezier", GeomAbs_BSplineSurface: "BSpline",
+        GeomAbs_SurfaceOfRevolution: "Revolution", GeomAbs_SurfaceOfExtrusion: "Extrusion",
+        GeomAbs_OtherSurface: "Other",
+    }
+
     surfaces = []
     skipped = 0
     deleted = 0
     valid_idx = 0
 
+    print(f"  --- Face Info ({len(faces)} faces) ---")
     for face_idx, face in enumerate(faces):
         surf = OCCFaceSurface(face, scale=scale, invert_normal=False)
         surf.step_id = face_idx
@@ -265,6 +279,19 @@ def load_iges_file(filename, max_param_range=100, scale=1.0,
         surf.edge_step_ids = edge_local_ids
         surf.n_edges = edge_count
 
+        # 输出面信息
+        adaptor = _BAS(face)
+        stype = _SURF_TYPE_NAMES.get(adaptor.GetType(), "Unknown")
+        info = f"  Face {face_idx}: {stype}"
+        info += f", U=[{surf.u_min:.4f}, {surf.u_max:.4f}], V=[{surf.v_min:.4f}, {surf.v_max:.4f}]"
+        if adaptor.GetType() == GeomAbs_BSplineSurface:
+            bs = adaptor.BSpline()
+            info += f", degree=({bs.UDegree()},{bs.VDegree()})"
+            info += f", poles=({bs.NbUPoles()}x{bs.NbVPoles()})"
+            info += f", rational={'Y' if bs.IsURational() or bs.IsVRational() else 'N'}"
+        info += f", edges={edge_count}"
+        print(info)
+
         u_range = surf.u_max - surf.u_min
         v_range = surf.v_max - surf.v_min
 
@@ -277,10 +304,6 @@ def load_iges_file(filename, max_param_range=100, scale=1.0,
                 deleted += 1
                 valid_idx += 1
                 continue
-
-            if valid_idx in invert_indices:
-                print(f"  Inverting normal for face index {valid_idx}")
-                surf.invert_normal = True
 
             surfaces.append(surf)
             valid_idx += 1
@@ -304,6 +327,15 @@ def load_iges_file(filename, max_param_range=100, scale=1.0,
             inv = surfaces[i].invert_normal
             surfaces[i] = OCCFaceSurface(rf, scale=scale, invert_normal=inv)
         print(f"  Rotated all {len(surfaces)} faces by ({rotation[0]}, {rotation[1]}, {rotation[2]}) deg")
+
+    # 翻转法向量：基于最终面列表的索引（所有几何操作完成后）
+    if invert_indices:
+        for idx in invert_indices:
+            if 0 <= idx < len(surfaces):
+                surfaces[idx].invert_normal = True
+                print(f"  Inverted normal for final surface {idx}")
+            else:
+                print(f"  Warning: invert index {idx} out of range (0-{len(surfaces)-1})")
 
     msg = f"Loaded {len(surfaces)} surfaces from {os.path.basename(filename)}"
     if deleted:

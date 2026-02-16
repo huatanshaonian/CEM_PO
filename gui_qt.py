@@ -138,10 +138,10 @@ LIGHT_STYLE = """
         background-color: #FFFFFF;
         padding-top: 15px;
     }
-    QGroupBox::title { 
-        subcontrol-origin: margin; 
-        left: 10px; 
-        padding: 0 5px; 
+    QGroupBox::title {
+        subcontrol-origin: margin;
+        left: 10px;
+        padding: 0 5px;
         background-color: #FFFFFF;
         color: #007ACC;
     }
@@ -477,18 +477,20 @@ class CEMPoQtWindow(QMainWindow):
 
         # 3. PTD Correction
         self.group_ptd = QGroupBox("PTD Correction")
-        self.group_ptd.setCheckable(True)
-        self.group_ptd.setChecked(False)
         l_ptd = QFormLayout()
-        
+
+        self.chk_ptd_enabled = QCheckBox("Enable PTD")
+        self.chk_ptd_enabled.setChecked(False)
+        l_ptd.addRow(self.chk_ptd_enabled)
+
         self.ptd_edges = QLineEdit("")
         self.ptd_edges.setPlaceholderText("Edge IDs (e.g. 1,4,5)")
         l_ptd.addRow("Edge IDs:", self.ptd_edges)
-        
+
         self.ptd_pol = QComboBox()
         self.ptd_pol.addItems(["VV", "HH"])
         l_ptd.addRow("Polarization:", self.ptd_pol)
-        
+
         self.group_ptd.setLayout(l_ptd)
         layout_solver.addWidget(self.group_ptd)
 
@@ -802,7 +804,7 @@ class CEMPoQtWindow(QMainWindow):
             if isinstance(result, tuple):
                 geo_list, ptd_id = result
                 # Auto-fill PTD edges if available
-                if ptd_id and self.group_ptd.isChecked():
+                if ptd_id and self.chk_ptd_enabled.isChecked():
                     self.ptd_edges.setText(ptd_id)
             else:
                 geo_list = result
@@ -829,15 +831,20 @@ class CEMPoQtWindow(QMainWindow):
                 self._surface_actors.append(actor)
                 self._actor_to_surface_idx[actor] = i
                 
-                # 2. Visualize Normals
+                # 2. Visualize Normals (inset 5% from edges, mag adaptive)
                 if self.chk_show_normals.isChecked():
-                    # Subsample for normals to avoid clutter
-                    u = np.linspace(*surface.u_domain, 10)
-                    v = np.linspace(*surface.v_domain, 10)
+                    u0, u1 = surface.u_domain
+                    v0, v1 = surface.v_domain
+                    du, dv = (u1 - u0) * 0.05, (v1 - v0) * 0.05
+                    u = np.linspace(u0 + du, u1 - du, 5)
+                    v = np.linspace(v0 + dv, v1 - dv, 5)
                     ug, vg = np.meshgrid(u, v)
                     p, n, j, _, _ = surface.get_data(ug, vg)
-                    self.plotter.add_arrows(p.reshape(-1, 3), n.reshape(-1, 3), 
-                                           mag=0.2, color='red', opacity=0.8)
+                    p_flat = p.reshape(-1, 3)
+                    diag = np.linalg.norm(p_flat.max(axis=0) - p_flat.min(axis=0))
+                    arrow_mag = max(diag * 0.08, 0.01)
+                    self.plotter.add_arrows(p_flat, n.reshape(-1, 3),
+                                           mag=arrow_mag, color='red', opacity=0.6)
 
                 # 3. Visualize PTD Edges
                 if self.chk_show_ptd.isChecked():
@@ -1108,7 +1115,7 @@ class CEMPoQtWindow(QMainWindow):
                     'use_degenerate': self.degen_mesh.isChecked()
                 },
                 'ptd': {
-                    'enabled': self.group_ptd.isChecked(),
+                    'enabled': self.chk_ptd_enabled.isChecked(),
                     'edges': ptd_edges_list,
                     'polarization': self.ptd_pol.currentText()
                 },
@@ -1314,7 +1321,7 @@ class CEMPoQtWindow(QMainWindow):
                 "phi_end": self.phi_end.text(),
                 "phi_n": self.phi_n.text(),
                 
-                "ptd_enabled": self.group_ptd.isChecked(),
+                "ptd_enabled": self.chk_ptd_enabled.isChecked(),
                 "ptd_edges": self.ptd_edges.text(),
                 "ptd_pol": self.ptd_pol.currentText(),
                 
@@ -1394,7 +1401,7 @@ class CEMPoQtWindow(QMainWindow):
             self.phi_end.setText(str(cfg.get("phi_end", "0")))
             self.phi_n.setText(str(cfg.get("phi_n", "1")))
             
-            self.group_ptd.setChecked(cfg.get("ptd_enabled", False))
+            self.chk_ptd_enabled.setChecked(cfg.get("ptd_enabled", False))
             self.ptd_edges.setText(cfg.get("ptd_edges", ""))
             self.ptd_pol.setCurrentText(cfg.get("ptd_pol", "VV"))
             
@@ -1595,15 +1602,22 @@ class CEMPoQtWindow(QMainWindow):
         # Surface
         points, faces = self.tessellate_surface(surf, resolution=40)
         mesh = pv.PolyData(points, faces)
-        self.plotter.add_mesh(mesh, color='orange', show_edges=True, opacity=0.9, label=f"Surface {idx}")
+        self.plotter.add_mesh(mesh, color='orange', show_edges=False, opacity=0.9, label=f"Surface {idx}")
         
-        # Normals
+        # Normals (inset 5% from edges, mag adaptive)
         try:
-            u = np.linspace(*surf.u_domain, 8)
-            v = np.linspace(*surf.v_domain, 8)
+            u0, u1 = surf.u_domain
+            v0, v1 = surf.v_domain
+            du, dv = (u1 - u0) * 0.05, (v1 - v0) * 0.05
+            u = np.linspace(u0 + du, u1 - du, 5)
+            v = np.linspace(v0 + dv, v1 - dv, 5)
             ug, vg = np.meshgrid(u, v)
             p, n, j, _, _ = surf.get_data(ug, vg)
-            self.plotter.add_arrows(p.reshape(-1, 3), n.reshape(-1, 3), mag=min(0.2, 1.0), color='red')
+            p_flat = p.reshape(-1, 3)
+            diag = np.linalg.norm(p_flat.max(axis=0) - p_flat.min(axis=0))
+            arrow_mag = max(diag * 0.08, 0.01)
+            self.plotter.add_arrows(p_flat, n.reshape(-1, 3),
+                                    mag=arrow_mag, color='red', opacity=0.6)
         except: pass
 
         # Edges & Labels

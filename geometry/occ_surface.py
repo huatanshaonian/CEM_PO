@@ -121,10 +121,12 @@ class OCCFaceSurface(Surface):
         scale: 坐标缩放系数（例如 0.001 将 mm 转换为 m）
         invert_normal: 是否翻转法向量
         """
+        from OCC.Core.TopAbs import TopAbs_REVERSED
         self.face = face
         self.adaptor = BRepAdaptor_Surface(face)
         self.scale = scale
         self.invert_normal = invert_normal
+        self._reversed = (face.Orientation() == TopAbs_REVERSED)
 
         # 获取实际的参数边界（考虑 trimming）
         self.u_min = self.adaptor.FirstUParameter()
@@ -219,6 +221,8 @@ class OCCFaceSurface(Surface):
             cz = du_x * dv_y - du_y * dv_x
             jacobians[i] = (cx*cx + cy*cy + cz*cz)**0.5
 
+        if self._reversed:
+            normals *= -1.0
         if self.invert_normal:
             normals *= -1.0
 
