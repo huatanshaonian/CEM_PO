@@ -563,20 +563,23 @@ class CEMPoQtWindow(QMainWindow):
 
     def _cache_dynamic_inputs(self):
         """Save current dynamic widget values before they are destroyed."""
-        # STEP widgets
-        for attr in ('step_unit_combo', 'invert_indices_input'):
+        # Combo boxes
+        for attr in ('step_unit_combo', 'iges_unit_combo', 'iges_mirror_plane_combo'):
             w = getattr(self, attr, None)
-            if w:
-                self._input_cache[attr] = w.currentText() if isinstance(w, QComboBox) else w.text()
-        # IGES widgets
-        for attr in ('iges_unit_combo', 'iges_mirror_plane_combo'):
+            if w is not None:
+                try:
+                    self._input_cache[attr] = w.currentText()
+                except RuntimeError:
+                    pass  # C++ object already deleted
+        # Line edits
+        for attr in ('invert_indices_input',
+                     'iges_invert_indices_input', 'iges_delete_indices_input', 'iges_rotation_input'):
             w = getattr(self, attr, None)
-            if w:
-                self._input_cache[attr] = w.currentText()
-        for attr in ('iges_invert_indices_input', 'iges_delete_indices_input', 'iges_rotation_input'):
-            w = getattr(self, attr, None)
-            if w:
-                self._input_cache[attr] = w.text()
+            if w is not None:
+                try:
+                    self._input_cache[attr] = w.text()
+                except RuntimeError:
+                    pass
 
     def update_geo_inputs(self, gtype):
         # Cache current widget values before destroying them
