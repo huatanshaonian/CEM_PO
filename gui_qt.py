@@ -651,6 +651,20 @@ class CEMPoQtWindow(QMainWindow):
             self.iges_rotation_input.setPlaceholderText("rx, ry, rz (deg), e.g. 90,0,0")
             self.geo_dynamic_layout.addRow("Rotation:", self.iges_rotation_input)
 
+            # Restore cached values
+            if 'iges_unit_combo' in self._input_cache:
+                self.iges_unit_combo.setCurrentText(self._input_cache['iges_unit_combo'])
+            if 'iges_invert_indices_input' in self._input_cache:
+                self.iges_invert_indices_input.setText(self._input_cache['iges_invert_indices_input'])
+            if 'iges_delete_indices_input' in self._input_cache:
+                self.iges_delete_indices_input.setText(self._input_cache['iges_delete_indices_input'])
+            if 'iges_mirror_plane_combo' in self._input_cache:
+                self.iges_mirror_plane_combo.setCurrentText(self._input_cache['iges_mirror_plane_combo'])
+            if 'iges_rotation_input' in self._input_cache:
+                self.iges_rotation_input.setText(self._input_cache['iges_rotation_input'])
+            if self.iges_file_path and hasattr(self, 'lbl_iges'):
+                self.lbl_iges.setText(os.path.basename(self.iges_file_path))
+
     def add_input(self, label, default, key):
         le = QLineEdit(default)
         self.geo_dynamic_layout.addRow(label, le)
@@ -1239,39 +1253,33 @@ class CEMPoQtWindow(QMainWindow):
         except Exception as e:
             self.log(f"<font color='red'>Export Failed: {e}</font>")
 
+    def _cached_val(self, attr, default=""):
+        """Read widget value if it exists, otherwise fall back to _input_cache."""
+        w = getattr(self, attr, None)
+        if w:
+            return w.currentText() if isinstance(w, QComboBox) else w.text()
+        return self._input_cache.get(attr, default)
+
     def save_config(self):
         try:
+            # Snapshot current widget values into cache (covers all geo types)
+            self._cache_dynamic_inputs()
+
             # Gather Dynamic Geo Params
             geo_params_vals = {}
             for k, v in self.geo_inputs.items():
                 geo_params_vals[k] = v.text()
-            
-            # Unit for STEP
-            step_unit = ""
-            if hasattr(self, 'step_unit_combo'):
-                step_unit = self.step_unit_combo.currentText()
 
-            # Invert indices for STEP
-            invert_indices = ""
-            if hasattr(self, 'invert_indices_input'):
-                invert_indices = self.invert_indices_input.text()
+            # STEP settings (from widget or cache)
+            step_unit = self._cached_val('step_unit_combo')
+            invert_indices = self._cached_val('invert_indices_input')
 
-            # IGES settings
-            iges_unit = ""
-            if hasattr(self, 'iges_unit_combo'):
-                iges_unit = self.iges_unit_combo.currentText()
-            iges_invert_indices = ""
-            if hasattr(self, 'iges_invert_indices_input'):
-                iges_invert_indices = self.iges_invert_indices_input.text()
-            iges_delete_indices = ""
-            if hasattr(self, 'iges_delete_indices_input'):
-                iges_delete_indices = self.iges_delete_indices_input.text()
-            iges_mirror_plane = "None"
-            if hasattr(self, 'iges_mirror_plane_combo'):
-                iges_mirror_plane = self.iges_mirror_plane_combo.currentText()
-            iges_rotation = ""
-            if hasattr(self, 'iges_rotation_input'):
-                iges_rotation = self.iges_rotation_input.text()
+            # IGES settings (from widget or cache)
+            iges_unit = self._cached_val('iges_unit_combo')
+            iges_invert_indices = self._cached_val('iges_invert_indices_input')
+            iges_delete_indices = self._cached_val('iges_delete_indices_input')
+            iges_mirror_plane = self._cached_val('iges_mirror_plane_combo', 'None')
+            iges_rotation = self._cached_val('iges_rotation_input')
 
             cfg = {
                 "geo_type": self.geo_type_combo.currentText(),
