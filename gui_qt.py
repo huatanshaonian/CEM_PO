@@ -1259,8 +1259,11 @@ class CEMPoQtWindow(QMainWindow):
     def _cached_val(self, attr, default=""):
         """Read widget value if it exists, otherwise fall back to _input_cache."""
         w = getattr(self, attr, None)
-        if w:
-            return w.currentText() if isinstance(w, QComboBox) else w.text()
+        if w is not None:
+            try:
+                return w.currentText() if isinstance(w, QComboBox) else w.text()
+            except RuntimeError:
+                pass  # C++ object already deleted by deleteLater()
         return self._input_cache.get(attr, default)
 
     def save_config(self):
