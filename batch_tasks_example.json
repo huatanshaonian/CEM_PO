@@ -5,8 +5,8 @@
   },
   "tasks": [
     {
-      "name": "Benchmark_Cylinder_1GHz",
-      "description": "Standard cylinder RCS validation case.",
+      "name": "Cylinder_1GHz_Standard",
+      "description": "标准圆柱体 RCS 验证，使用离散 PO 旗舰算法",
       "geometry": {
         "type": "Cylinder",
         "params": {
@@ -18,9 +18,8 @@
         "frequency_mhz": 1000.0,
         "algorithm": "discrete_po_sinc_dual",
         "mesh_density": 10.0,
-        "min_points": 18,
         "use_degenerate": true,
-        "workers": 4
+        "polarization": "VV"
       },
       "scan": {
         "theta": [0, 180, 181],
@@ -28,7 +27,8 @@
       }
     },
     {
-      "name": "Plate_VV_Polarization",
+      "name": "Plate_PTD_VV_HH",
+      "description": "带有 PTD 边缘修正的正方形平板",
       "geometry": {
         "type": "Plate",
         "params": {
@@ -39,20 +39,44 @@
       "solver": {
         "frequency_mhz": 3000.0,
         "algorithm": "discrete_po_sinc_dual",
-        "mesh_density": 8.0,
+        "polarization": "VV",
         "ptd": {
           "enabled": true,
-          "edges": ["0", "1", "2", "3"],
-          "polarization": "VV"
+          "edges": ["0", "1", "2", "3"]
         }
       },
       "scan": {
-        "theta": [-90, 90, 91],
+        "theta": [-90, 90, 181],
         "phi": [0, 0, 1]
       }
     },
     {
-      "name": "2D_Scan_Sphere",
+      "name": "IGES_Advanced_Fix",
+      "description": "加载 IGES 文件并应用高级修正（镜像、旋转、删除特定面）",
+      "geometry": {
+        "type": "IGES File",
+        "params": {
+          "file_path": "models/complex_part.igs",
+          "unit": "mm",
+          "mirror_plane": "XZ",
+          "rotation": [0, 0, 45],
+          "delete_indices": [10, 11, 12],
+          "invert_indices": [1, 2, 3]
+        }
+      },
+      "solver": {
+        "frequency_mhz": 1500.0,
+        "algorithm": "gauss_ribbon",
+        "use_gpu": true
+      },
+      "scan": {
+        "theta": [0, 360, 361],
+        "phi": [0, 0, 1]
+      }
+    },
+    {
+      "name": "Sphere_2D_Scan",
+      "description": "球体 2D 全空间扫描案例",
       "geometry": {
         "type": "Sphere",
         "params": {
@@ -61,12 +85,11 @@
       },
       "solver": {
         "frequency_mhz": 500.0,
-        "algorithm": "discrete_po_sinc_dual",
-        "use_gpu": false
+        "algorithm": "discrete_po_sinc_dual"
       },
       "scan": {
-        "theta": [0, 90, 46],
-        "phi": [0, 90, 46]
+        "theta": [0, 180, 37],
+        "phi": [0, 360, 73]
       }
     }
   ]

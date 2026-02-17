@@ -1,0 +1,22 @@
+# Core computation
+numpy
+scipy
+pandas
+
+# Plotting and 3D Visualization
+matplotlib
+pyvista
+pyvistaqt
+
+# GUI Framework
+PySide6
+
+# NURBS and geometry utilities
+geomdl
+
+# CAD support (Note: pythonocc-core is best installed via conda)
+# If using pip equivalents like OCP, they may vary. 
+# pythonocc-core
+
+# Optional GPU acceleration (uncomment if needed and CUDA is available)
+# cupy-cuda12x

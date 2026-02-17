@@ -12,7 +12,7 @@
 
 ### ✨ 核心特性
 
-*   **🖥️ 现代化 GUI**: 现代暗色/亮色主题，Docker 布局，交互式 3D 旋转/缩放/拾取，支持从 CSV 导入多组数据对比。
+*   **🖥️ 现代化 GUI**: 亮色主题，Docker 布局，交互式 3D 旋转/缩放/拾取，支持从 CSV 导入多组数据对比。
 *   **⚡ 高性能计算**:
     *   **GPU 加速**: 利用 CUDA/CuPy 进行大规模面元积分，计算速度提升 10x-50x。
     *   **并行计算**: 多核 CPU 并行扫描引擎。
@@ -55,11 +55,25 @@ conda install -c conda-forge pythonocc-core=7.9.0
 
 ## 🚀 运行指南
 
-启动程序：
+### 1. 启动图形界面 (GUI)
 
 ```bash
 python gui_qt.py
 ```
+
+### 2. 批量处理 (CLI)
+
+本项目支持通过 JSON 配置文件进行自动化批量计算，适合大规模仿真任务。
+
+```bash
+# 运行示例任务
+python main.py batch_tasks_example.json
+
+# 强制启用 GPU
+python main.py my_tasks.json --gpu
+```
+
+详细的配置参数说明请参考：[批量计算说明文档](docs/batch_processing.md)
 
 ## 📂 项目结构
 

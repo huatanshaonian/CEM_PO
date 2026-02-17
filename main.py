@@ -72,10 +72,14 @@ def build_sim_params(task_cfg, global_overrides):
     if global_overrides.get('workers') is not None:
         n_workers = global_overrides['workers']
 
-    # 4. Construct Dict
+    # 4. Polarization (Can be at solver level or ptd level)
+    polarization = solver_cfg.get('polarization', ptd_cfg.get('polarization', 'VV'))
+
+    # 5. Construct Dict
     params = {
         'frequency': freq_mhz * 1e6, # Convert to Hz
         'algorithm': solver_cfg.get('algorithm', 'discrete_po_sinc_dual'),
+        'polarization': polarization,
         'angles': {
             'theta_start': theta_scan[0],
             'theta_end': theta_scan[1],
@@ -92,7 +96,7 @@ def build_sim_params(task_cfg, global_overrides):
         'ptd': {
             'enabled': ptd_cfg.get('enabled', False),
             'edges': ptd_cfg.get('edges', []),
-            'polarization': ptd_cfg.get('polarization', 'VV')
+            'polarization': polarization # Sync with solver level
         },
         'compute': {
             'gpu': use_gpu,

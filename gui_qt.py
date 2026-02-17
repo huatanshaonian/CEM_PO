@@ -514,12 +514,22 @@ class CEMPoQtWindow(QMainWindow):
         group_compute.setLayout(l_compute)
         layout_solver.addWidget(group_compute)
         
-        layout_solver.addSpacing(20)
+        layout_solver.addSpacing(10)
+        h_btns = QHBoxLayout()
+        
         self.btn_run = QPushButton("RUN SIMULATION")
         self.btn_run.setObjectName("RunBtn")
         self.btn_run.setMinimumHeight(40)
         self.btn_run.clicked.connect(self.on_run)
-        layout_solver.addWidget(self.btn_run)
+        h_btns.addWidget(self.btn_run, 2)
+        
+        self.btn_export_json = QPushButton("EXPORT JSON")
+        self.btn_export_json.setMinimumHeight(40)
+        self.btn_export_json.clicked.connect(self.export_batch_json)
+        self.btn_export_json.setToolTip("Export current settings to a JSON file for batch processing.")
+        h_btns.addWidget(self.btn_export_json, 1)
+        
+        layout_solver.addLayout(h_btns)
         layout_solver.addStretch()
         
         self.param_tabs.addTab(self.tab_solver, "Solver")
@@ -562,6 +572,62 @@ class CEMPoQtWindow(QMainWindow):
         self.param_tabs.addTab(self.tab_comp, "Comparison")
 
         self.update_geo_inputs("Cylinder")
+
+    def export_batch_json(self):
+        """
+        Generate a JSON task configuration compatible with main.py based on current UI settings.
+        """
+        try:
+            gtype = self.geo_type_combo.currentText()
+            geo_params = self.get_geo_params()
+            
+            # Construct standard task structure
+            task = {
+                "name": f"Exported_{gtype}_{time.strftime('%H%M%S')}",
+                "description": f"Generated from GUI at {time.ctime()}",
+                "geometry": {
+                    "type": gtype,
+                    "params": geo_params
+                },
+                "solver": {
+                    "frequency_mhz": float(self.freq_input.text()),
+                    "algorithm": self.algo_combo.currentData(),
+                    "polarization": self.ptd_pol.currentText(),
+                    "mesh_density": float(self.mesh_density.text()),
+                    "min_points": int(self.min_points.text()),
+                    "use_degenerate": self.degen_mesh.isChecked(),
+                    "use_gpu": self.use_gpu.isChecked(),
+                    "workers": int(self.cpu_workers.text()),
+                    "ptd": {
+                        "enabled": self.chk_ptd_enabled.isChecked(),
+                        "edges": [s.strip() for s in self.ptd_edges.text().split(",") if s.strip()]
+                    }
+                },
+                "scan": {
+                    "theta": [float(self.theta_start.text()), float(self.theta_end.text()), int(self.theta_n.text())],
+                    "phi": [float(self.phi_start.text()), float(self.phi_end.text()), int(self.phi_n.text())]
+                }
+            }
+
+            # Wrap in a full batch config
+            config = {
+                "global_settings": {
+                    "output_dir": "results/exported_run",
+                    "save_plot": True
+                },
+                "tasks": [task]
+            }
+
+            path, _ = QFileDialog.getSaveFileName(self, "Export Batch JSON", "task_config.json", "JSON Files (*.json)")
+            if path:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                self.log(f"<font color='green'>Successfully exported batch config to {path}</font>")
+                self.log("You can now run this using: <b>python main.py " + os.path.basename(path) + "</b>")
+
+        except Exception as e:
+            self.log(f"<font color='red'>Export failed: {e}</font>")
+            traceback.print_exc()
 
     def _cache_dynamic_inputs(self):
         """Save current dynamic widget values before they are destroyed."""
