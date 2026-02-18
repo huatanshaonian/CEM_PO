@@ -333,11 +333,12 @@ def main():
     tasks = expanded_tasks
     logger.info(f"Total tasks after expansion: {len(tasks)}")
     
+    total_tasks = len(tasks)
     total_start = time.time()
     
     for i, task in enumerate(tasks):
         task_name = task.get('name', f"task_{i}")
-        logger.info(f"=== Processing Task [{i+1}/{len(tasks)}]: {task_name} ===")
+        logger.info(f"=== Processing Task [{i+1}/{total_tasks}]: {task_name} ===")
         
         try:
             # 1. Geometry
@@ -368,27 +369,38 @@ def main():
 
             # 4. Run Simulation
             logger.info(f"Starting simulation for '{task_name}'...")
-            logger.info(f"  Algorithm: {sim_params['algorithm']}")
-            logger.info(f"  Frequency: {sim_params['frequency']/1e6:.2f} MHz")
-            logger.info(f"  Scan: Theta[{sim_params['angles']['theta_start']}:{sim_params['angles']['theta_end']}] "
-                        f"n={sim_params['angles']['n_theta']}")
             
+            current_task_idx = i
             def progress(curr, total, msg):
-                # 控制台显示 (带 \r 实时刷新)
-                if total > 0:
-                    print(f"  Progress: {curr/total*100:.0f}% - {msg}          ", end='\r')
-                else:
-                    print(f"  Status: {msg}          ", end='\r')
+                # --- 双进度条渲染 ---
+                bar_len = 20
                 
-                # 同时也记录到日志文件 (为了防止日志文件过大，记录关键消息和每 20% 的进度)
-                if total > 0:
-                    if curr % 20 == 0 or curr == total:
-                        logger.info(f"Progress: {curr/total*100:.0f}% - {msg}")
-                else:
-                    logger.info(f"Status: {msg}")
+                # A. 子任务进度 (Sub-task)
+                sub_percent = curr / total if total > 0 else 0
+                sub_filled = int(bar_len * sub_percent)
+                sub_bar = "█" * sub_filled + "-" * (bar_len - sub_filled)
+                
+                # B. 总任务进度 (Total Tasks)
+                # 总进度 = (已完成任务数 + 当前任务完成百分比) / 总任务数
+                total_percent = (current_task_idx + sub_percent) / total_tasks
+                total_filled = int(bar_len * total_percent)
+                total_bar = "█" * total_filled + "-" * (bar_len - total_filled)
+                
+                # 仅在控制台显示 (合并为一行)
+                status_line = f"\r  Task [{current_task_idx+1}/{total_tasks}] [{sub_bar}] {sub_percent*100:3.0f}% | Total [{total_bar}] {total_percent*100:3.0f}% | {msg[:30]:<30}"
+                sys.stdout.write(status_line)
+                sys.stdout.flush()
+                
+                # 仅向日志文件记录进度 (避免刷屏)
+                if total > 0 and (curr % 20 == 0 or curr == total):
+                    for handler in logging.getLogger().handlers:
+                        if isinstance(handler, logging.FileHandler):
+                            record = logger.makeRecord(logger.name, logging.INFO, None, 0, 
+                                                     f"Task {current_task_idx+1}/{total_tasks} - Progress: {sub_percent*100:.0f}% - {msg}", None, None)
+                            handler.handle(record)
 
             result = bridge.run_simulation(geo_obj, sim_params, progress_callback=progress)
-            print("") 
+            print("") # 每个任务结束后换行
             logger.info(f"Simulation completed in {result['elapsed_time']:.2f}s")
             
             # 5. Save Results
