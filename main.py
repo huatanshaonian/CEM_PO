@@ -263,18 +263,70 @@ def main():
     # --- Task Expansion Logic ---
     for task in tasks:
         geo_cfg = task.get('geometry', {})
+        geo_type = geo_cfg.get('type', "")
         params = geo_cfg.get('params', {})
-        fpath = params.get('file_path', "")
         
-        if ";" in fpath:
+        # 收集所有待处理的文件路径
+        all_files = []
+        
+        # 1. 处理显式指定的文件 (支持分号隔离)
+        fpath = params.get('file_path', "")
+        if fpath:
             paths = [p.strip() for p in fpath.split(";") if p.strip()]
-            logger.info(f"Task '{task.get('name')}' contains {len(paths)} files. Expanding...")
-            for p in paths:
-                new_task = json.loads(json.dumps(task)) # Deep copy
+            all_files.extend(paths)
+            
+        # 2. 处理文件夹自动遍历 (新功能)
+        folder_path = params.get('folder_path', "")
+        if folder_path and os.path.isdir(folder_path):
+            logger.info(f"Scanning folder: {folder_path}")
+            
+            # 根据几何类型决定允许的后缀
+            if geo_type == "IGES File":
+                valid_exts = ('.igs', '.iges')
+            elif geo_type == "STEP File":
+                valid_exts = ('.stp', '.step')
+            else:
+                valid_exts = ('.igs', '.iges', '.stp', '.step')
+                
+            found_files = [
+                os.path.join(folder_path, f) for f in os.listdir(folder_path)
+                if f.lower().endswith(valid_exts)
+            ]
+            logger.info(f"  Found {len(found_files)} matching CAD models in folder.")
+            all_files.extend(found_files)
+
+        # 3. 如果有多个文件，进行任务展开
+        if len(all_files) > 1:
+            logger.info(f"Task '{task.get('name')}' expanded into {len(all_files)} sub-tasks.")
+            for p in all_files:
+                new_task = json.loads(json.dumps(task))
                 new_task['geometry']['params']['file_path'] = p
+                # 移除 folder_path 防止重复触发逻辑
+                if 'folder_path' in new_task['geometry']['params']:
+                    del new_task['geometry']['params']['folder_path']
+                
                 fname = os.path.splitext(os.path.basename(p))[0]
-                new_task['name'] = f"{task.get('name', 'task')}_{fname}"
+                
+                # 智能命名逻辑：如果原名为 "task" 或空，则直接使用文件名
+                orig_name = task.get('name', 'task')
+                if orig_name.lower() == "task" or not orig_name.strip():
+                    new_task['name'] = fname
+                else:
+                    new_task['name'] = f"{orig_name}_{fname}"
+                
                 expanded_tasks.append(new_task)
+        elif len(all_files) == 1:
+            p = all_files[0]
+            task['geometry']['params']['file_path'] = p
+            fname = os.path.splitext(os.path.basename(p))[0]
+            
+            orig_name = task.get('name', 'task')
+            if orig_name.lower() == "task" or not orig_name.strip():
+                task['name'] = fname
+            else:
+                task['name'] = f"{orig_name}_{fname}"
+                
+            expanded_tasks.append(task)
         else:
             expanded_tasks.append(task)
             
@@ -315,10 +367,25 @@ def main():
                 continue
 
             # 4. Run Simulation
-            logger.info("Starting simulation...")
+            logger.info(f"Starting simulation for '{task_name}'...")
+            logger.info(f"  Algorithm: {sim_params['algorithm']}")
+            logger.info(f"  Frequency: {sim_params['frequency']/1e6:.2f} MHz")
+            logger.info(f"  Scan: Theta[{sim_params['angles']['theta_start']}:{sim_params['angles']['theta_end']}] "
+                        f"n={sim_params['angles']['n_theta']}")
+            
             def progress(curr, total, msg):
-                if total > 0 and curr % 10 == 0:
-                    print(f"  Progress: {curr/total*100:.0f}% - {msg}", end='\r')
+                # 控制台显示 (带 \r 实时刷新)
+                if total > 0:
+                    print(f"  Progress: {curr/total*100:.0f}% - {msg}          ", end='\r')
+                else:
+                    print(f"  Status: {msg}          ", end='\r')
+                
+                # 同时也记录到日志文件 (为了防止日志文件过大，记录关键消息和每 20% 的进度)
+                if total > 0:
+                    if curr % 20 == 0 or curr == total:
+                        logger.info(f"Progress: {curr/total*100:.0f}% - {msg}")
+                else:
+                    logger.info(f"Status: {msg}")
 
             result = bridge.run_simulation(geo_obj, sim_params, progress_callback=progress)
             print("") 

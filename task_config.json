@@ -1,0 +1,63 @@
+{
+  "global_settings": {
+    "output_dir": "results/1000_iges_models",
+    "log_dir": "results/1000_iges_mod/logs",
+    "save_plot": true,
+    "filename_format": "{task_name}"
+  },
+  "tasks": [
+    {
+      "name": "",
+      "description": "calculating all 1000 iges files",
+      "geometry": {
+        "type": "IGES File",
+        "params": {
+          "folder_path": "C:/Users/huatan/Desktop/feko/CW_geometry/CW_geofile_B01",
+          "unit": "mm",
+          "invert_indices": [
+            0,
+            2,
+            3,
+            5
+          ],
+          "delete_indices": [
+            4,
+            5
+          ],
+          "mirror_plane": "Z=0",
+          "rotation": [
+            90.0,
+            0.0,
+            180.0
+          ]
+        }
+      },
+      "solver": {
+        "frequency_mhz": 3000.0,
+        "algorithm": "discrete_po_sinc_dual",
+        "polarization": "HH",
+        "mesh_density": 10.0,
+        "min_points": 18,
+        "use_degenerate": true,
+        "use_gpu": true,
+        "workers": 4,
+        "ptd": {
+          "enabled": false,
+          "edges": []
+        }
+      },
+      "scan": {
+        "theta": [
+          45.0,
+          135.0,
+          91
+        ],
+        "phi": [
+          -45.0,
+          45.0,
+          91
+        ]
+      }
+    }
+  ]
+}

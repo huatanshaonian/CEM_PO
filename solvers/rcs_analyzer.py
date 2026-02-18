@@ -1,12 +1,15 @@
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
+import logging
 
 from physics.constants import C0
 from physics.wave import IncidentWave
 from core.env import HAS_GPU
 from core.mesh_data import MergedMeshData
 from .ptd import PTDProcessor
+
+logger = logging.getLogger("CEM-PO.Analyzer")
 
 class RCSAnalyzer:
     def __init__(self, solver):
@@ -190,11 +193,11 @@ class RCSAnalyzer:
             if (i + 1) % max(1, n_angles // 20) == 0 or (i + 1) == n_angles:
                 progress = (i + 1) / n_angles * 100
                 msg = f"进度: {progress:.0f}% ({i+1}/{n_angles})"
-                if show_progress: print(f"  {msg}")
+                if show_progress: logger.info(msg)
                 if progress_callback: progress_callback(i + 1, n_angles, msg)
 
         done_msg = "计算完成!"
-        if show_progress: print(f"  {done_msg}")
+        if show_progress: logger.info(done_msg)
         if progress_callback: progress_callback(n_angles, n_angles, done_msg)
 
         return {k: np.array(v) for k, v in rcs_list.items()}
@@ -206,7 +209,7 @@ class RCSAnalyzer:
         if n_workers is None: n_workers = os.cpu_count() or 4
 
         parallel_msg = f"启用并行计算: {n_workers} 个进程 (Cached Mode)"
-        if show_progress: print(f"  {parallel_msg}")
+        if show_progress: logger.info(parallel_msg)
         if progress_callback: progress_callback(0, len(angles), parallel_msg)
 
         args_list = [
@@ -233,7 +236,7 @@ class RCSAnalyzer:
                     if completed % max(1, n_angles // 20) == 0 or completed == n_angles:
                         progress = completed / n_angles * 100
                         msg = f"进度: {progress:.0f}% ({completed}/{n_angles})"
-                        if show_progress: print(f"  {msg}")
+                        if show_progress: logger.info(msg)
                         if progress_callback: progress_callback(completed, n_angles, msg)
 
             final_rcs = {'total': [], 'po': [], 'ptd': []}
@@ -244,7 +247,7 @@ class RCSAnalyzer:
                 final_rcs['ptd'].append(res['ptd'])
 
             done_msg = "并行计算完成!"
-            if show_progress: print(f"  {done_msg}")
+            if show_progress: logger.info(done_msg)
             if progress_callback: progress_callback(n_angles, n_angles, done_msg)
             
             return {k: np.array(v) for k, v in final_rcs.items()}
@@ -384,11 +387,11 @@ class RCSAnalyzer:
                 if computed % max(1, total_points // 20) == 0 or computed == total_points:
                     progress = computed / total_points * 100
                     msg = f"进度: {progress:.0f}% ({computed}/{total_points})"
-                    if show_progress: print(f"  {msg}")
+                    if show_progress: logger.info(msg)
                     if progress_callback: progress_callback(computed, total_points, msg)
 
         done_msg = "2D扫描完成!"
-        if show_progress: print(f"  {done_msg}")
+        if show_progress: logger.info(done_msg)
         if progress_callback: progress_callback(total_points, total_points, done_msg)
         return rcs_2d
 
@@ -403,7 +406,7 @@ class RCSAnalyzer:
         total_points = n_theta * n_phi
 
         parallel_msg = f"启用2D并行计算: {n_workers} 个进程 (Cached Mode)"
-        if show_progress: print(f"  {parallel_msg}")
+        if show_progress: logger.info(parallel_msg)
         if progress_callback: progress_callback(0, total_points, parallel_msg)
 
         args_list = []
@@ -439,11 +442,11 @@ class RCSAnalyzer:
                     if computed % max(1, total_points // 20) == 0 or computed == total_points:
                         progress = computed / total_points * 100
                         msg = f"进度: {progress:.0f}% ({computed}/{total_points})"
-                        if show_progress: print(f"  {msg}")
+                        if show_progress: logger.info(msg)
                         if progress_callback: progress_callback(computed, total_points, msg)
 
             done_msg = "2D并行计算完成!"
-            if show_progress: print(f"  {done_msg}")
+            if show_progress: logger.info(done_msg)
             if progress_callback: progress_callback(total_points, total_points, done_msg)
             return rcs_2d
 

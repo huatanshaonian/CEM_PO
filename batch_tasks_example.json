@@ -77,6 +77,25 @@
       }
     },
     {
+      "name": "Batch_Folder_Scan",
+      "description": "自动遍历文件夹下所有的 IGES 和 STEP 模型并批量执行",
+      "geometry": {
+        "type": "IGES File",
+        "params": {
+          "folder_path": "models/my_parts",
+          "unit": "mm"
+        }
+      },
+      "solver": {
+        "frequency_mhz": 1200.0,
+        "algorithm": "discrete_po_sinc_dual"
+      },
+      "scan": {
+        "theta": [0, 90, 91],
+        "phi": [0, 0, 1]
+      }
+    },
+    {
       "name": "Sphere_2D_Scan",
       "description": "球体 2D 全空间扫描案例",
       "geometry": {
