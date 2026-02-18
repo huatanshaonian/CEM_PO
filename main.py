@@ -222,7 +222,29 @@ def main():
         bridge = SolverBridge()
     
     tasks = cfg.get('tasks', [])
-    logger.info(f"Found {len(tasks)} tasks in configuration.")
+    expanded_tasks = []
+    
+    # --- Task Expansion Logic ---
+    for task in tasks:
+        geo_cfg = task.get('geometry', {})
+        params = geo_cfg.get('params', {})
+        fpath = params.get('file_path', "")
+        
+        if ";" in fpath:
+            paths = [p.strip() for p in fpath.split(";") if p.strip()]
+            logger.info(f"Task '{task.get('name')}' contains {len(paths)} files. Expanding...")
+            for p in paths:
+                new_task = json.loads(json.dumps(task)) # Deep copy
+                new_task['geometry']['params']['file_path'] = p
+                # Update name to include filename
+                fname = os.path.splitext(os.path.basename(p))[0]
+                new_task['name'] = f"{task.get('name', 'task')}_{fname}"
+                expanded_tasks.append(new_task)
+        else:
+            expanded_tasks.append(task)
+            
+    tasks = expanded_tasks
+    logger.info(f"Total tasks after expansion: {len(tasks)}")
     
     total_start = time.time()
     
