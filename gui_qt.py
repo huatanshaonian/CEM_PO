@@ -627,7 +627,9 @@ class CEMPoQtWindow(QMainWindow):
             config = {
                 "global_settings": {
                     "output_dir": "results/exported_run",
-                    "save_plot": True
+                    "log_dir": "results/exported_run/logs",
+                    "save_plot": True,
+                    "filename_format": "{task_name}"
                 },
                 "tasks": [task]
             }

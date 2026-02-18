@@ -1,7 +1,9 @@
 {
   "global_settings": {
     "output_dir": "results/batch_example",
-    "save_plot": true
+    "log_dir": "results/batch_example/logs",
+    "save_plot": true,
+    "filename_format": "{task_name}"
   },
   "tasks": [
     {

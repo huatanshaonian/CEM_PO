@@ -16,11 +16,36 @@ from core.solver_bridge import SolverBridge
 from geometry.factory import GeometryFactory
 
 # 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+def setup_logging(log_dir, task_name=None):
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    log_filename = f"batch_run_{timestamp}.log"
+    log_path = os.path.join(log_dir, log_filename)
+    
+    # 获取根日志记录器
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    
+    # 清除现有的处理器，防止重复
+    if root_logger.hasHandlers():
+        root_logger.handlers.clear()
+
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', '%Y-%m-%d %H:%M:%S')
+
+    # 控制台处理器
+    ch = logging.StreamHandler()
+    ch.setFormatter(formatter)
+    root_logger.addHandler(ch)
+
+    # 文件处理器
+    fh = logging.FileHandler(log_path, encoding='utf-8')
+    fh.setFormatter(formatter)
+    root_logger.addHandler(fh)
+    
+    return logging.getLogger("CEM-PO-CLI"), log_path
+
 logger = logging.getLogger("CEM-PO-CLI")
 
 def parse_args():
@@ -34,13 +59,13 @@ def parse_args():
 
 def load_config(path):
     if not os.path.exists(path):
-        logger.error(f"Config file not found: {path}")
+        print(f"Error: Config file not found: {path}")
         sys.exit(1)
     try:
         with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
-        logger.error(f"Failed to parse JSON config: {e}")
+        print(f"Error: Failed to parse JSON config: {e}")
         sys.exit(1)
 
 def ensure_output_dir(path):
@@ -114,7 +139,7 @@ def save_plot(result, output_path, title_suffix=""):
         mode = result.get('mode')
         freq_mhz = result.get('freq', 0) / 1e6
         
-        fig = plt.figure(figsize=(10, 6))
+        fig = plt.figure(figsize=(10, 8))
         
         if mode == '2d':
             ax = fig.add_subplot(111)
@@ -131,6 +156,10 @@ def save_plot(result, output_path, title_suffix=""):
             ax.set_xlabel("Phi (deg)")
             ax.set_ylabel("Theta (deg)")
             ax.set_title(f"2D RCS Pattern - {title_suffix} @ {freq_mhz:.1f} MHz")
+            
+            # --- USER REQUESTED FIXES ---
+            ax.invert_yaxis() # 使小角度在上方，大角度在下方
+            ax.set_aspect('equal') # 保持角度比例，防止热图拉伸
             
         else: # 1d
             ax = fig.add_subplot(111)
@@ -186,6 +215,7 @@ def save_csv(result, output_path):
         else:
             df = pd.DataFrame({
                 'Theta': result['theta_deg'],
+                'Phi': result.get('phi_deg', 0.0), # Added Phi for completeness
                 'RCS_Total_dBsm': result['rcs_total'],
                 'RCS_Total_m2': 10**(result['rcs_total']/10)
             })
@@ -194,9 +224,6 @@ def save_csv(result, output_path):
             if result.get('rcs_ptd') is not None:
                 df['RCS_PTD_dBsm'] = result['rcs_ptd']
                 
-        # Add metadata as comments in the first few lines? 
-        # Pandas doesn't support writing comments easily without custom logic.
-        # We will write standard CSV.
         df.to_csv(output_path, index=False)
         logger.info(f"Saved data to: {output_path}")
         
@@ -209,7 +236,16 @@ def main():
     
     global_settings = cfg.get('global_settings', {})
     base_output_dir = global_settings.get('output_dir', 'results/batch_run')
+    log_dir = global_settings.get('log_dir', os.path.join(base_output_dir, 'logs'))
     save_plot_flag = global_settings.get('save_plot', True)
+    
+    # 命名格式，例如 "{task_name}" 或 "{task_name}_{timestamp}"
+    filename_format = global_settings.get('filename_format', "{task_name}")
+    
+    # 设置日志
+    global logger
+    logger, log_path = setup_logging(log_dir)
+    logger.info(f"Logging initialized. Log file: {log_path}")
     
     # Prepare overrides
     overrides = {}
@@ -236,7 +272,6 @@ def main():
             for p in paths:
                 new_task = json.loads(json.dumps(task)) # Deep copy
                 new_task['geometry']['params']['file_path'] = p
-                # Update name to include filename
                 fname = os.path.splitext(os.path.basename(p))[0]
                 new_task['name'] = f"{task.get('name', 'task')}_{fname}"
                 expanded_tasks.append(new_task)
@@ -262,17 +297,6 @@ def main():
                 logger.error("Skipping task: Geometry type missing.")
                 continue
 
-            # Special logging for IGES advanced features
-            if geo_type == "IGES File":
-                logger.info(f"  IGES Config: Unit={geo_params.get('unit','mm')}, "
-                            f"Mirror={geo_params.get('mirror_plane','None')}, "
-                            f"Rotation={geo_params.get('rotation','None')}")
-                if geo_params.get('delete_indices'):
-                    logger.info(f"  Deleting faces: {geo_params['delete_indices']}")
-                if geo_params.get('invert_indices'):
-                    logger.info(f"  Inverting faces: {geo_params['invert_indices']}")
-
-            # 2. Solver Params
             sim_params = build_sim_params(task, overrides)
             
             if args.dry_run:
@@ -283,7 +307,7 @@ def main():
             logger.info(f"Building geometry: {geo_type}")
             geo_obj = GeometryFactory.create_geometry(geo_type, geo_params)
             
-            if isinstance(geo_obj, tuple): # Handle Wedge/Brick PTD return
+            if isinstance(geo_obj, tuple):
                 geo_obj = geo_obj[0] 
                 
             if not geo_obj:
@@ -293,23 +317,29 @@ def main():
             # 4. Run Simulation
             logger.info("Starting simulation...")
             def progress(curr, total, msg):
-                # Simple progress log, maybe throttle?
-                if total > 0 and curr % 20 == 0:
+                if total > 0 and curr % 10 == 0:
                     print(f"  Progress: {curr/total*100:.0f}% - {msg}", end='\r')
 
             result = bridge.run_simulation(geo_obj, sim_params, progress_callback=progress)
-            print("") # Newline after progress
+            print("") 
             logger.info(f"Simulation completed in {result['elapsed_time']:.2f}s")
             
             # 5. Save Results
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             safe_name = "".join([c if c.isalnum() else "_" for c in task_name])
             
-            csv_path = os.path.join(base_output_dir, f"{safe_name}_{timestamp}.csv")
+            # 使用命名模版生成文件名
+            try:
+                final_filename = filename_format.format(task_name=safe_name, timestamp=timestamp)
+            except Exception as e:
+                logger.warning(f"Naming format error: {e}. Falling back to task_name.")
+                final_filename = safe_name
+
+            csv_path = os.path.join(base_output_dir, f"{final_filename}.csv")
             save_csv(result, csv_path)
             
             if save_plot_flag:
-                img_path = os.path.join(base_output_dir, f"{safe_name}_{timestamp}.png")
+                img_path = os.path.join(base_output_dir, f"{final_filename}.png")
                 save_plot(result, img_path, title_suffix=task_name)
                 
         except Exception as e:
@@ -320,6 +350,7 @@ def main():
     if not args.dry_run:
         total_time = time.time() - total_start
         logger.info(f"=== All tasks finished in {total_time:.2f}s ===")
+        logger.info(f"Total results saved in: {os.path.abspath(base_output_dir)}")
 
 if __name__ == "__main__":
     main()

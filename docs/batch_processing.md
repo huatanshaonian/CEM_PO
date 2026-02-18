@@ -24,10 +24,16 @@ python main.py batch_tasks.json
 配置文件包含全局设置 (`global_settings`) 和任务列表 (`tasks`)。
 
 ### 2.1 全局设置 (global_settings)
-| 参数 | 类型 | 说明 |
-| :--- | :--- | :--- |
-| `output_dir` | string | 结果保存的根目录，默认为 `results/batch_run` |
-| `save_plot` | boolean | 是否生成并保存 RCS 曲线图 (PNG) |
+| 参数 | 类型 | 默认值 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `output_dir` | string | `results/batch_run` | 结果保存的根目录 |
+| `log_dir` | string | `results/batch_run/logs` | 日志保存目录 |
+| `save_plot` | boolean | `true` | 是否生成并保存 RCS 曲线图 (PNG) |
+| `filename_format`| string | `"{task_name}"` | 文件命名格式。支持 `{task_name}` 和 `{timestamp}` 占位符。 |
+
+**命名格式示例：**
+- `"{task_name}"`: (推荐) 仅使用任务名，不带时间戳，方便覆盖或版本管理。
+- `"{task_name}_{timestamp}"`: 每次运行生成带时间戳的唯一文件。
 
 ### 2.2 任务配置 (tasks)
 每个任务包含 `geometry` (几何)、`solver` (求解器) 和 `scan` (扫描范围) 三部分。
@@ -49,6 +55,7 @@ python main.py batch_tasks.json
 - `rotation`: 绕 [X, Y, Z] 轴的旋转角度 (度)。
 - `delete_indices`: 列表，指定要删除的面索引。
 - `invert_indices`: 列表，指定需要翻转法向的面索引。
+- **多模型处理**：在 `file_path` 中使用分号 `;` 分隔多个文件路径（如 `"a.igs; b.igs"`），程序将自动拆分为多个子任务。
 
 #### Solver (求解器设置)
 | 参数 | 默认值 | 说明 |
@@ -77,8 +84,11 @@ python main.py batch_tasks.json
 ## 3. 输出结果
 
 计算完成后，结果将保存在 `output_dir` 中：
-1. **CSV 文件**: 包含 Theta, Phi, RCS(dBsm), RCS(m^2) 的原始数据。
-2. **PNG 图片**: RCS 随角度变化的曲线图或 2D 热力图。
+1. **CSV 文件**: 包含 Theta, Phi, RCS(dBsm), RCS(m^2) 的数据。
+2. **PNG 图片**: RCS 随角度变化的曲线图。
+    - **1D 扫描**: 常规曲线图。
+    - **2D 扫描**: 角度 1:1 比例热力图，**小角度在上、大角度在下**展示。
+3. **Log 文件**: 保存在 `log_dir` 下，包含任务运行过程中的所有输出，文件名带时间戳。
 
 ---
 
