@@ -13,30 +13,10 @@ from geometry.plate import AnalyticPlate
 from geometry.sphere import AnalyticSphere
 from geometry.cylinder import AnalyticCylinder
 from geometry.occ_surface import OCCSurface
+from geometry.occ_primitives import create_occ_cylinder
 from solvers.po import DiscretePOIntegrator as RibbonIntegrator
 from physics.wave import IncidentWave
 
-# OCC Imports
-from OCC.Core.gp import gp_Pnt, gp_Dir, gp_Ax3
-from OCC.Core.Geom import Geom_CylindricalSurface
-from OCC.Core.GeomConvert import geomconvert
-from OCC.Core.Geom import Geom_RectangularTrimmedSurface
-
-def create_occ_cylinder(radius, height):
-    """
-    创建一个 OCC 圆柱曲面对象
-    """
-    # 定义轴系 (原点在 -height/2, Z轴向上)
-    origin = gp_Pnt(0, 0, -height/2.0)
-    axis = gp_Ax3(origin, gp_Dir(0, 0, 1), gp_Dir(1, 0, 0))
-    
-    # 创建无限圆柱面
-    cyl_surf = Geom_CylindricalSurface(axis, radius)
-    
-    # 裁剪高度 [0, height] 和 角度 [0, 2pi]
-    trimmed_cyl = Geom_RectangularTrimmedSurface(cyl_surf, 0, 2*np.pi, 0, height, True, True)
-    
-    return trimmed_cyl
 
 def plot_mesh(surface, freq, samples_per_lambda, title):
     # 初始化求解器

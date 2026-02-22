@@ -7,7 +7,7 @@ from geometry.occ_surface import OCCSurface
 from geometry.step_loader import load_step_file, load_iges_file
 from geometry.wedge import create_analytic_wedge
 from geometry.brick import create_analytic_brick
-from tools.visualize_mesh import create_occ_cylinder
+from geometry.occ_primitives import create_occ_cylinder
 
 class GeometryFactory:
     """
