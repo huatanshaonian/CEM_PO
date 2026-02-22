@@ -7,10 +7,8 @@ import json
 import csv
 import pandas as pd
 
-CONFIG_FILE = "cem_po_qt_config.json"
-
-from PySide6.QtWidgets import (QApplication, QMainWindow, QDockWidget, QWidget, 
-                               QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QComboBox, 
+from PySide6.QtWidgets import (QApplication, QMainWindow, QDockWidget, QWidget,
+                               QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QComboBox,
                                QCheckBox, QPushButton, QTextEdit, QLabel, QProgressBar,
                                QSplitter, QFrame, QGroupBox, QScrollArea, QFileDialog, QTabWidget,
                                QListWidget, QAbstractItemView, QListWidgetItem)
@@ -38,170 +36,11 @@ from solvers.api import AVAILABLE_ALGORITHMS
 from physics.analytical_rcs import get_analytical_solution
 from physics.analytical_rcs import get_analytical_solution, compute_error_stats
 
-# --- Step 5: Multithreading (Worker) ---
-class CalculationWorker(QThread):
-    progress_signal = Signal(float, str)
-    result_signal = Signal(dict)
-    error_signal = Signal(str)
-
-    def __init__(self, bridge, geo, params):
-        super().__init__()
-        self.bridge = bridge
-        self.geo = geo
-        self.params = params
-
-    def run(self):
-        def callback(current, total, msg=""):
-            p = (current / total * 100) if total > 0 else 0
-            self.progress_signal.emit(p, msg)
-
-        try:
-            result = self.bridge.run_simulation(self.geo, self.params, progress_callback=callback)
-            self.result_signal.emit(result)
-        except Exception as e:
-            self.error_signal.emit(str(e))
-
-class LogBridge(QObject):
-    new_log = Signal(str)
-    def write(self, text):
-        if text.strip(): self.new_log.emit(str(text))
-    def flush(self): pass
-
-class MeshStatsWorker(QThread):
-    """Worker thread for generating mesh statistics"""
-    progress_signal = Signal(float, str)
-    result_signal = Signal(dict)
-    error_signal = Signal(str)
-
-    def __init__(self, bridge, geo, params):
-        super().__init__()
-        self.bridge = bridge
-        self.geo = geo
-        self.params = params
-
-    def run(self):
-        import time
-        try:
-            t_start = time.time()
-            self.progress_signal.emit(0, "Generating mesh...")
-
-            meshes = self.bridge.generate_mesh(self.geo, self.params)
-
-            if meshes is None:
-                self.error_signal.emit("Algorithm does not support mesh preview")
-                return
-
-            # Calculate statistics
-            total_cells = 0
-            face_stats = []
-
-            for i, m in enumerate(meshes):
-                pts = m.points
-                if pts.ndim == 3:
-                    nu, nv = pts.shape[1], pts.shape[0]
-                    n_cells = nu * nv
-                else:
-                    n_cells = len(pts)
-                    nu, nv = n_cells, 1
-                total_cells += n_cells
-                face_stats.append({'index': i, 'nu': nu, 'nv': nv, 'cells': n_cells})
-                self.progress_signal.emit((i + 1) / len(meshes) * 100, f"Surface {i+1}/{len(meshes)}")
-
-            elapsed = time.time() - t_start
-            result = {
-                'meshes': meshes,
-                'total_cells': total_cells,
-                'n_surfaces': len(meshes),
-                'face_stats': face_stats,
-                'elapsed': elapsed
-            }
-            self.result_signal.emit(result)
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            self.error_signal.emit(str(e))
-
-# --- UI Styles (Light Theme) ---
-LIGHT_STYLE = """
-    QMainWindow { background-color: #F8F9FA; color: #333; }
-    
-    QDockWidget { color: #333; font-weight: bold; }
-    QDockWidget::title { 
-        background-color: #E9ECEF; 
-        padding: 8px; 
-        border-bottom: 1px solid #DEE2E6; 
-    }
-    
-    QGroupBox { 
-        font-weight: bold; 
-        border: 1px solid #DEE2E6; 
-        border-radius: 4px;
-        margin-top: 12px; 
-        background-color: #FFFFFF;
-        padding-top: 15px;
-    }
-    QGroupBox::title {
-        subcontrol-origin: margin;
-        left: 10px;
-        padding: 0 5px;
-        background-color: #FFFFFF;
-        color: #007ACC;
-    }
-    
-    QLabel { color: #495057; font-size: 13px; }
-    
-    QLineEdit { 
-        background-color: #FFFFFF; 
-        color: #212529; 
-        border: 1px solid #CED4DA; 
-        padding: 6px; 
-        border-radius: 4px;
-        selection-background-color: #007ACC;
-    }
-    QLineEdit:focus { border: 1px solid #007ACC; }
-    
-    QComboBox { 
-        background-color: #FFFFFF; 
-        color: #212529; 
-        border: 1px solid #CED4DA; 
-        padding: 6px; 
-        border-radius: 4px;
-        min-width: 6em;
-    }
-    QComboBox:hover { border: 1px solid #ADB5BD; }
-    QComboBox::drop-down { 
-        subcontrol-origin: padding;
-        subcontrol-position: top right;
-        width: 20px;
-        border-left-width: 0px;
-        border-top-right-radius: 3px;
-        border-bottom-right-radius: 3px;
-    }
-    QComboBox::down-arrow { 
-        width: 0; 
-        height: 0;
-        border-left: 5px solid transparent;
-        border-right: 5px solid transparent;
-        border-top: 6px solid #555; /* Darker arrow */
-        margin-right: 6px;
-        margin-top: 2px;
-    }
-    
-    QPushButton { 
-        background-color: #E1E1E1; 
-        color: #333; 
-        border: 1px solid #999; /* Stronger border */
-        padding: 8px 16px; 
-        border-radius: 3px;
-        font-weight: bold;
-    }
-    QPushButton:hover { background-color: #D1D1D1; border-color: #666; }
-    
-    QTabWidget::pane { border: 1px solid #CCC; background: white; border-radius: 2px; }
-    QTabBar::tab { background: #E1E1E1; color: #333; padding: 8px 15px; border: 1px solid #CCC; margin-bottom: -1px; }
-    QTabBar::tab:selected { background: #FFF; border-bottom: 1px solid #FFF; font-weight: bold; }
-"""
+# UI modules
+from ui.workers import CalculationWorker, MeshStatsWorker, LogBridge
+from ui.styles import LIGHT_STYLE
+from ui.comparison_panel import ComparisonManager
+from ui.config_manager import save_config, load_config
 
 class CEMPoQtWindow(QMainWindow):
     def __init__(self):
@@ -220,13 +59,14 @@ class CEMPoQtWindow(QMainWindow):
         self._highlighted_idx = -1         # currently highlighted surface
         self._picking_setup = False
         self._input_cache = {}             # Cache for dynamic widget values across geo_type switches
+        self._comp_mgr = ComparisonManager(self)
 
         self.setup_ui()
         self.setup_menu()
         self.setStyleSheet(LIGHT_STYLE)
 
         # Load configuration
-        self.load_config()
+        load_config(self)
 
         self.log("Ready. Welcome to CEM PO Solver.")
 
@@ -242,7 +82,7 @@ class CEMPoQtWindow(QMainWindow):
                 pass
 
     def closeEvent(self, event):
-        self.save_config()
+        save_config(self)
         sys.stdout = sys.__stdout__
         super().closeEvent(event)
 
@@ -550,9 +390,9 @@ class CEMPoQtWindow(QMainWindow):
         
         h_btn = QHBoxLayout()
         self.btn_add_csv = QPushButton("Import CSV")
-        self.btn_add_csv.clicked.connect(self.add_comparison_file)
+        self.btn_add_csv.clicked.connect(self._comp_mgr.add_comparison_file)
         self.btn_rem_csv = QPushButton("Remove")
-        self.btn_rem_csv.clicked.connect(self.remove_comparison_file)
+        self.btn_rem_csv.clicked.connect(self._comp_mgr.remove_comparison_file)
         h_btn.addWidget(self.btn_add_csv)
         h_btn.addWidget(self.btn_rem_csv)
         l_comp.addLayout(h_btn)
@@ -574,10 +414,10 @@ class CEMPoQtWindow(QMainWindow):
         group_opts = QGroupBox("Plot Options")
         l_opts = QVBoxLayout()
         self.chk_analytical = QCheckBox("Show Analytical Solution")
-        self.chk_analytical.stateChanged.connect(self.update_comparison_plot)
+        self.chk_analytical.stateChanged.connect(self._comp_mgr.update_comparison_plot)
         l_opts.addWidget(self.chk_analytical)
         self.btn_refresh_comp = QPushButton("Update Plot")
-        self.btn_refresh_comp.clicked.connect(self.update_comparison_plot)
+        self.btn_refresh_comp.clicked.connect(self._comp_mgr.update_comparison_plot)
         l_opts.addWidget(self.btn_refresh_comp)
         group_opts.setLayout(l_opts)
         layout_comp.addWidget(group_opts)
@@ -1232,7 +1072,7 @@ class CEMPoQtWindow(QMainWindow):
         
         # Plot Results
         self.plot_results(result)
-        self.update_comparison_plot() # Update comparison tab
+        self._comp_mgr.update_comparison_plot()  # Update comparison tab
         self.tabs.setCurrentIndex(1) # Switch to Results Tab
         self.btn_run.setEnabled(True)
 
@@ -1348,484 +1188,6 @@ class CEMPoQtWindow(QMainWindow):
             
         except Exception as e:
             self.log(f"<font color='red'>Export Failed: {e}</font>")
-
-    def _cached_val(self, attr, default=""):
-        """Read widget value if it exists, otherwise fall back to _input_cache."""
-        w = getattr(self, attr, None)
-        if w is not None:
-            try:
-                return w.currentText() if isinstance(w, QComboBox) else w.text()
-            except RuntimeError:
-                pass  # C++ object already deleted by deleteLater()
-        return self._input_cache.get(attr, default)
-
-    def save_config(self):
-        try:
-            # Snapshot current widget values into cache (covers all geo types)
-            self._cache_dynamic_inputs()
-
-            # Gather Dynamic Geo Params
-            geo_params_vals = {}
-            for k, v in self.geo_inputs.items():
-                geo_params_vals[k] = v.text()
-
-            # STEP settings (from widget or cache)
-            step_unit = self._cached_val('step_unit_combo')
-            invert_indices = self._cached_val('invert_indices_input')
-
-            # IGES settings (from widget or cache)
-            iges_unit = self._cached_val('iges_unit_combo')
-            iges_invert_indices = self._cached_val('iges_invert_indices_input')
-            iges_delete_indices = self._cached_val('iges_delete_indices_input')
-            iges_mirror_plane = self._cached_val('iges_mirror_plane_combo', 'None')
-            iges_rotation = self._cached_val('iges_rotation_input')
-
-            cfg = {
-                "geo_type": self.geo_type_combo.currentText(),
-                "geo_params": geo_params_vals,
-                "step_file_path": self.step_file_path,
-                "step_unit": step_unit,
-                "invert_indices": invert_indices,
-                "iges_file_path": self.iges_file_path,
-                "iges_unit": iges_unit,
-                "iges_invert_indices": iges_invert_indices,
-                "iges_delete_indices": iges_delete_indices,
-                "iges_mirror_plane": iges_mirror_plane,
-                "iges_rotation": iges_rotation,
-
-                "freq": self.freq_input.text(),
-                "mesh_density": self.mesh_density.text(),
-                "min_points": self.min_points.text(),
-                "vis_subsample": self.vis_subsample.text(),
-                "use_degen": self.degen_mesh.isChecked(),
-                
-                "algorithm": self.algo_combo.currentData(),
-                "theta_start": self.theta_start.text(),
-                "theta_end": self.theta_end.text(),
-                "theta_n": self.theta_n.text(),
-                "phi_start": self.phi_start.text(),
-                "phi_end": self.phi_end.text(),
-                "phi_n": self.phi_n.text(),
-                
-                "ptd_enabled": self.chk_ptd_enabled.isChecked(),
-                "ptd_edges": self.ptd_edges.text(),
-                "ptd_pol": self.ptd_pol.currentText(),
-                
-                "use_gpu": self.use_gpu.isChecked(),
-                "use_parallel": self.use_parallel.isChecked(),
-                "cpu_workers": self.cpu_workers.text()
-            }
-            
-            with open(CONFIG_FILE, 'w') as f:
-                json.dump(cfg, f, indent=4)
-            # print("Config saved.") 
-        except Exception as e:
-            print(f"Failed to save config: {e}")
-
-    def load_config(self):
-        if not os.path.exists(CONFIG_FILE):
-            return
-            
-        try:
-            with open(CONFIG_FILE, 'r') as f:
-                cfg = json.load(f)
-            
-            # Geometry
-            gtype = cfg.get("geo_type", "Cylinder")
-            self.geo_type_combo.setCurrentText(gtype)
-            # update_geo_inputs is triggered by setCurrentText, but we might need to update inputs after
-            
-            saved_params = cfg.get("geo_params", {})
-            for k, v in saved_params.items():
-                if k in self.geo_inputs:
-                    self.geo_inputs[k].setText(str(v))
-            
-            self.step_file_path = cfg.get("step_file_path", "")
-            if self.step_file_path and hasattr(self, 'lbl_step'):
-                self.lbl_step.setText(os.path.basename(self.step_file_path))
-                
-            if hasattr(self, 'step_unit_combo'):
-                self.step_unit_combo.setCurrentText(cfg.get("step_unit", "mm"))
-
-            if hasattr(self, 'invert_indices_input'):
-                self.invert_indices_input.setText(cfg.get("invert_indices", ""))
-
-            # IGES settings
-            self.iges_file_path = cfg.get("iges_file_path", "")
-            if self.iges_file_path and hasattr(self, 'lbl_iges'):
-                self.lbl_iges.setText(os.path.basename(self.iges_file_path))
-
-            if hasattr(self, 'iges_unit_combo'):
-                self.iges_unit_combo.setCurrentText(cfg.get("iges_unit", "mm"))
-
-            if hasattr(self, 'iges_invert_indices_input'):
-                self.iges_invert_indices_input.setText(cfg.get("iges_invert_indices", ""))
-            if hasattr(self, 'iges_delete_indices_input'):
-                self.iges_delete_indices_input.setText(cfg.get("iges_delete_indices", ""))
-            if hasattr(self, 'iges_mirror_plane_combo'):
-                self.iges_mirror_plane_combo.setCurrentText(cfg.get("iges_mirror_plane", "None"))
-            if hasattr(self, 'iges_rotation_input'):
-                self.iges_rotation_input.setText(cfg.get("iges_rotation", ""))
-
-            # Physics
-            self.freq_input.setText(str(cfg.get("freq", "3000.0")))
-            self.mesh_density.setText(str(cfg.get("mesh_density", "10.0")))
-            self.min_points.setText(str(cfg.get("min_points", "18")))
-            self.vis_subsample.setText(str(cfg.get("vis_subsample", "1")))
-            self.degen_mesh.setChecked(cfg.get("use_degen", True))
-
-            # Solver
-            algo = cfg.get("algorithm")
-            idx = self.algo_combo.findData(algo)
-            if idx >= 0: self.algo_combo.setCurrentIndex(idx)
-            
-            self.theta_start.setText(str(cfg.get("theta_start", "-90")))
-            self.theta_end.setText(str(cfg.get("theta_end", "90")))
-            self.theta_n.setText(str(cfg.get("theta_n", "181")))
-            
-            self.phi_start.setText(str(cfg.get("phi_start", "0")))
-            self.phi_end.setText(str(cfg.get("phi_end", "0")))
-            self.phi_n.setText(str(cfg.get("phi_n", "1")))
-            
-            self.chk_ptd_enabled.setChecked(cfg.get("ptd_enabled", False))
-            self.ptd_edges.setText(cfg.get("ptd_edges", ""))
-            self.ptd_pol.setCurrentText(cfg.get("ptd_pol", "VV"))
-            
-            self.use_gpu.setChecked(cfg.get("use_gpu", False))
-            self.use_parallel.setChecked(cfg.get("use_parallel", False))
-            self.cpu_workers.setText(str(cfg.get("cpu_workers", "4")))
-            
-            self.log("Configuration loaded.")
-            
-        except Exception as e:
-            self.log(f"Failed to load config: {e}")
-
-    def add_comparison_file(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Select CSV Files", "", "CSV Files (*.csv)")
-        for path in paths:
-            try:
-                # Read CSV using Pandas (flexible)
-                # Assume columns like 'Theta', 'RCS', 'dBsm' etc.
-                df = pd.read_csv(path, comment='#')
-                name = os.path.basename(path)
-                
-                self.comparison_data.append({
-                    'name': name,
-                    'data': df,
-                    'path': path
-                })
-                self.comp_files_list.addItem(name)
-            except Exception as e:
-                self.log(f"Error loading {path}: {e}")
-
-        self._refresh_dataset_combos()
-        self.update_comparison_plot()
-
-    def remove_comparison_file(self):
-        selected_items = self.comp_files_list.selectedItems()
-        if not selected_items: return
-        
-        # Remove from back to avoid index shift issues
-        rows = sorted([self.comp_files_list.row(item) for item in selected_items], reverse=True)
-        
-        for row in rows:
-            self.comp_files_list.takeItem(row)
-            del self.comparison_data[row]
-
-        self._refresh_dataset_combos()
-        self.update_comparison_plot()
-
-    def _refresh_dataset_combos(self):
-        """Repopulate the three dataset combo boxes with current CSV names + sim option."""
-        sim_label = "当前仿真结果"
-        csv_names = [item['name'] for item in self.comparison_data]
-        options = ["(未选择)", sim_label] + csv_names
-
-        for combo in (self.combo_ds_a, self.combo_ds_b, self.combo_ds_ref):
-            prev = combo.currentText()
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItems(options)
-            idx = combo.findText(prev)
-            combo.setCurrentIndex(idx if idx >= 0 else 0)
-            combo.blockSignals(False)
-
-    def _resolve_dataset(self, label):
-        """Return (theta_1d, phi_1d, rcs_2d, name) for the given combo label, or None."""
-        if not label or label == "(未选择)":
-            return None
-        if label == "当前仿真结果":
-            if not self.last_result or self.last_result.get('mode') != '2d':
-                return None
-            return (self.last_result['theta_deg'],
-                    self.last_result['phi_deg'],
-                    self.last_result['rcs_total'],
-                    "Calculated")
-        for item in self.comparison_data:
-            if item['name'] == label:
-                return self._parse_csv_2d(item)
-        return None
-
-    def _get_common_grid(self, t1, p1, m1, t2, p2, m2):
-        """Find overlapping theta×phi region and interpolate both datasets onto it.
-
-        Returns (t_common, p_common, m1_aligned, m2_aligned) or (None, None, None, None).
-        """
-        t_min = max(t1.min(), t2.min())
-        t_max = min(t1.max(), t2.max())
-        p_min = max(p1.min(), p2.min())
-        p_max = min(p1.max(), p2.max())
-        if t_min >= t_max or p_min >= p_max:
-            return None, None, None, None
-        t_c = t1[(t1 >= t_min) & (t1 <= t_max)]
-        p_c = p1[(p1 >= p_min) & (p1 <= p_max)]
-        if len(t_c) < 2 or len(p_c) < 2:
-            return None, None, None, None
-        return t_c, p_c, self._align_to_grid(m1, t1, p1, t_c, p_c), self._align_to_grid(m2, t2, p2, t_c, p_c)
-
-    def update_comparison_plot(self):
-        self.comp_figure.clear()
-
-        da = self._resolve_dataset(self.combo_ds_a.currentText())
-        db = self._resolve_dataset(self.combo_ds_b.currentText())
-        dr = self._resolve_dataset(self.combo_ds_ref.currentText())
-
-        if da is None:
-            self._show_comp_message("请在 A 中选择一个数据集。")
-            self.comp_canvas.draw()
-            return
-
-        ta, pa, ma, na = da
-
-        if db is None:
-            # Show A alone
-            ax = self.comp_figure.add_subplot(111)
-            extent = [pa.min(), pa.max(), ta.max(), ta.min()]
-            phi_range = pa.max() - pa.min() if len(pa) > 1 else 1.0
-            theta_range = ta.max() - ta.min() if len(ta) > 1 else 1.0
-            data_aspect = phi_range / theta_range if theta_range > 0 else 1.0
-            im = ax.imshow(ma, extent=extent, aspect=data_aspect, origin='upper', cmap='jet')
-            self.comp_figure.colorbar(im, ax=ax, label='RCS (dBsm)')
-            ax.set_xlabel('Phi (deg)')
-            ax.set_ylabel('Theta (deg)')
-            ax.set_title(f'{na}\n(在 B 中选择第二个数据集以对比)')
-            self.comp_canvas.draw()
-            return
-
-        tb, pb, mb, nb = db
-        t_c, p_c, ma_c, mb_c = self._get_common_grid(ta, pa, ma, tb, pb, mb)
-        if t_c is None:
-            self._show_comp_message(
-                f"A 和 B 角度范围无重叠。\n"
-                f"A: θ[{ta.min():.1f},{ta.max():.1f}] φ[{pa.min():.1f},{pa.max():.1f}]\n"
-                f"B: θ[{tb.min():.1f},{tb.max():.1f}] φ[{pb.min():.1f},{pb.max():.1f}]")
-            self.comp_canvas.draw()
-            return
-
-        if dr is not None:
-            # 6-panel triple comparison
-            tr, pr, mr, nr = dr
-            mr_c = self._align_to_grid(mr, tr, pr, t_c, p_c)
-            self._draw_6panel_2d(ma_c, na, mb_c, nb, mr_c, nr, t_c, p_c)
-        else:
-            # 3-panel A vs B
-            self._draw_3panel_2d(ma_c, na, mb_c, nb, t_c, p_c, freq_mhz=None)
-
-        self.comp_canvas.draw()
-
-    def _show_comp_message(self, msg):
-        """在 comparison 画布中央显示提示文字。"""
-        ax = self.comp_figure.add_subplot(111)
-        ax.text(0.5, 0.5, msg, ha='center', va='center', fontsize=11,
-                transform=ax.transAxes, color='gray',
-                bbox=dict(facecolor='lightyellow', edgecolor='gray', pad=8))
-        ax.axis('off')
-
-    def _parse_csv_2d(self, item):
-        """Parse a loaded CSV as 2D RCS data (flat/long format with Theta, Phi, RCS columns).
-
-        Returns (theta_1d, phi_1d, rcs_2d, name) or None if not 2D.
-        """
-        df = item['data']
-        cols_lower = [c.lower() for c in df.columns]
-
-        theta_col = next((df.columns[i] for i, c in enumerate(cols_lower) if 'theta' in c), None)
-        phi_col   = next((df.columns[i] for i, c in enumerate(cols_lower) if 'phi'   in c), None)
-        # Prefer columns explicitly named with 'dbsm'; fall back to first 'rcs' column
-        rcs_col = next((df.columns[i] for i, c in enumerate(cols_lower) if 'dbsm' in c), None)
-        if rcs_col is None:
-            rcs_col = next((df.columns[i] for i, c in enumerate(cols_lower)
-                            if 'rcs' in c and df.columns[i] not in (theta_col, phi_col)), None)
-
-        if not (theta_col and phi_col and rcs_col):
-            return None
-
-        try:
-            pivot    = df.pivot_table(index=theta_col, columns=phi_col, values=rcs_col, aggfunc='mean')
-            theta_1d = pivot.index.values.astype(float)
-            phi_1d   = pivot.columns.values.astype(float)
-            rcs_2d   = pivot.values.astype(float)   # shape (n_theta, n_phi)
-            return theta_1d, phi_1d, rcs_2d, item['name']
-        except Exception as e:
-            self.log(f"2D CSV parse failed ({item['name']}): {e}")
-            return None
-
-    def _align_to_grid(self, ref_mat, ref_theta, ref_phi, target_theta, target_phi):
-        """Interpolate ref_mat (on ref_theta × ref_phi) onto target_theta × target_phi."""
-        try:
-            from scipy.interpolate import RegularGridInterpolator
-            fn = RegularGridInterpolator((ref_theta, ref_phi), ref_mat,
-                                         method='linear', bounds_error=False, fill_value=np.nan)
-            Tg, Pg = np.meshgrid(target_theta, target_phi, indexing='ij')
-            return fn((Tg, Pg))
-        except ImportError:
-            # Nearest-neighbour fallback when scipy is unavailable
-            ti = np.clip(np.searchsorted(ref_theta, target_theta) - 1, 0, len(ref_theta) - 1)
-            pi = np.clip(np.searchsorted(ref_phi,   target_phi)   - 1, 0, len(ref_phi)   - 1)
-            return ref_mat[np.ix_(ti, pi)]
-
-    def _draw_3panel_2d(self, data_a, name_a, data_b, name_b, theta, phi, freq_mhz):
-        """Draw 3-panel 2D comparison: A | B | Diff(A−B) with RMSE/mean metrics."""
-        diff = data_a - data_b
-        mask = np.isfinite(data_a) & np.isfinite(data_b)
-        rmse     = float(np.sqrt(np.mean(diff[mask] ** 2))) if mask.any() else float('nan')
-        mean_err = float(np.mean(diff[mask]))               if mask.any() else float('nan')
-
-        extent   = [phi.min(), phi.max(), theta.max(), theta.min()]
-        vmin     = min(np.nanmin(data_a), np.nanmin(data_b))
-        vmax     = max(np.nanmax(data_a), np.nanmax(data_b))
-        # Clamp diff range: avoid amplifying float noise when diff ≈ 0
-        diff_abs = np.nanmax(np.abs(diff[mask])) if mask.any() else 1.0
-        if diff_abs < 1e-10:
-            diff_abs = 1.0
-
-        # Data aspect ratio for consistent sizing
-        phi_range = phi.max() - phi.min() if len(phi) > 1 else 1.0
-        theta_range = theta.max() - theta.min() if len(theta) > 1 else 1.0
-        data_aspect = phi_range / theta_range if theta_range > 0 else 1.0
-
-        # 5 columns: [img A] [img B] [cbar_data] [img Diff] [cbar_diff]
-        gs = self.comp_figure.add_gridspec(1, 5, width_ratios=[1, 1, 0.05, 1, 0.05], wspace=0.3)
-        ax1 = self.comp_figure.add_subplot(gs[0])
-        ax2 = self.comp_figure.add_subplot(gs[1])
-        cax1 = self.comp_figure.add_subplot(gs[2])
-        ax3 = self.comp_figure.add_subplot(gs[3])
-        cax2 = self.comp_figure.add_subplot(gs[4])
-
-        ax1.imshow(data_a, extent=extent, aspect=data_aspect, origin='upper',
-                   cmap='jet', vmin=vmin, vmax=vmax)
-        ax1.set_title(name_a, fontsize=10)
-        ax1.set_xlabel('Phi (deg)')
-        ax1.set_ylabel('Theta (deg)')
-
-        im2 = ax2.imshow(data_b, extent=extent, aspect=data_aspect, origin='upper',
-                         cmap='jet', vmin=vmin, vmax=vmax)
-        ax2.set_title(name_b, fontsize=10)
-        ax2.set_xlabel('Phi (deg)')
-        self.comp_figure.colorbar(im2, cax=cax1, label='RCS (dBsm)')
-
-        im3 = ax3.imshow(diff, extent=extent, aspect=data_aspect, origin='upper',
-                         cmap='seismic', vmin=-diff_abs, vmax=diff_abs)
-        ax3.set_title(f'Diff (A−B)\nRMSE={rmse:.2f} dB  Mean={mean_err:.2f} dB', fontsize=9)
-        ax3.set_xlabel('Phi (deg)')
-        self.comp_figure.colorbar(im3, cax=cax2, label='Error (dB)')
-
-        title = f'2D RCS Comparison @ {freq_mhz:.1f} MHz — ' if freq_mhz else '2D RCS Comparison — '
-        self.comp_figure.suptitle(f'{title}RMSE={rmse:.2f} dB  Mean={mean_err:.2f} dB', fontsize=11)
-
-    def _draw_6panel_2d(self, rcs_a, name_a, rcs_b, name_b, rcs_ref, name_ref, theta, phi):
-        """6-panel dual comparison: top row [A, B, Ref], bottom row [A−Ref, B−Ref, A−B]."""
-        diff_a  = rcs_a - rcs_ref
-        diff_b  = rcs_b - rcs_ref
-        diff_ab = rcs_a - rcs_b
-
-        def _stats(d):
-            m = np.isfinite(d)
-            if not m.any():
-                return float('nan'), float('nan')
-            return float(np.sqrt(np.mean(d[m] ** 2))), float(np.mean(d[m]))
-
-        rmse_a,  mean_a  = _stats(diff_a)
-        rmse_b,  mean_b  = _stats(diff_b)
-        rmse_ab, mean_ab = _stats(diff_ab)
-
-        extent   = [phi.min(), phi.max(), theta.max(), theta.min()]
-        vmin     = min(np.nanmin(rcs_a), np.nanmin(rcs_b), np.nanmin(rcs_ref))
-        vmax     = max(np.nanmax(rcs_a), np.nanmax(rcs_b), np.nanmax(rcs_ref))
-        err_abs  = max(np.nanmax(np.abs(diff_a)), np.nanmax(np.abs(diff_b)), np.nanmax(np.abs(diff_ab)))
-        if err_abs < 1e-10:
-            err_abs = 1.0
-
-        phi_range = phi.max() - phi.min() if len(phi) > 1 else 1.0
-        theta_range = theta.max() - theta.min() if len(theta) > 1 else 1.0
-        data_aspect = phi_range / theta_range if theta_range > 0 else 1.0
-
-        gs = self.comp_figure.add_gridspec(2, 3, hspace=0.45, wspace=0.35)
-
-        # ---- Row 0: raw data ----
-        row0_axes = []
-        for col, (data, title) in enumerate([(rcs_a, name_a), (rcs_b, name_b), (rcs_ref, name_ref)]):
-            ax = self.comp_figure.add_subplot(gs[0, col])
-            im = ax.imshow(data, extent=extent, aspect=data_aspect, origin='upper',
-                           cmap='jet', vmin=vmin, vmax=vmax)
-            ax.set_title(title, fontsize=9)
-            ax.set_xlabel('Phi (deg)')
-            if col == 0:
-                ax.set_ylabel('Theta (deg)')
-            row0_axes.append(ax)
-        cb0 = self.comp_figure.colorbar(im, ax=row0_axes, shrink=0.7, pad=0.02)
-        cb0.set_label('RCS (dBsm)')
-
-        # ---- Row 1: differences ----
-        row1_axes = []
-        diff_items = [
-            (diff_a,  f'A−Ref  RMSE={rmse_a:.2f} dB\nMean={mean_a:.2f} dB'),
-            (diff_b,  f'B−Ref  RMSE={rmse_b:.2f} dB\nMean={mean_b:.2f} dB'),
-            (diff_ab, f'A−B    RMSE={rmse_ab:.2f} dB\nMean={mean_ab:.2f} dB'),
-        ]
-        for col, (data, title) in enumerate(diff_items):
-            ax = self.comp_figure.add_subplot(gs[1, col])
-            im = ax.imshow(data, extent=extent, aspect=data_aspect, origin='upper',
-                           cmap='seismic', vmin=-err_abs, vmax=err_abs)
-            ax.set_title(title, fontsize=8)
-            ax.set_xlabel('Phi (deg)')
-            if col == 0:
-                ax.set_ylabel('Theta (deg)')
-            row1_axes.append(ax)
-        cb1 = self.comp_figure.colorbar(im, ax=row1_axes, shrink=0.7, pad=0.02)
-        cb1.set_label('Error (dB)')
-
-        self.comp_figure.suptitle(f'Dual Model Comparison: {name_a} / {name_b} / {name_ref}', fontsize=11)
-
-    def _draw_comparison_1d(self):
-        """1D comparison: overlay current sim result + loaded CSVs as line plots."""
-        ax = self.comp_figure.add_subplot(111)
-
-        if self.last_result:
-            theta  = self.last_result['theta_deg']
-            rcs_db = self.last_result['rcs_total']
-            ax.plot(theta, rcs_db, label='Current Sim', linewidth=2.5, color='blue', zorder=10)
-
-        for item in self.comparison_data:
-            df        = item['data']
-            cols      = df.columns
-            theta_col = next((c for c in cols if 'theta' in c.lower()), None)
-            rcs_col   = next((c for c in cols if 'dbsm'  in c.lower()), None)
-            if rcs_col is None:
-                rcs_col = next((c for c in cols if 'rcs' in c.lower()), None)
-            if theta_col and rcs_col:
-                try:
-                    ax.plot(df[theta_col].values, df[rcs_col].values, '--',
-                            label=item['name'], alpha=0.8)
-                except Exception:
-                    pass
-
-        ax.set_xlabel('Theta (deg)')
-        ax.set_ylabel('RCS (dBsm)')
-        ax.grid(True, linestyle='--', alpha=0.5)
-        handles, labels = ax.get_legend_handles_labels()
-        if handles:
-            ax.legend()
 
     def on_build_geometry(self):
         self.on_preview()
