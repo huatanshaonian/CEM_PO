@@ -53,7 +53,8 @@ main_*_validation.py
 gui_qt_head_dump.txt
 tmp_out/
 
-# Plan files (Claude Code generated)
+# Claude Code files
+CLAUDE.md
 *-*-*.md
 
 # Runtime logs and results
