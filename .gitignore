@@ -42,5 +42,19 @@ env/
 *.stp
 *.step
 
-# Standalone test/convert scripts
+# Standalone test/convert/validation scripts
 convert_iges.py
+test_*.py
+verify_*.py
+main_*_validation.py
+
+# Temporary files
+*_tmp.py
+gui_qt_head_dump.txt
+tmp_out/
+
+# Plan files (Claude Code generated)
+*-*-*.md
+
+# Runtime logs and results
+results/
