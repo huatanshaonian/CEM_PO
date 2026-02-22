@@ -31,7 +31,8 @@ tests/
 venv/
 env/
 
-cem_po_config.json
+# Runtime/user config files (contain local paths and task-specific settings)
+*_config.json
 *.csv
 
 # CAD data files and backups
