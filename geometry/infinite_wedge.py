@@ -77,13 +77,17 @@ class InfiniteWedgeSurface(Surface):
         return self.evaluate(u_vals, v_vals)
 
 
-def create_infinite_wedge(edge_length, plate_width):
+def create_infinite_wedge(edge_length):
     """
     创建无限楔角几何（单面平板近似）。
+
+    平板宽度（x方向）自动设为 edge_length / 2，不作为用户参数。
+    对于PTD验证，平板宽度只影响PO背景，不影响棱边绕射（PTD fringe）。
 
     返回:
         surfaces: [InfiniteWedgeSurface]
         ptd_id:   'F0E0'（PTD棱边位于Face 0的Edge 0处，即x=0的棱边）
     """
+    plate_width = edge_length / 2.0
     surface = InfiniteWedgeSurface(edge_length, plate_width)
     return [surface], "F0E0"

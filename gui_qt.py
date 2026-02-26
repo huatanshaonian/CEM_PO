@@ -540,7 +540,6 @@ class CEMPoQtWindow(QMainWindow):
             self.add_input("Height:", "3.0", "height")
         elif gtype == "Infinite Wedge":
             self.add_input("Edge Length (m):", "5.0", "edge_length")
-            self.add_input("Plate Width (m):", "2.0", "plate_width")
             self.add_input("Exterior Angle (°):", "270.0", "exterior_angle")
         elif gtype == "STEP File":
             btn = QPushButton("Select STEP...")
@@ -1140,14 +1139,19 @@ class CEMPoQtWindow(QMainWindow):
 
             ax.plot(angles, rcs_db, label='Total RCS', linewidth=2, color='#007ACC')
 
-            # PO component is also in dB from RCSAnalyzer
+            # PO component
             if result.get('rcs_po') is not None:
                 ax.plot(angles, result['rcs_po'], '--', label='PO', alpha=0.7, color='orange')
 
-            # Analytical solution for supported geometry types
+            # PTD fringe correction (only when PTD enabled)
+            gtype = self.geo_type_combo.currentText()
+            if result.get('rcs_ptd') is not None and gtype == "Infinite Wedge":
+                ax.plot(angles, result['rcs_ptd'], ':', label='PTD Fringe (数值)',
+                        alpha=0.85, color='green', linewidth=1.5)
+
+            # Analytical solution
             if self.chk_analytical.isChecked():
                 try:
-                    gtype = self.geo_type_combo.currentText()
                     geo_params = self.get_geo_params()
                     polarization = self.ptd_pol.currentText()
                     theta_rad = np.radians(angles)

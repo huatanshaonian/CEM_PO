@@ -268,7 +268,7 @@ def get_analytical_solution(geometry_type, geometry_params, frequency, theta_rad
         exterior_angle_deg = float(geometry_params.get('exterior_angle', 270.0))
         edge_length = float(geometry_params.get('edge_length', 5.0))
         rcs = infinite_wedge_rcs(exterior_angle_deg, edge_length, frequency, theta_rad, polarization)
-        label = f"解析解 (Ufimtsev PTD, α={exterior_angle_deg:.0f}°, L={edge_length}m, {polarization})"
+        label = f"PTD Fringe 解析解 (α={exterior_angle_deg:.0f}°, L={edge_length}m, {polarization})"
         return rcs, label
 
     elif 'wedge' in geometry_type:
