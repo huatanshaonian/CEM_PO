@@ -10,13 +10,14 @@ class PTDProcessor:
     """
     
     @staticmethod
-    def extract_edges(surfaces, edge_identifiers):
+    def extract_edges(surfaces, edge_identifiers, wedge_angle_deg=90.0):
         """
         根据标识符列表提取 PTD 边缘对象
-        
+
         参数:
-            surfaces: List[GeometryObject] 几何面列表
-            edge_identifiers: List[str] 标识符列表 (如 ["F0E1", "F1E2"])
+            surfaces:         List[GeometryObject] 几何面列表
+            edge_identifiers: List[str] 标识符列表，格式 "F0E1"（Face索引+Edge索引）
+            wedge_angle_deg:  楔角（两个面之间的内角，度），默认 90°
 
         返回:
             List[PTDEdge]
@@ -62,7 +63,7 @@ class PTDProcessor:
                 normal = normal.flatten()
                 
                 # 3. 创建 PTD Edge 对象
-                edge = PTDEdge(ident, points, normal, wedge_angle_deg=90.0)
+                edge = PTDEdge(ident, points, normal, wedge_angle_deg=wedge_angle_deg)
                 ptd_edges.append(edge)
 
             except Exception as e:

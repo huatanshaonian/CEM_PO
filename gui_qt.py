@@ -11,7 +11,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QDockWidget, QWidget,
                                QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QComboBox,
                                QCheckBox, QPushButton, QTextEdit, QLabel, QProgressBar,
                                QSplitter, QFrame, QGroupBox, QScrollArea, QFileDialog, QTabWidget,
-                               QListWidget, QAbstractItemView, QListWidgetItem)
+                               QListWidget, QAbstractItemView, QListWidgetItem,
+                               QDoubleSpinBox)
 from PySide6.QtCore import Qt, QThread, Signal, QObject
 from PySide6.QtGui import QAction, QIcon, QFont, QColor, QPalette
 
@@ -327,8 +328,15 @@ class CEMPoQtWindow(QMainWindow):
         l_ptd.addRow(self.chk_ptd_enabled)
 
         self.ptd_edges = QLineEdit("")
-        self.ptd_edges.setPlaceholderText("Edge IDs (e.g. 1,4,5)")
+        self.ptd_edges.setPlaceholderText("e.g. F0E0, F0E1")
         l_ptd.addRow("Edge IDs:", self.ptd_edges)
+
+        self.ptd_wedge_angle = QDoubleSpinBox()
+        self.ptd_wedge_angle.setRange(1.0, 359.0)
+        self.ptd_wedge_angle.setValue(90.0)
+        self.ptd_wedge_angle.setSuffix(" °")
+        self.ptd_wedge_angle.setToolTip("楔角（两个面之间的内角）")
+        l_ptd.addRow("Wedge Angle:", self.ptd_wedge_angle)
 
         self.ptd_pol = QComboBox()
         self.ptd_pol.addItems(["VV", "HH"])
@@ -454,7 +462,8 @@ class CEMPoQtWindow(QMainWindow):
                     "workers": int(self.cpu_workers.text()),
                     "ptd": {
                         "enabled": self.chk_ptd_enabled.isChecked(),
-                        "edges": [s.strip() for s in self.ptd_edges.text().split(",") if s.strip()]
+                        "edges": [s.strip() for s in self.ptd_edges.text().split(",") if s.strip()],
+                        "wedge_angle": self.ptd_wedge_angle.value()
                     }
                 },
                 "scan": {
@@ -1039,7 +1048,8 @@ class CEMPoQtWindow(QMainWindow):
                 'ptd': {
                     'enabled': self.chk_ptd_enabled.isChecked(),
                     'edges': ptd_edges_list,
-                    'polarization': self.ptd_pol.currentText()
+                    'polarization': self.ptd_pol.currentText(),
+                    'wedge_angle': self.ptd_wedge_angle.value()
                 },
                 'compute': {
                     'gpu': self.use_gpu.isChecked(),

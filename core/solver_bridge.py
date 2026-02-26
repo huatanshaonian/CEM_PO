@@ -48,6 +48,7 @@ class SolverBridge:
             enable_ptd = ptd_params.get('enabled', False)
             ptd_edges = ptd_params.get('edges', [])
             ptd_pol = ptd_params.get('polarization', 'VV')
+            ptd_wedge_angle = ptd_params.get('wedge_angle', 90.0)
 
             theta_start = angle_params.get('theta_start', -90)
             theta_end = angle_params.get('theta_end', 90)
@@ -90,9 +91,10 @@ class SolverBridge:
                     show_progress=False, progress_callback=progress_callback,
                     enable_ptd=enable_ptd, ptd_edge_identifiers=ptd_edges,
                     cached_mesh_data=cached_mesh, polarization=ptd_pol,
-                    gpu=use_gpu, use_degenerate_mesh=use_degen
+                    gpu=use_gpu, use_degenerate_mesh=use_degen,
+                    ptd_wedge_angle=ptd_wedge_angle
                 )
-                
+
                 # 结果标准化
                 if isinstance(rcs_result_raw, dict):
                     rcs_total = rcs_result_raw['total']
@@ -101,7 +103,7 @@ class SolverBridge:
                 else:
                     rcs_total = rcs_result_raw
                     rcs_po, rcs_ptd = None, None
-                    
+
                 result_data = {
                     'mode': '2d',
                     'theta_deg': theta_deg, 'phi_deg': phi_deg,
@@ -123,9 +125,10 @@ class SolverBridge:
                     show_progress=False, progress_callback=progress_callback,
                     enable_ptd=enable_ptd, ptd_edge_identifiers=ptd_edges,
                     cached_mesh_data=cached_mesh, polarization=ptd_pol,
-                    gpu=use_gpu, use_degenerate_mesh=use_degen
+                    gpu=use_gpu, use_degenerate_mesh=use_degen,
+                    ptd_wedge_angle=ptd_wedge_angle
                 )
-                
+
                 if isinstance(rcs_result_raw, dict):
                     rcs_total = rcs_result_raw['total']
                     rcs_po = rcs_result_raw.get('po')

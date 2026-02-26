@@ -28,7 +28,8 @@ class RCSAnalyzer:
     def _prepare_geometry(self, geometry, frequency, samples_per_lambda,
                           enable_ptd, ptd_edge_identifiers,
                           cached_mesh_data, gpu, use_degenerate_mesh,
-                          show_progress, progress_callback, total_points):
+                          show_progress, progress_callback, total_points,
+                          ptd_wedge_angle=90.0):
         """共同前置逻辑：GPU检查、曲面归一化、PTD提取、网格预计算、GPU迁移。
 
         Returns (geometry_data, is_cached, ptd_edges, k_mag, gpu)
@@ -42,7 +43,8 @@ class RCSAnalyzer:
         ptd_edges = []
         if enable_ptd and ptd_edge_identifiers:
             try:
-                ptd_edges = PTDProcessor.extract_edges(surfaces, ptd_edge_identifiers)
+                ptd_edges = PTDProcessor.extract_edges(surfaces, ptd_edge_identifiers,
+                                                       wedge_angle_deg=ptd_wedge_angle)
                 if show_progress:
                     print(f"  [PTD] 已提取 {len(ptd_edges)} 条手动边缘")
             except Exception as e:
@@ -127,7 +129,8 @@ class RCSAnalyzer:
                                progress_callback=None,
                                enable_ptd=False, ptd_edge_identifiers=None,
                                cached_mesh_data=None, polarization='VV',
-                               gpu=False, use_degenerate_mesh=False):
+                               gpu=False, use_degenerate_mesh=False,
+                               ptd_wedge_angle=90.0):
 
         frequency = wave_params['frequency']
         n_angles = len(angles)
@@ -136,7 +139,8 @@ class RCSAnalyzer:
             geometry, frequency, samples_per_lambda,
             enable_ptd, ptd_edge_identifiers,
             cached_mesh_data, gpu, use_degenerate_mesh,
-            show_progress, progress_callback, n_angles
+            show_progress, progress_callback, n_angles,
+            ptd_wedge_angle=ptd_wedge_angle
         )
 
         info_msg = (f"计算参数: {len(geometry_data) if isinstance(geometry_data, list) else 1} 个曲面, "
@@ -270,7 +274,8 @@ class RCSAnalyzer:
                                    progress_callback=None,
                                    enable_ptd=False, ptd_edge_identifiers=None,
                                    cached_mesh_data=None, polarization='VV',
-                                   gpu=False, use_degenerate_mesh=False):
+                                   gpu=False, use_degenerate_mesh=False,
+                                   ptd_wedge_angle=90.0):
 
         n_theta = len(theta_array)
         n_phi = len(phi_array)
@@ -280,7 +285,8 @@ class RCSAnalyzer:
             geometry, frequency, samples_per_lambda,
             enable_ptd, ptd_edge_identifiers,
             cached_mesh_data, gpu, use_degenerate_mesh,
-            show_progress, progress_callback, total_points
+            show_progress, progress_callback, total_points,
+            ptd_wedge_angle=ptd_wedge_angle
         )
 
         info_msg = (f"2D扫描: {len(geometry_data) if isinstance(geometry_data, list) else 1} 个曲面, "
