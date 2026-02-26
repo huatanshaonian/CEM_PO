@@ -75,8 +75,8 @@ def fun_fg(angle, angle0, alfa):
     a3 = (np.pi + psi2) / (2.0 * n)
     a4 = (np.pi + psi1) / (2.0 * n)
 
-    if (angle0 >= eps) and (angle0 <= alfa - np.pi - eps):
-        # ──── SSI: 单侧照射 ────
+    if (angle0 >= eps) and (angle0 <= alfa - np.pi):
+        # ──── SSI: 单侧照射（含 α-π 边界）────
         if (psi1 <= np.pi + eps) and (psi1 >= np.pi - eps):
             # psi1 ≈ π：第 1、2 项奇异，用解析极限替代
             f1 = (1.0 / (2.0 * n)) * (_cot(a1) + _cot(a3) - _cot(a4)) \
@@ -98,7 +98,7 @@ def fun_fg(angle, angle0, alfa):
             f1 = f - f0
             g1 = g - g0
 
-    elif (angle0 >= alfa - np.pi + eps) and (angle0 <= np.pi - eps):
+    elif (angle0 > alfa - np.pi) and (angle0 <= np.pi - eps):
         # ──── DSI: 双侧照射 ────
         phi1 = -psi1                    # = -(angle - angle0)
         phi2 = 2.0 * alfa - psi2        # = 2α - (angle + angle0)
@@ -115,14 +115,17 @@ def fun_fg(angle, angle0, alfa):
                  - 0.5 * _cot((np.pi - 2.0 * alfa + psi2) / 2.0)
         else:
             # 一般 DSI：GTD 项减去两个面的 PO 项
+            # phi1 = -psi1, phi2 = 2α - psi2
+            # cot((π-phi1)/2) = cot((π+psi1)/2)
+            # cot((π-phi2)/2) = cot((π-2α+psi2)/2)
             f = (1.0 / (2.0 * n)) * (_cot(a1) - _cot(a2) + _cot(a3) - _cot(a4))
             g = -(1.0 / (2.0 * n)) * (_cot(a1) + _cot(a2) + _cot(a3) + _cot(a4))
             f0 = 0.5 * (_cot((np.pi - psi2) / 2.0) - _cot((np.pi - psi1) / 2.0)
                         + _cot((np.pi - 2.0 * alfa + psi2) / 2.0)
-                        - _cot((np.pi - 2.0 * alfa + psi1) / 2.0))
+                        - _cot((np.pi + psi1) / 2.0))
             g0 = -0.5 * (_cot((np.pi - psi2) / 2.0) + _cot((np.pi - psi1) / 2.0)
                          + _cot((np.pi - 2.0 * alfa + psi2) / 2.0)
-                         + _cot((np.pi - 2.0 * alfa + psi1) / 2.0))
+                         + _cot((np.pi + psi1) / 2.0))
             f1 = f - f0
             g1 = g - g0
     else:

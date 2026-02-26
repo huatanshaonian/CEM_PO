@@ -187,7 +187,7 @@ class CEMPoQtWindow(QMainWindow):
         group_geo = QGroupBox("Geometry Definition")
         l_geo = QFormLayout()
         self.geo_type_combo = QComboBox()
-        self.geo_type_combo.addItems(["Cylinder", "Plate", "Sphere", "Wedge", "Brick", "OCC Cylinder (NURBS)", "STEP File", "IGES File"])
+        self.geo_type_combo.addItems(["Cylinder", "Plate", "Sphere", "Wedge", "Brick", "Infinite Wedge", "OCC Cylinder (NURBS)", "STEP File", "IGES File"])
         self.geo_type_combo.currentTextChanged.connect(self.update_geo_inputs)
         l_geo.addRow("Type:", self.geo_type_combo)
         
@@ -423,6 +423,9 @@ class CEMPoQtWindow(QMainWindow):
         l_opts = QVBoxLayout()
         self.chk_analytical = QCheckBox("Show Analytical Solution")
         self.chk_analytical.stateChanged.connect(self._comp_mgr.update_comparison_plot)
+        self.chk_analytical.stateChanged.connect(
+            lambda: self.plot_results(self.last_result) if self.last_result else None
+        )
         l_opts.addWidget(self.chk_analytical)
         self.btn_refresh_comp = QPushButton("Update Plot")
         self.btn_refresh_comp.clicked.connect(self._comp_mgr.update_comparison_plot)
@@ -535,6 +538,10 @@ class CEMPoQtWindow(QMainWindow):
             self.add_input("Width:", "2.0", "width")
             self.add_input("Length:", "5.0", "length")
             self.add_input("Height:", "3.0", "height")
+        elif gtype == "Infinite Wedge":
+            self.add_input("Edge Length (m):", "5.0", "edge_length")
+            self.add_input("Plate Width (m):", "2.0", "plate_width")
+            self.add_input("Exterior Angle (°):", "270.0", "exterior_angle")
         elif gtype == "STEP File":
             btn = QPushButton("Select STEP...")
             btn.clicked.connect(self.pick_step_file)
@@ -731,12 +738,21 @@ class CEMPoQtWindow(QMainWindow):
         
         try:
             result = GeometryFactory.create_geometry(gtype, params)
-            # Handle Wedge/Brick which return (surfaces, ptd_id) tuple
+            # Handle Wedge/Brick/InfiniteWedge which return (surfaces, ptd_id) tuple
             if isinstance(result, tuple):
                 geo_list, ptd_id = result
                 # Auto-fill PTD edges if available
                 if ptd_id and self.chk_ptd_enabled.isChecked():
                     self.ptd_edges.setText(ptd_id)
+                # Infinite Wedge: auto-enable PTD and set wedge angle from exterior angle
+                if gtype == "Infinite Wedge" and ptd_id:
+                    self.chk_ptd_enabled.setChecked(True)
+                    self.ptd_edges.setText(ptd_id)
+                    try:
+                        exterior_angle = float(params.get('exterior_angle', 270.0))
+                        self.ptd_wedge_angle.setValue(360.0 - exterior_angle)
+                    except (ValueError, TypeError):
+                        pass
             else:
                 geo_list = result
 
@@ -1126,7 +1142,23 @@ class CEMPoQtWindow(QMainWindow):
 
             # PO component is also in dB from RCSAnalyzer
             if result.get('rcs_po') is not None:
-                 ax.plot(angles, result['rcs_po'], '--', label='PO', alpha=0.7, color='orange')
+                ax.plot(angles, result['rcs_po'], '--', label='PO', alpha=0.7, color='orange')
+
+            # Analytical solution for supported geometry types
+            if self.chk_analytical.isChecked():
+                try:
+                    gtype = self.geo_type_combo.currentText()
+                    geo_params = self.get_geo_params()
+                    polarization = self.ptd_pol.currentText()
+                    theta_rad = np.radians(angles)
+                    rcs_analytic, label_analytic = get_analytical_solution(
+                        gtype, geo_params, result['freq'], theta_rad, polarization
+                    )
+                    if rcs_analytic is not None:
+                        ax.plot(angles, rcs_analytic, 'r:', linewidth=2,
+                                label=label_analytic, alpha=0.9)
+                except Exception:
+                    pass
 
             ax.set_xlabel("Theta (deg)")
             ax.set_ylabel("RCS (dBsm)")

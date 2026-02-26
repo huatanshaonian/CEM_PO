@@ -7,6 +7,7 @@ from geometry.occ_surface import OCCSurface
 from geometry.step_loader import load_step_file, load_iges_file
 from geometry.wedge import create_analytic_wedge
 from geometry.brick import create_analytic_brick
+from geometry.infinite_wedge import create_infinite_wedge
 from geometry.occ_primitives import create_occ_cylinder
 
 class GeometryFactory:
@@ -18,7 +19,7 @@ class GeometryFactory:
     def create_geometry(geo_type, params):
         """
         Args:
-            geo_type (str): 'Cylinder', 'Plate', 'Sphere', 'STEP File', 'Wedge', 'Brick'
+            geo_type (str): 'Cylinder', 'Plate', 'Sphere', 'STEP File', 'Wedge', 'Brick', 'Infinite Wedge'
             params (dict): 包含 radius, height, width 等参数
         Returns:
             list: Surface 对象列表
@@ -49,6 +50,12 @@ class GeometryFactory:
             l = float(params.get('length', 5.0))
             h = float(params.get('height', 3.0))
             surfaces, ptd_id = create_analytic_brick(l, w, h)
+            return surfaces, ptd_id  # 返回元组以便 GUI 获取 PTD 边信息
+
+        elif geo_type == "Infinite Wedge":
+            edge_length = float(params.get('edge_length', 5.0))
+            plate_width = float(params.get('plate_width', 2.0))
+            surfaces, ptd_id = create_infinite_wedge(edge_length, plate_width)
             return surfaces, ptd_id  # 返回元组以便 GUI 获取 PTD 边信息
 
         elif geo_type == "OCC Cylinder (NURBS)":

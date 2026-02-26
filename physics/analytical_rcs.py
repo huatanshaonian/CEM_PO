@@ -6,6 +6,7 @@
 
 import numpy as np
 from .constants import C0
+from .ptd_coefficients import fun_fg
 
 
 def cylinder_rcs(radius, height, frequency, theta_rad):
@@ -182,6 +183,44 @@ def wedge_gtd_rcs(length, phi_deg_array, frequency, polarization='VV'):
     return 10 * np.log10(np.maximum(sigma, 1e-20))
 
 
+def infinite_wedge_rcs(exterior_angle_deg, edge_length, frequency, theta_rad, polarization='VV'):
+    """
+    无限楔角（半无穷平板）的Ufimtsev PTD解析解，适用于单站RCS。
+
+    几何约定（与 InfiniteWedgeSurface 和 ptd_core.py 一致）：
+        棱边沿 y 轴，亮面（Face1）在 z=0 平面（x>0），法向 = +z。
+        e1 = ẑ, e2 = x̂
+        入射角（楔形截面内）: angle0 = π/2 - theta_GUI
+
+    参数:
+        exterior_angle_deg: 外楔角 alfa（度），对应MATLAB中的 alfa = n*180°
+                            例：90°内角楔 → alfa=270°；半平面 → alfa=360°
+        edge_length:        棱边长度 L（m）
+        frequency:          频率（Hz）
+        theta_rad:          GUI扫描角数组（弧度），0°=面法向入射，正值=从+x方向
+        polarization:       'VV'（Hard/TM，使用g1）或 'HH'（Soft/TE，使用f1）
+
+    返回:
+        RCS 数组（dBsm）
+    """
+    wavelength = C0 / frequency
+    k = 2 * np.pi / wavelength
+
+    alfa = np.radians(exterior_angle_deg)
+    theta_rad = np.asarray(theta_rad, dtype=float)
+
+    # angle0 in wedge cross-section: normal incidence → angle0=π/2, grazing → angle0=0 or π
+    angle0_arr = (np.pi / 2 - theta_rad) % alfa
+
+    D_arr = np.zeros(len(angle0_arr), dtype=complex)
+    for i, a0 in enumerate(angle0_arr):
+        f1, g1 = fun_fg(a0, a0, alfa)
+        D_arr[i] = f1 if polarization == 'HH' else g1
+
+    sigma = 4.0 * np.pi * edge_length**2 * np.abs(D_arr)**2
+    return 10.0 * np.log10(np.maximum(sigma, 1e-20))
+
+
 def get_analytical_solution(geometry_type, geometry_params, frequency, theta_rad, polarization='VV'):
     """
     统一接口：根据几何类型获取解析解
@@ -225,6 +264,13 @@ def get_analytical_solution(geometry_type, geometry_params, frequency, theta_rad
         label = f"解析解 (球体 R={geometry_params['radius']}m)"
         return rcs, label
         
+    elif geometry_type == 'infinite wedge':
+        exterior_angle_deg = float(geometry_params.get('exterior_angle', 270.0))
+        edge_length = float(geometry_params.get('edge_length', 5.0))
+        rcs = infinite_wedge_rcs(exterior_angle_deg, edge_length, frequency, theta_rad, polarization)
+        label = f"解析解 (Ufimtsev PTD, α={exterior_angle_deg:.0f}°, L={edge_length}m, {polarization})"
+        return rcs, label
+
     elif 'wedge' in geometry_type:
         # Standard Wedge GTD
         length = geometry_params.get('length', 10.0)
