@@ -346,6 +346,39 @@ def load_iges_file(filename, max_param_range=100, scale=1.0,
     return surfaces
 
 
+def save_iges_file(surfaces, output_path):
+    """
+    将 OCCFaceSurface 列表另存为 IGES 文件。
+    invert_normal=True 的面会通过 face.Reversed() 翻转拓扑方向后写入。
+
+    参数:
+        surfaces: List[OCCFaceSurface]
+        output_path: 输出 IGES 文件路径 (.igs / .iges)
+
+    返回:
+        True 表示成功，否则抛出异常。
+    """
+    from OCC.Core.IGESControl import IGESControl_Writer
+    from OCC.Core.TopoDS import TopoDS_Shape
+
+    writer = IGESControl_Writer()
+
+    for surf in surfaces:
+        face = surf.face
+        if getattr(surf, 'invert_normal', False):
+            face = face.Reversed()
+        ok = writer.AddShape(face)
+        if not ok:
+            print(f"  Warning: AddShape failed for one face, skipping")
+
+    result = writer.Write(output_path)
+    if not result:
+        raise IOError(f"IGESControl_Writer failed to write: {output_path}")
+
+    print(f"Saved {len(surfaces)} faces to {os.path.basename(output_path)}")
+    return True
+
+
 def load_cad_file(filename, max_param_range=100, scale=1.0, invert_indices=None):
     """
     统一的 CAD 文件加载接口，根据文件扩展名自动选择 STEP 或 IGES 读取器。

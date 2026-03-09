@@ -593,6 +593,10 @@ class CEMPoQtWindow(QMainWindow):
             self.iges_rotation_input.setPlaceholderText("rx, ry, rz (deg), e.g. 90,0,0")
             self.geo_dynamic_layout.addRow("Rotation:", self.iges_rotation_input)
 
+            btn_save = QPushButton("Save As IGES...")
+            btn_save.clicked.connect(self.save_iges_as)
+            self.geo_dynamic_layout.addRow("Export:", btn_save)
+
             # Restore cached values
             if 'iges_unit_combo' in self._input_cache:
                 self.iges_unit_combo.setCurrentText(self._input_cache['iges_unit_combo'])
@@ -623,6 +627,66 @@ class CEMPoQtWindow(QMainWindow):
         if path:
             self.iges_file_path = path
             self.lbl_iges.setText(os.path.basename(path))
+
+    def save_iges_as(self):
+        """将当前编辑参数应用后，另存为新的 IGES 文件。"""
+        if not getattr(self, 'iges_file_path', ''):
+            self.log("<font color='red'>Error: Please select an IGES source file first.</font>")
+            return
+
+        # 收集当前编辑参数（与 get_geo_params 逻辑一致）
+        unit = self.iges_unit_combo.currentText() if hasattr(self, 'iges_unit_combo') else 'mm'
+        unit_scale = {'mm': 1.0, 'cm': 0.01, 'm': 0.001}.get(unit, 1.0)
+
+        def parse_indices(attr):
+            text = getattr(self, attr, None)
+            text = text.text().strip() if text else ""
+            if not text:
+                return []
+            try:
+                return [int(x.strip()) for x in text.split(',') if x.strip()]
+            except ValueError:
+                return []
+
+        invert_indices = parse_indices('iges_invert_indices_input')
+        delete_indices = parse_indices('iges_delete_indices_input')
+
+        mp = self.iges_mirror_plane_combo.currentText() if hasattr(self, 'iges_mirror_plane_combo') else "None"
+        mirror_plane = mp if mp != "None" else None
+
+        rotation = None
+        rot_str = self.iges_rotation_input.text().strip() if hasattr(self, 'iges_rotation_input') else ""
+        if rot_str:
+            try:
+                parts = [float(x.strip()) for x in rot_str.split(',')]
+                if len(parts) == 3:
+                    rotation = tuple(parts)
+            except ValueError:
+                pass
+
+        # 选择保存路径
+        default_name = os.path.splitext(self.iges_file_path)[0] + "_edited.igs"
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Edited IGES As", default_name, "IGES Files (*.igs *.iges)"
+        )
+        if not out_path:
+            return
+
+        self.log("Applying edits and saving IGES...")
+        try:
+            from geometry.step_loader import load_iges_file, save_iges_file
+            surfaces = load_iges_file(
+                self.iges_file_path,
+                scale=unit_scale,
+                invert_indices=invert_indices,
+                delete_indices=delete_indices,
+                mirror_plane=mirror_plane,
+                rotation=rotation,
+            )
+            save_iges_file(surfaces, out_path)
+            self.log(f"<font color='green'>Saved {len(surfaces)} faces to: {os.path.basename(out_path)}</font>")
+        except Exception as e:
+            self.log(f"<font color='red'>Save failed: {e}</font>")
 
     def setup_menu(self):
         menubar = self.menuBar()
