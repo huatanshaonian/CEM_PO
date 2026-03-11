@@ -3,7 +3,8 @@ import json
 
 from PySide6.QtWidgets import QComboBox
 
-CONFIG_FILE = "cem_po_qt_config.json"
+# 固定在项目根目录，避免因运行目录不同而丢失配置
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cem_po_qt_config.json")
 
 
 def cached_val(window, attr, default=""):
@@ -62,9 +63,10 @@ def save_config(window):
             "phi_end":     window.phi_end.text(),
             "phi_n":       window.phi_n.text(),
 
-            "ptd_enabled": window.chk_ptd_enabled.isChecked(),
-            "ptd_edges":   window.ptd_edges.text(),
-            "ptd_pol":     window.ptd_pol.currentText(),
+            "ptd_enabled":      window.chk_ptd_enabled.isChecked(),
+            "ptd_edges":        window.ptd_edges.text(),
+            "ptd_pol":          window.ptd_pol.currentText(),
+            "ptd_wedge_angle":  window.ptd_wedge_angle.value(),
 
             "use_gpu":      window.use_gpu.isChecked(),
             "use_parallel": window.use_parallel.isChecked(),
@@ -142,6 +144,7 @@ def load_config(window):
         window.chk_ptd_enabled.setChecked(cfg.get("ptd_enabled", False))
         window.ptd_edges.setText(cfg.get("ptd_edges", ""))
         window.ptd_pol.setCurrentText(cfg.get("ptd_pol", "VV"))
+        window.ptd_wedge_angle.setValue(float(cfg.get("ptd_wedge_angle", 90.0)))
 
         window.use_gpu.setChecked(cfg.get("use_gpu", False))
         window.use_parallel.setChecked(cfg.get("use_parallel", False))
