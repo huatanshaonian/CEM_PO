@@ -54,7 +54,8 @@ class GeometryFactory:
 
         elif geo_type == "Infinite Wedge":
             edge_length = float(params.get('edge_length', 5.0))
-            surfaces, ptd_id = create_infinite_wedge(edge_length)
+            exterior_angle_deg = float(params.get('exterior_angle', 270.0))
+            surfaces, ptd_id = create_infinite_wedge(edge_length, exterior_angle_deg)
             return surfaces, ptd_id  # 返回元组以便 GUI 获取 PTD 边信息
 
         elif geo_type == "OCC Cylinder (NURBS)":
