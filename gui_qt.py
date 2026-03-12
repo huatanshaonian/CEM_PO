@@ -909,16 +909,41 @@ class CEMPoQtWindow(QMainWindow):
                 if raw_ptd:
                     try:
                         from solvers.ptd_edge_finder import find_shared_edge
+                        from solvers.ptd_structures import PTDEdge
                         import re as _re
                         pairs = _re.findall(r'(\d+)\s*,\s*(\d+)', raw_ptd)
                         for a_str, b_str in pairs:
                             a, b = int(a_str), int(b_str)
                             if a < len(geo_list) and b < len(geo_list):
                                 try:
-                                    edge_pts, _, _ = find_shared_edge(
-                                        geo_list[a], geo_list[b], n_samples=50)
+                                    edge_pts, normals_a, normals_b, ext_angle = find_shared_edge(
+                                        geo_list[a], geo_list[b], n_samples=120)
+                                    lit_normal = np.mean(normals_a, axis=0)
+                                    edge = PTDEdge(
+                                        f"({a},{b})", edge_pts, lit_normal,
+                                        exterior_angle_rad=ext_angle,
+                                        point_normals=normals_a,
+                                        point_normals_b=normals_b)
+                                    # Draw edge line
                                     line = pv.MultipleLines(points=edge_pts)
                                     self.plotter.add_mesh(line, color='yellow', line_width=5)
+                                    # Draw segment boundary ticks
+                                    n_segs = len(edge.segments)
+                                    if n_segs > 1:
+                                        bpts = np.array(
+                                            [edge.segments[0].start] +
+                                            [s.end for s in edge.segments])
+                                        sphere_pts = pv.PolyData(bpts)
+                                        self.plotter.add_mesh(sphere_pts, color='cyan',
+                                                              point_size=10,
+                                                              render_points_as_spheres=True)
+                                    # Label at midpoint
+                                    mid = edge_pts[len(edge_pts) // 2].reshape(1, 3)
+                                    self.plotter.add_point_labels(
+                                        pv.PolyData(mid),
+                                        [f"{n_segs} seg(s)  α={np.degrees(ext_angle):.0f}°"],
+                                        font_size=9, text_color='yellow',
+                                        always_visible=True, shape_opacity=0.0)
                                 except Exception:
                                     pass
                     except Exception:

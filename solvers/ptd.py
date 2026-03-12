@@ -12,7 +12,7 @@ class PTDProcessor:
     """
 
     @staticmethod
-    def extract_edges_from_face_pairs(surfaces, pairs_text, n_samples=60):
+    def extract_edges_from_face_pairs(surfaces, pairs_text, n_samples=120):
         """
         解析 "(0,1);(1,2)" 格式的面对字符串，自动找共享边并计算外部二面角。
 
@@ -36,7 +36,7 @@ class PTDProcessor:
                 continue
 
             try:
-                edge_pts, normals_a, ext_angle = find_shared_edge(
+                edge_pts, normals_a, normals_b, ext_angle = find_shared_edge(
                     surfaces[a], surfaces[b], n_samples=n_samples
                 )
                 lit_normal = np.mean(normals_a, axis=0)
@@ -46,6 +46,7 @@ class PTDProcessor:
                     lit_face_normal=lit_normal,
                     exterior_angle_rad=ext_angle,
                     point_normals=normals_a,
+                    point_normals_b=normals_b,
                 )
                 ptd_edges.append(edge)
                 print(f"  [PTD] 面对 ({a},{b}): 外角 = {np.degrees(ext_angle):.1f}°")

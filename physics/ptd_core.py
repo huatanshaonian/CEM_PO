@@ -31,9 +31,8 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
     k = wave.k
     s_dir = -k_dir          # 单站模式：散射方向 = 入射反向
 
-    alfa = edge.alpha       # 楔形外角 α = n·π
-
     for seg in edge.segments:
+        alfa = seg.alpha        # 楔形外角 α = n·π（每段独立）
         t = seg.tangent
         n_lit = seg.normal if (seg.normal is not None) else edge.n_lit
 

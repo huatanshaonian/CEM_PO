@@ -101,9 +101,6 @@ def fun_fg(angle, angle0, alfa):
 
     elif (angle0 > alfa - np.pi) and (angle0 <= np.pi - eps):
         # ──── DSI: 双侧照射 ────
-        phi1 = -psi1                    # = -(angle - angle0)
-        phi2 = 2.0 * alfa - psi2        # = 2α - (angle + angle0)
-
         if (psi2 <= np.pi + eps) and (psi2 >= np.pi - eps):
             f1 = (1.0 / (2.0 * n)) * (_cot(a3) - _cot(a4)) \
                  - 0.5 * _cot((np.pi - psi2) / 2.0)
