@@ -96,8 +96,10 @@ def load_config(window):
             if k in window.geo_inputs:
                 window.geo_inputs[k].setText(str(v))
 
-        # STEP
+        # STEP — 无论控件是否存在都先写入 _input_cache，确保切换页面时能正确恢复
         window.step_file_path = cfg.get("step_file_path", "")
+        window._input_cache['step_unit_combo']    = cfg.get("step_unit", "mm")
+        window._input_cache['invert_indices_input'] = cfg.get("invert_indices", "")
         if window.step_file_path and hasattr(window, 'lbl_step'):
             window.lbl_step.setText(os.path.basename(window.step_file_path))
         if hasattr(window, 'step_unit_combo'):
@@ -105,8 +107,13 @@ def load_config(window):
         if hasattr(window, 'invert_indices_input'):
             window.invert_indices_input.setText(cfg.get("invert_indices", ""))
 
-        # IGES
+        # IGES — 同上
         window.iges_file_path = cfg.get("iges_file_path", "")
+        window._input_cache['iges_unit_combo']          = cfg.get("iges_unit", "mm")
+        window._input_cache['iges_invert_indices_input'] = cfg.get("iges_invert_indices", "")
+        window._input_cache['iges_delete_indices_input'] = cfg.get("iges_delete_indices", "")
+        window._input_cache['iges_mirror_plane_combo']   = cfg.get("iges_mirror_plane", "None")
+        window._input_cache['iges_rotation_input']       = cfg.get("iges_rotation", "")
         if window.iges_file_path and hasattr(window, 'lbl_iges'):
             window.lbl_iges.setText(os.path.basename(window.iges_file_path))
         if hasattr(window, 'iges_unit_combo'):

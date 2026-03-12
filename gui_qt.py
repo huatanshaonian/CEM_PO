@@ -236,16 +236,16 @@ class CEMPoQtWindow(QMainWindow):
         # View Controls
         h_view = QHBoxLayout()
         self.chk_show_normals = QCheckBox("Normals")
-        self.chk_show_ptd = QCheckBox("PTD Edges")
+        self.chk_show_ptd_edges = QCheckBox("PTD Edges")
         self.chk_show_wave = QCheckBox("Inc. Wave")
-        
-        # Connect signals to refresh view
-        self.chk_show_normals.stateChanged.connect(lambda: self.on_preview() if not self.surface_list.selectedItems() else self.on_surface_selected(self.surface_list.selectedItems()[0]))
-        self.chk_show_ptd.stateChanged.connect(lambda: self.on_preview() if not self.surface_list.selectedItems() else self.on_surface_selected(self.surface_list.selectedItems()[0]))
-        self.chk_show_wave.stateChanged.connect(lambda: self.on_preview() if not self.surface_list.selectedItems() else self.on_surface_selected(self.surface_list.selectedItems()[0]))
+
+        # 勾选时始终刷新全模型视图，不触发单面模式
+        self.chk_show_normals.stateChanged.connect(self.on_preview)
+        self.chk_show_ptd_edges.stateChanged.connect(self.on_preview)
+        self.chk_show_wave.stateChanged.connect(self.on_preview)
 
         h_view.addWidget(self.chk_show_normals)
-        h_view.addWidget(self.chk_show_ptd)
+        h_view.addWidget(self.chk_show_ptd_edges)
         h_view.addWidget(self.chk_show_wave)
         l_surf.addLayout(h_view)
         
@@ -904,7 +904,7 @@ class CEMPoQtWindow(QMainWindow):
                                            mag=arrow_mag, color='red', opacity=0.6)
 
             # 3. Visualize PTD Edges (face-pair format)
-            if self.chk_show_ptd.isChecked():
+            if self.chk_show_ptd_edges.isChecked():
                 raw_ptd = self.ptd_edges.text().strip()
                 if raw_ptd:
                     try:
