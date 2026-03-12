@@ -855,12 +855,13 @@ class CEMPoQtWindow(QMainWindow):
             # Handle Wedge/Brick/InfiniteWedge which return (surfaces, ptd_id) tuple
             if isinstance(result, tuple):
                 geo_list, ptd_id = result
-                # Auto-fill PTD face pairs if available
-                if ptd_id:
+                # Auto-fill PTD face pairs if PTD is already enabled
+                if ptd_id and self.chk_ptd_enabled.isChecked():
                     self.ptd_edges.setText(ptd_id)
-                # Infinite Wedge: auto-enable PTD
+                # Infinite Wedge: auto-enable PTD and fill face pairs
                 if gtype == "Infinite Wedge" and ptd_id:
                     self.chk_ptd_enabled.setChecked(True)
+                    self.ptd_edges.setText(ptd_id)
             else:
                 geo_list = result
 
