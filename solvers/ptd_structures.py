@@ -28,14 +28,16 @@ class PTDEdge:
     """
     描述用于 PTD 计算的物理边缘 (支持曲线)
     """
-    def __init__(self, name, points, lit_face_normal, wedge_angle_deg=90.0, point_normals=None):
+    def __init__(self, name, points, lit_face_normal,
+                 exterior_angle_rad=None, wedge_angle_deg=90.0, point_normals=None):
         """
         参数:
-            name: 标识符 (如 "F0E1")
-            points: numpy array (N, 3) 边上的有序采样点
-            lit_face_normal: 照亮面(Face A)的法向量（用作默认值）
-            wedge_angle_deg: 楔角角度 (默认 90度)
-            point_normals: numpy array (N, 3) 每个点对应的面法向（可选）
+            name:               标识符（如 "(0,1)"）
+            points:             numpy array (N, 3) 边上的有序采样点
+            lit_face_normal:    照亮面法向量（用作默认值）
+            exterior_angle_rad: 外部二面角（弧度），优先于 wedge_angle_deg
+            wedge_angle_deg:    楔角内角（度），仅在 exterior_angle_rad=None 时使用
+            point_normals:      numpy array (N, 3) 每个点对应的面法向（可选）
         """
         self.name = name
         self.points = points
@@ -62,6 +64,8 @@ class PTDEdge:
                 self.segments.append(seg)
 
         # 楔形参数
-        self.wedge_angle = np.deg2rad(wedge_angle_deg)
-        self.alpha = 2 * np.pi - self.wedge_angle  # 外部角
+        if exterior_angle_rad is not None:
+            self.alpha = float(exterior_angle_rad)
+        else:
+            self.alpha = 2 * np.pi - np.deg2rad(wedge_angle_deg)
         self.n_param = self.alpha / np.pi

@@ -77,11 +77,13 @@ class WedgeFace2Surface(Surface):
         self.edge_length = edge_length
         self.plate_width = plate_width
         self.alfa = exterior_angle_rad
-        # 面延伸方向和法向（在 xz 平面内）
-        self._dx = np.cos(exterior_angle_rad)   # x 分量
-        self._dz = np.sin(exterior_angle_rad)   # z 分量
-        self._nx = -np.sin(exterior_angle_rad)  # 法向 x 分量
-        self._nz = np.cos(exterior_angle_rad)   # 法向 z 分量
+        # 面延伸方向（在 xz 平面内）
+        self._dx = np.cos(exterior_angle_rad)
+        self._dz = np.sin(exterior_angle_rad)
+        # 外法向 = d₂ 顺时针旋转 90°，指向外部区域（波传播侧）
+        # n = (sin α, 0, -cos α)
+        self._nx =  np.sin(exterior_angle_rad)
+        self._nz = -np.cos(exterior_angle_rad)
 
     @property
     def u_domain(self):
@@ -143,7 +145,7 @@ def create_infinite_wedge(edge_length, exterior_angle_deg=270.0):
 
     返回:
         surfaces: [InfiniteWedgeSurface, WedgeFace2Surface]
-        ptd_id:   'F0E0'（PTD棱边在 Face 0 的 Edge 0 处）
+        ptd_id:   '(0,1)'（Face 0 和 Face 1 的共享边）
     """
     plate_width = edge_length / 2.0
     alfa = np.radians(exterior_angle_deg)
@@ -151,4 +153,4 @@ def create_infinite_wedge(edge_length, exterior_angle_deg=270.0):
     face1 = InfiniteWedgeSurface(edge_length, plate_width)
     face2 = WedgeFace2Surface(edge_length, plate_width, alfa)
 
-    return [face1, face2], "F0E0"
+    return [face1, face2], "(0,1)"

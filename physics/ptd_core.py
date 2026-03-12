@@ -7,7 +7,7 @@ PTD 边缘积分核心
   3. 按极化选取系数，乘以传播因子，累加到总贡献
 """
 import numpy as np
-from .ptd_coefficients import fun_fg
+from .ptd_coefficients import fun_fg, FG_monostatic
 
 _SING_THRESH = 1e-3   # 奇点邻域阈值（弧度，约 0.057°）
 _SING_OFFSET = 3e-4   # 奇点两侧偏移量（弧度）
@@ -86,7 +86,8 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
         angle_obs = angle_raw % alfa           # 映射到 [0, α)
 
         # ── 4. 计算衍射系数 D ──
-        D = _compute_D(angle_obs, angle0, alfa, polarization)
+        gamma0 = np.arcsin(sin_gamma0)
+        D = _compute_D(angle_obs, angle0, gamma0, alfa, polarization)
 
         # ── 5. 边缘段积分 ──
         # sinc 项：考虑棱边延伸方向造成的干涉
@@ -96,8 +97,8 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
         # 单站相位：exp(i·2k·r_mid)
         phase_mid = 2.0 * np.dot(seg.midpoint, k_vec)
 
-        # 传播因子（与 PO 积分保持相同量纲约定）
-        pre_factor = (2.0 * np.pi) / (1j * k)
+        # 传播因子：含 1/sin(γ₀) 斜入射修正
+        pre_factor = (2.0 * np.pi) / (1j * k * sin_gamma0)
 
         seg_contrib = pre_factor * D * seg.length * sinc_val * np.exp(1j * phase_mid)
         total_contrib += seg_contrib
@@ -105,14 +106,12 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
     return total_contrib
 
 
-def _compute_D(angle, angle0, alfa, polarization):
+def _compute_D(angle, angle0, gamma0, alfa, polarization):
     """
-    从 fun_fg 获取 f1/g1，按极化选取衍射系数 D。
+    用 FG_monostatic 计算衍射系数 D，含斜入射耦合项。
 
-    奇点处（angle 或 angle0 接近 0/α，或 angle ≈ angle0 → ψ₁≈0）
-    用两侧偏移平均处理数值稳定性。
+    奇点处（ψ₁≈π 或 ψ₂≈π）用两侧偏移平均处理数值稳定性。
     """
-    # 检查是否需要奇点平滑
     psi1 = angle - angle0
     psi2 = angle + angle0
     near_sing = (abs(psi1 % (2 * np.pi) - np.pi) < _SING_THRESH or
@@ -120,15 +119,15 @@ def _compute_D(angle, angle0, alfa, polarization):
                  abs(2 * alfa - psi2 - np.pi) < _SING_THRESH)
 
     if near_sing:
-        # 用两侧偏移的平均值平滑奇点
-        f1a, g1a = fun_fg(angle - _SING_OFFSET, angle0, alfa)
-        f1b, g1b = fun_fg(angle + _SING_OFFSET, angle0, alfa)
-        f1 = 0.5 * (f1a + f1b)
-        g1 = 0.5 * (g1a + g1b)
+        F1a, G1Va, G1pa = FG_monostatic(angle - _SING_OFFSET, angle0, gamma0, alfa)
+        F1b, G1Vb, G1pb = FG_monostatic(angle + _SING_OFFSET, angle0, gamma0, alfa)
+        F1_Vt  = 0.5 * (F1a + F1b)
+        G1_Vt  = 0.5 * (G1Va + G1Vb)
+        G1_phi = 0.5 * (G1pa + G1pb)
     else:
-        f1, g1 = fun_fg(angle, angle0, alfa)
+        F1_Vt, G1_Vt, G1_phi = FG_monostatic(angle, angle0, gamma0, alfa)
 
     if polarization == 'HH':
-        return f1   # Soft boundary / TE
+        return -F1_Vt           # = f1 (soft / TE)
     else:
-        return g1   # Hard boundary / TM  (default 'VV')
+        return -G1_phi + G1_Vt  # = g1 + 斜入射耦合项 (hard / TM, default 'VV')

@@ -15,7 +15,7 @@ def create_analytic_wedge(length=10.0, width=5.0, height=5.0):
       
     返回:
         surfaces: list of Surface objects
-        ptd_edge_ids: str, PTD 边缘定义字符串 (e.g. "F0E2")
+        ptd_edge_ids: str, PTD 边缘面对字符串 (e.g. "(0,1)")
     """
     
     # Face 0: Horizontal Plate
@@ -56,6 +56,6 @@ def create_analytic_wedge(length=10.0, width=5.0, height=5.0):
     # For s1 (Face 0), edge at y=0 is Edge 2.
     # For s2 (Face 1), edge at z=0 is Edge 3.
     # We can pick either. Let's pick F0E2.
-    ptd_id = "F0E2" 
+    ptd_id = "(0,1)"
     
     return surfaces, ptd_id

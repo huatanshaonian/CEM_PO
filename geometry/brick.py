@@ -50,55 +50,8 @@ def create_analytic_brick(length=10.0, width=5.0, height=3.0):
     
     surfaces = [s0, s1, s2, s3, s4, s5]
     
-    # PTD Edges: 12 edges
-    # Face 0 (Top) edges: 
-    #   E0: u=-0.5 (Left, x=-L/2) -> Shared with Face 3 (Back)
-    #   E1: u=+0.5 (Right, x=+L/2) -> Shared with Face 2 (Front)
-    #   E2: v=-0.5 (Bottom, y=-W/2) -> Shared with Face 5 (Left)
-    #   E3: v=+0.5 (Top, y=+W/2) -> Shared with Face 4 (Right)
-    
-    # Face 1 (Bottom) edges:
-    #   Similar...
-    
-    # Vertical edges: Shared by Side faces.
-    
-    # Construct identifier string
-    # We select edges from specific faces to avoid duplicates.
-    # Top Face (F0) all 4 edges: F0E0, F0E1, F0E2, F0E3
-    # Bottom Face (F1) all 4 edges: F1E0, F1E1, F1E2, F1E3
-    # Vertical edges:
-    #   Front-Right: F2E3 (Face 2 Top, mapped to +y?)
-    #   Let's trace orientation.
-    #   Instead of guessing, we can just list ALL edges of ALL faces?
-    #   No, that would double count (24 edges).
-    #   We need 12 unique edges.
-    
-    # Simple set:
-    # Top Loop: F0E0, F0E1, F0E2, F0E3
-    # Bottom Loop: F1E0, F1E1, F1E2, F1E3
-    # Vertical Posts:
-    #   Front-Right (+X, +Y): Intersection of F2 and F4.
-    #   Front-Left (+X, -Y): Intersection of F2 and F5.
-    #   Back-Right (-X, +Y): Intersection of F3 and F4.
-    #   Back-Left (-X, -Y): Intersection of F3 and F5.
-    
-    # Let's verify Face 2 (Front +X) edges.
-    # Plate(height, width).
-    # Ry(90) mapping: Local X(u) -> Global Z (or -Z?). Local Y(v) -> Global Y.
-    # So u is Z, v is Y.
-    # Edges u=+-0.5 are Top/Bottom (Z).
-    # Edges v=+-0.5 are Left/Right (Y).
-    # We want Vertical edges (along Z). These are u=+-0.5 edges?
-    # No, vertical edges run along Z. So u varies. v is constant.
-    # So edges are v=+-0.5 (indices 2 and 3).
-    
-    edges = [
-        "F0E0", "F0E1", "F0E2", "F0E3", # Top 4
-        "F1E0", "F1E1", "F1E2", "F1E3", # Bottom 4
-        "F2E2", "F2E3",                 # Front verticals
-        "F3E2", "F3E3"                  # Back verticals
-    ]
-    
-    ptd_id = ",".join(edges)
+    # PTD 面对：12 条棱，每条棱由两个相邻面自动提取
+    # 面索引：0=Top, 1=Bottom, 2=Front(+X), 3=Back(-X), 4=Right(+Y), 5=Left(-Y)
+    ptd_id = "(0,2);(0,3);(0,4);(0,5);(1,2);(1,3);(1,4);(1,5);(2,4);(2,5);(3,4);(3,5)"
     
     return surfaces, ptd_id

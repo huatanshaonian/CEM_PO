@@ -2,9 +2,10 @@
 PTD 衍射系数核心函数
 
 直接对应乌菲姆采夫教材 MATLAB 代码：
-  eps_x   ← eps_x.m   (Eq. 7.48)
-  sigma12 ← sigma12.m (Eq. 7.76-7.77)
-  fun_fg  ← fun_fg.m  (Eq. 4.20-4.21)
+  eps_x          ← eps_x.m   (Eq. 7.48)
+  sigma12        ← sigma12.m (Eq. 7.76-7.77)
+  fun_fg         ← fun_fg.m  (Eq. 4.20-4.21)
+  FG_monostatic  ← FG.m      (Eq. 7.137, 单站路径)
 """
 import numpy as np
 
@@ -134,6 +135,30 @@ def fun_fg(angle, angle0, alfa):
         g1 = 0.0
 
     return float(np.real(f1)), float(np.real(g1))
+
+
+def FG_monostatic(angle, angle0, gamma0, alfa):
+    """
+    Ufimtsev 完整 3D 衍射系数，单站情况 (Vtheta = pi - gamma0)。
+    对应 FG.m Eq.(7.137) 的 Vtheta == pi-gamma0 分支。
+
+    参数:
+        angle:  观察角 φ（弧度），∈ (0, α)
+        angle0: 入射角 φ₀（弧度），∈ (0, α)
+        gamma0: 斜入射角（弧度），入射方向与棱边的夹角，∈ (0, π)
+        alfa:   楔形外角 α（弧度）
+
+    返回:
+        F1_Vt:  soft (f1) 的 θ 分量 = -f1
+        G1_Vt:  hard (g1) 的 θ 分量（极化耦合项，正入射时为零）
+        G1_phi: hard (g1) 的 φ 分量 = -g1
+    """
+    f1, g1 = fun_fg(angle, angle0, alfa)
+    # 单站 Keller 锥上：Vtheta = pi - gamma0，sin(Vtheta) = sin(gamma0)
+    F1_Vt  = -f1
+    G1_Vt  = (eps_x(angle0) - eps_x(alfa - angle0)) * (np.cos(gamma0) / np.sin(gamma0))
+    G1_phi = -g1
+    return F1_Vt, G1_Vt, G1_phi
 
 
 # ──────────────── 辅助函数 ────────────────

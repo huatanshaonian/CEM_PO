@@ -125,6 +125,15 @@ class CEMPoQtWindow(QMainWindow):
         
         # Export Bar
         export_layout = QHBoxLayout()
+        self.chk_analytical = QCheckBox("Show Analytical Solution")
+        export_layout.addWidget(self.chk_analytical)
+        export_layout.addWidget(QLabel("Unit:"))
+        self.combo_rcs_unit_results = QComboBox()
+        self.combo_rcs_unit_results.addItems(["dBsm", "m²"])
+        self.combo_rcs_unit_results.currentTextChanged.connect(
+            lambda: self.plot_results(self.last_result) if self.last_result else None
+        )
+        export_layout.addWidget(self.combo_rcs_unit_results)
         export_layout.addStretch()
         self.btn_export = QPushButton("Export Data (.csv)")
         self.btn_export.clicked.connect(self.export_csv)
@@ -146,7 +155,7 @@ class CEMPoQtWindow(QMainWindow):
         comp_layout.addWidget(self.comp_toolbar)
         comp_layout.addWidget(self.comp_canvas)
         
-        self.tabs.addTab(self.comp_frame, "Comparison")
+        self.tabs.addTab(self.comp_frame, "RCS Patterns")
         
         # Log Area
         log_widget = QWidget()
@@ -328,15 +337,8 @@ class CEMPoQtWindow(QMainWindow):
         l_ptd.addRow(self.chk_ptd_enabled)
 
         self.ptd_edges = QLineEdit("")
-        self.ptd_edges.setPlaceholderText("e.g. F0E0, F0E1")
-        l_ptd.addRow("Edge IDs:", self.ptd_edges)
-
-        self.ptd_wedge_angle = QDoubleSpinBox()
-        self.ptd_wedge_angle.setRange(1.0, 359.0)
-        self.ptd_wedge_angle.setValue(90.0)
-        self.ptd_wedge_angle.setSuffix(" °")
-        self.ptd_wedge_angle.setToolTip("楔角（两个面之间的内角）")
-        l_ptd.addRow("Wedge Angle:", self.ptd_wedge_angle)
+        self.ptd_edges.setPlaceholderText("e.g. (0,1) or (0,1);(1,2)")
+        l_ptd.addRow("Face Pairs:", self.ptd_edges)
 
         self.ptd_pol = QComboBox()
         self.ptd_pol.addItems(["VV", "HH"])
@@ -385,17 +387,44 @@ class CEMPoQtWindow(QMainWindow):
         
         self.param_tabs.addTab(self.tab_solver, "Solver")
 
-        # === Tab 3: Comparison ===
+        # === Tab 3: Post-processing ===
         self.tab_comp = QWidget()
         layout_comp = QVBoxLayout(self.tab_comp)
-        
+
+        # --- Plot Mode ---
+        group_mode = QGroupBox("Plot Mode")
+        l_mode = QVBoxLayout()
+        self.combo_postproc_mode = QComboBox()
+        self.combo_postproc_mode.addItems(["1D Line", "Polar", "2D Heatmap"])
+        self.combo_postproc_mode.currentTextChanged.connect(self._comp_mgr.update_comparison_plot)
+        l_mode.addWidget(self.combo_postproc_mode)
+        # Slice axis + angle — two rows to avoid crowding
+        h_axis = QHBoxLayout()
+        h_axis.addWidget(QLabel("Slice axis:"))
+        self.combo_slice_axis = QComboBox()
+        self.combo_slice_axis.addItems(["Phi", "Theta"])
+        self.combo_slice_axis.currentTextChanged.connect(self._comp_mgr.update_comparison_plot)
+        h_axis.addWidget(self.combo_slice_axis)
+        l_mode.addLayout(h_axis)
+        h_angle = QHBoxLayout()
+        h_angle.addWidget(QLabel("Slice angle (°):"))
+        self.spin_slice_angle = QDoubleSpinBox()
+        self.spin_slice_angle.setRange(-180.0, 360.0)
+        self.spin_slice_angle.setValue(0.0)
+        self.spin_slice_angle.setSingleStep(5.0)
+        self.spin_slice_angle.valueChanged.connect(self._comp_mgr.update_comparison_plot)
+        h_angle.addWidget(self.spin_slice_angle)
+        l_mode.addLayout(h_angle)
+        group_mode.setLayout(l_mode)
+        layout_comp.addWidget(group_mode)
+
+        # --- Loaded Data ---
         group_comp = QGroupBox("Loaded Data")
         l_comp = QVBoxLayout()
         self.comp_files_list = QListWidget()
         self.comp_files_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.comp_files_list.setStyleSheet("border: 1px solid #CCC; border-radius: 2px;")
         l_comp.addWidget(self.comp_files_list)
-        
         h_btn = QHBoxLayout()
         self.btn_add_csv = QPushButton("Import CSV")
         self.btn_add_csv.clicked.connect(self._comp_mgr.add_comparison_file)
@@ -406,35 +435,58 @@ class CEMPoQtWindow(QMainWindow):
         l_comp.addLayout(h_btn)
         group_comp.setLayout(l_comp)
         layout_comp.addWidget(group_comp)
-        
-        group_datasets = QGroupBox("数据集选择")
+
+        # --- Dataset Selection (2D Heatmap mode only) ---
+        group_datasets = QGroupBox("Dataset Selection (2D Heatmap)")
         f_ds = QFormLayout()
         f_ds.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        self.combo_ds_a   = QComboBox(); self.combo_ds_a.addItem("(未选择)")
-        self.combo_ds_b   = QComboBox(); self.combo_ds_b.addItem("(未选择)")
-        self.combo_ds_ref = QComboBox(); self.combo_ds_ref.addItem("(未选择)")
-        f_ds.addRow("A (主):",    self.combo_ds_a)
-        f_ds.addRow("B (对比):",  self.combo_ds_b)
-        f_ds.addRow("Ref (参考):", self.combo_ds_ref)
+        self.combo_ds_a   = QComboBox(); self.combo_ds_a.addItem("(none)")
+        self.combo_ds_b   = QComboBox(); self.combo_ds_b.addItem("(none)")
+        self.combo_ds_ref = QComboBox(); self.combo_ds_ref.addItem("(none)")
+        f_ds.addRow("A (primary):", self.combo_ds_a)
+        f_ds.addRow("B (compare):", self.combo_ds_b)
+        f_ds.addRow("Ref:",         self.combo_ds_ref)
         group_datasets.setLayout(f_ds)
         layout_comp.addWidget(group_datasets)
 
-        group_opts = QGroupBox("Plot Options")
-        l_opts = QVBoxLayout()
-        self.chk_analytical = QCheckBox("Show Analytical Solution")
-        self.chk_analytical.stateChanged.connect(self._comp_mgr.update_comparison_plot)
+        # Wire RCS Results analytical checkbox (widget created there)
         self.chk_analytical.stateChanged.connect(
             lambda: self.plot_results(self.last_result) if self.last_result else None
         )
-        l_opts.addWidget(self.chk_analytical)
-        self.btn_refresh_comp = QPushButton("Update Plot")
+
+        # --- Plot Options ---
+        group_opts = QGroupBox("Plot Elements")
+        l_opts = QVBoxLayout()
+        self.chk_show_total = QCheckBox("Total RCS")
+        self.chk_show_total.setChecked(True)
+        self.chk_show_total.stateChanged.connect(self._comp_mgr.update_comparison_plot)
+        l_opts.addWidget(self.chk_show_total)
+        self.chk_show_po = QCheckBox("PO")
+        self.chk_show_po.setChecked(True)
+        self.chk_show_po.stateChanged.connect(self._comp_mgr.update_comparison_plot)
+        l_opts.addWidget(self.chk_show_po)
+        self.chk_show_ptd = QCheckBox("PTD Fringe")
+        self.chk_show_ptd.setChecked(True)
+        self.chk_show_ptd.stateChanged.connect(self._comp_mgr.update_comparison_plot)
+        l_opts.addWidget(self.chk_show_ptd)
+        self.chk_analytical_comp = QCheckBox("Analytical Solution")
+        self.chk_analytical_comp.stateChanged.connect(self._comp_mgr.update_comparison_plot)
+        l_opts.addWidget(self.chk_analytical_comp)
+        h_unit = QHBoxLayout()
+        h_unit.addWidget(QLabel("Unit:"))
+        self.combo_rcs_unit = QComboBox()
+        self.combo_rcs_unit.addItems(["dBsm", "m²"])
+        self.combo_rcs_unit.currentTextChanged.connect(self._comp_mgr.update_comparison_plot)
+        h_unit.addWidget(self.combo_rcs_unit)
+        l_opts.addLayout(h_unit)
+        self.btn_refresh_comp = QPushButton("Refresh Plot")
         self.btn_refresh_comp.clicked.connect(self._comp_mgr.update_comparison_plot)
         l_opts.addWidget(self.btn_refresh_comp)
         group_opts.setLayout(l_opts)
         layout_comp.addWidget(group_opts)
 
         layout_comp.addStretch()
-        self.param_tabs.addTab(self.tab_comp, "Comparison")
+        self.param_tabs.addTab(self.tab_comp, "Post-processing")
 
         self.update_geo_inputs("Cylinder")
 
@@ -465,8 +517,7 @@ class CEMPoQtWindow(QMainWindow):
                     "workers": int(self.cpu_workers.text()),
                     "ptd": {
                         "enabled": self.chk_ptd_enabled.isChecked(),
-                        "edges": [s.strip() for s in self.ptd_edges.text().split(",") if s.strip()],
-                        "wedge_angle": self.ptd_wedge_angle.value()
+                        "edges": self.ptd_edges.text().strip(),
                     }
                 },
                 "scan": {
@@ -804,18 +855,12 @@ class CEMPoQtWindow(QMainWindow):
             # Handle Wedge/Brick/InfiniteWedge which return (surfaces, ptd_id) tuple
             if isinstance(result, tuple):
                 geo_list, ptd_id = result
-                # Auto-fill PTD edges if available
-                if ptd_id and self.chk_ptd_enabled.isChecked():
+                # Auto-fill PTD face pairs if available
+                if ptd_id:
                     self.ptd_edges.setText(ptd_id)
-                # Infinite Wedge: auto-enable PTD and set wedge angle from exterior angle
+                # Infinite Wedge: auto-enable PTD
                 if gtype == "Infinite Wedge" and ptd_id:
                     self.chk_ptd_enabled.setChecked(True)
-                    self.ptd_edges.setText(ptd_id)
-                    try:
-                        exterior_angle = float(params.get('exterior_angle', 270.0))
-                        self.ptd_wedge_angle.setValue(360.0 - exterior_angle)
-                    except (ValueError, TypeError):
-                        pass
             else:
                 geo_list = result
 
@@ -849,29 +894,34 @@ class CEMPoQtWindow(QMainWindow):
                     u = np.linspace(u0 + du, u1 - du, 5)
                     v = np.linspace(v0 + dv, v1 - dv, 5)
                     ug, vg = np.meshgrid(u, v)
-                    p, n, j, _, _ = surface.get_data(ug, vg)
+                    data = surface.get_data(ug, vg)
+                    p, n, j = data[0], data[1], data[2]
                     p_flat = p.reshape(-1, 3)
                     diag = np.linalg.norm(p_flat.max(axis=0) - p_flat.min(axis=0))
                     arrow_mag = max(diag * 0.08, 0.01)
                     self.plotter.add_arrows(p_flat, n.reshape(-1, 3),
                                            mag=arrow_mag, color='red', opacity=0.6)
 
-                # 3. Visualize PTD Edges
-                if self.chk_show_ptd.isChecked():
-                    raw_ptd = self.ptd_edges.text().strip()
-                    if raw_ptd:
-                        try:
-                            edge_ids = [int(s.strip()) for s in raw_ptd.split(',') if s.strip()]
-                            for eid in edge_ids:
-                                if hasattr(surface, 'get_edge_by_index'):
-                                    try:
-                                        edge_pts = surface.get_edge_by_index(eid, n_samples=50)
-                                        # Draw as line
-                                        line = pv.MultipleLines(points=edge_pts)
-                                        self.plotter.add_mesh(line, color='yellow', line_width=5, 
-                                                             label=f"PTD Edge {eid}")
-                                    except: pass
-                        except: pass
+            # 3. Visualize PTD Edges (face-pair format)
+            if self.chk_show_ptd.isChecked():
+                raw_ptd = self.ptd_edges.text().strip()
+                if raw_ptd:
+                    try:
+                        from solvers.ptd_edge_finder import find_shared_edge
+                        import re as _re
+                        pairs = _re.findall(r'(\d+)\s*,\s*(\d+)', raw_ptd)
+                        for a_str, b_str in pairs:
+                            a, b = int(a_str), int(b_str)
+                            if a < len(geo_list) and b < len(geo_list):
+                                try:
+                                    edge_pts, _, _ = find_shared_edge(
+                                        geo_list[a], geo_list[b], n_samples=50)
+                                    line = pv.MultipleLines(points=edge_pts)
+                                    self.plotter.add_mesh(line, color='yellow', line_width=5)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
 
             # 4. Visualize ALL Incident Wave Directions from scan range
             if self.chk_show_wave.isChecked():
@@ -1102,11 +1152,8 @@ class CEMPoQtWindow(QMainWindow):
             if not self.current_geo: return
 
         try:
-            # PTD Parsing
-            ptd_edges_list = []
-            raw_edges = self.ptd_edges.text().strip()
-            if raw_edges:
-                ptd_edges_list = [s.strip() for s in raw_edges.split(',') if s.strip()]
+            # PTD face pairs (passed as raw string for downstream parsing)
+            ptd_edges_str = self.ptd_edges.text().strip()
 
             params = {
                 'frequency': float(self.freq_input.text()) * 1e6,
@@ -1126,9 +1173,8 @@ class CEMPoQtWindow(QMainWindow):
                 },
                 'ptd': {
                     'enabled': self.chk_ptd_enabled.isChecked(),
-                    'edges': ptd_edges_list,
+                    'edges': ptd_edges_str,
                     'polarization': self.ptd_pol.currentText(),
-                    'wedge_angle': self.ptd_wedge_angle.value()
                 },
                 'compute': {
                     'gpu': self.use_gpu.isChecked(),
@@ -1168,25 +1214,23 @@ class CEMPoQtWindow(QMainWindow):
     def plot_results(self, result):
         self.rcs_figure.clear()
         ax = self.rcs_figure.add_subplot(111)
-        
+
         mode = result.get('mode', '1d')
         freq_mhz = result.get('freq', 0) / 1e6
-        
+        use_db = self.combo_rcs_unit_results.currentText() == "dBsm"
+        unit_label = "dBsm" if use_db else "m²"
+
+        def _conv(rcs_db_arr):
+            return rcs_db_arr if use_db else 10.0 ** (rcs_db_arr / 10.0)
+
         if mode == '2d':
-            # 2D Heatmap
-            # Note: RCSAnalyzer already returns dB values, no need for log10 conversion
             rcs_db = result['rcs_total']
             theta = result['theta_deg']
             phi = result['phi_deg']
-
-            # Use pcolormesh for better coordinate handling
             X, Y = np.meshgrid(phi, theta)
-            # Handle NaN values (already in dB)
-            Z = np.nan_to_num(rcs_db, nan=-200)
-
+            Z = _conv(np.nan_to_num(rcs_db, nan=-200))
             c = ax.pcolormesh(X, Y, Z, cmap='jet', shading='auto')
-            self.rcs_figure.colorbar(c, ax=ax, label='RCS (dBsm)')
-
+            self.rcs_figure.colorbar(c, ax=ax, label=f'RCS ({unit_label})')
             ax.set_xlabel("Phi (deg)")
             ax.set_ylabel("Theta (deg)")
             phi_range = phi[-1] - phi[0] if len(phi) > 1 else 1
@@ -1196,24 +1240,20 @@ class CEMPoQtWindow(QMainWindow):
             ax.set_title(f"RCS Pattern (2D Scan, f={freq_mhz:.1f} MHz)")
 
         else:
-            # 1D Line Plot
-            # Note: RCSAnalyzer already returns dB values, no need for log10 conversion
             angles = result['theta_deg']
-            rcs_db = result['rcs_total']
+            ax.plot(angles, _conv(result['rcs_total']),
+                    label='Total RCS', linewidth=2, color='#007ACC')
 
-            ax.plot(angles, rcs_db, label='Total RCS', linewidth=2, color='#007ACC')
-
-            # PO component
             if result.get('rcs_po') is not None:
-                ax.plot(angles, result['rcs_po'], '--', label='PO', alpha=0.7, color='orange')
+                ax.plot(angles, _conv(result['rcs_po']),
+                        '--', label='PO', alpha=0.7, color='orange')
 
-            # PTD fringe correction (only when PTD enabled)
             gtype = self.geo_type_combo.currentText()
             if result.get('rcs_ptd') is not None and gtype == "Infinite Wedge":
-                ax.plot(angles, result['rcs_ptd'], ':', label='PTD Fringe (数值)',
+                ax.plot(angles, _conv(result['rcs_ptd']),
+                        ':', label='PTD Fringe (numerical)',
                         alpha=0.85, color='green', linewidth=1.5)
 
-            # Analytical solution
             if self.chk_analytical.isChecked():
                 try:
                     geo_params = self.get_geo_params()
@@ -1223,13 +1263,13 @@ class CEMPoQtWindow(QMainWindow):
                         gtype, geo_params, result['freq'], theta_rad, polarization
                     )
                     if rcs_analytic is not None:
-                        ax.plot(angles, rcs_analytic, 'r:', linewidth=2,
+                        ax.plot(angles, _conv(rcs_analytic), 'r:', linewidth=2,
                                 label=label_analytic, alpha=0.9)
                 except Exception:
                     pass
 
             ax.set_xlabel("Theta (deg)")
-            ax.set_ylabel("RCS (dBsm)")
+            ax.set_ylabel(f"RCS ({unit_label})")
             ax.set_title(f"RCS Pattern (f={freq_mhz:.1f} MHz)")
             ax.grid(True, linestyle='--', alpha=0.6)
             ax.legend()
