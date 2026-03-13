@@ -250,7 +250,7 @@ class CEMPoQtWindow(QMainWindow):
         # 勾选时始终刷新全模型视图，不触发单面模式
         self.chk_show_normals.stateChanged.connect(self.on_preview)
         self.chk_show_ptd_edges.stateChanged.connect(self.on_preview)
-        self.chk_show_wave.stateChanged.connect(self._sync_show_wave_from_model)
+        self.chk_show_wave.stateChanged.connect(self.on_preview)
 
         h_view.addWidget(self.chk_show_normals)
         h_view.addWidget(self.chk_show_ptd_edges)
@@ -336,7 +336,7 @@ class CEMPoQtWindow(QMainWindow):
         l_scan.addRow("Phi (Start/End/N):", h_phi)
 
         self.chk_show_wave_solver = QCheckBox("Show Inc. Wave")
-        self.chk_show_wave_solver.stateChanged.connect(self._sync_show_wave_from_solver)
+        self.chk_show_wave_solver.stateChanged.connect(self.on_preview)
         l_scan.addRow(self.chk_show_wave_solver)
 
         group_scan.setLayout(l_scan)
@@ -599,20 +599,6 @@ class CEMPoQtWindow(QMainWindow):
         except Exception as e:
             self.log(f"<font color='red'>Export failed: {e}</font>")
             traceback.print_exc()
-
-    def _sync_show_wave_from_solver(self, state):
-        """Solver 栏的 Show Inc. Wave checkbox 与 Model 栏保持同步。"""
-        self.chk_show_wave.blockSignals(True)
-        self.chk_show_wave.setChecked(state == Qt.Checked)
-        self.chk_show_wave.blockSignals(False)
-        self.on_preview()
-
-    def _sync_show_wave_from_model(self, state):
-        """Model 栏的 Inc. Wave checkbox 与 Solver 栏保持同步。"""
-        self.chk_show_wave_solver.blockSignals(True)
-        self.chk_show_wave_solver.setChecked(state == Qt.Checked)
-        self.chk_show_wave_solver.blockSignals(False)
-        self.on_preview()
 
     # ── PTD Face Pairs helpers ──────────────────────────────────────────────
 
@@ -1210,7 +1196,7 @@ class CEMPoQtWindow(QMainWindow):
                         pass
 
             # 4. Visualize ALL Incident Wave Directions from scan range
-            if self.chk_show_wave.isChecked():
+            if self.chk_show_wave.isChecked() or self.chk_show_wave_solver.isChecked():
                 try:
                     theta_start = float(self.theta_start.text())
                     theta_end = float(self.theta_end.text())
