@@ -92,6 +92,31 @@ def find_shared_edge(face_a, face_b, n_samples=60, n_grid=40):
     return edge_pts, normals_a, normals_b, exterior_angle
 
 
+def faces_share_edge(face_a, face_b, n_samples=20, n_grid=20):
+    """
+    快速判断两个面是否共享边（不计算法向量，仅做距离检查）。
+    用于 GUI 添加 PTD 面对前的预过滤，参数较小以保证速度。
+    """
+    scale = _estimate_face_scale(face_a)
+    tol = 0.05 * scale
+
+    ref_b = _sample_surface_grid(face_b, n_grid)
+    best_dist = min(
+        _avg_min_dist(_get_boundary_edge(face_a, idx, n_samples), ref_b)
+        for idx in range(4)
+    )
+    if best_dist <= tol:
+        return True
+
+    # 再从 face_b 侧试一次（应对非对称容差情况）
+    ref_a = _sample_surface_grid(face_a, n_grid)
+    best_dist = min(
+        _avg_min_dist(_get_boundary_edge(face_b, idx, n_samples), ref_a)
+        for idx in range(4)
+    )
+    return best_dist <= tol
+
+
 # ──────────────────────── 内部辅助函数 ────────────────────────
 
 def _get_boundary_edge(face, idx, n_samples):

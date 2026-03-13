@@ -68,10 +68,15 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
         i_e1 = np.dot(inc_unit, e1)        # n_lit 分量
         i_e2 = np.dot(inc_unit, e2)        # Face 1 切向分量
         angle0_raw = np.arctan2(i_e1, i_e2)  # atan2(e1分量, e2分量) → [−π, π]
-        angle0 = angle0_raw % alfa            # 映射到 [0, α)
+        if angle0_raw < -1e-6 or angle0_raw > alfa + 1e-6:
+            continue   # 入射方向来自楔形内部（背阴），跳过该段
+        angle0 = np.clip(angle0_raw, 0.0, alfa)
 
-        # 单站模式：散射方向 = 入射来源方向（波原路返回）
-        # s_dir = -k_dir，截面投影同 inc_unit
+        # ── 3b. 散射方向投影到截面局部坐标，求观察角 angle_obs ──
+        # 散射方向 s_dir 先去除沿棱边的分量，得到截面内分量，
+        # 再投影到 (e2, e1) 坐标系，方式与 angle0 完全对称。
+        # 单站：s_dir = -k_dir，截面投影等同 inc_unit，angle_obs = angle0。
+        # 双站：s_dir 为独立的散射观察方向，需由调用方传入（当前未实现）。
         s_dot_t = np.dot(s_dir, t)
         s_perp = s_dir - s_dot_t * t
         s_perp_len = np.linalg.norm(s_perp)
@@ -82,7 +87,24 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
         s_e1 = np.dot(s_perp_unit, e1)
         s_e2 = np.dot(s_perp_unit, e2)
         angle_raw = np.arctan2(s_e1, s_e2)
-        angle_obs = angle_raw % alfa           # 映射到 [0, α)
+
+        # 双站观察角阴影处理（暂未使用，开发双站时参考）：
+        #
+        # angle_raw ∈ [0, α]：观察点在楔形亮区，当前 PTD fringe 公式适用。
+        #
+        # angle_raw 在 [0, α] 之外：观察点在某个面的几何阴影区（仍是自由空间）。
+        # 此时衍射场是"阴影形成波"，与入射场等幅反相，使总场连续过渡到零。
+        # PTD fringe 在阴影边界（angle_raw ≈ 0 或 ≈ α）处发散，需要 UTD Fresnel
+        # 过渡函数正则化；深阴影区（远离边界）fringe 贡献趋于零，主要由 PO=0
+        # 和完整衍射系数 D_total 提供场值。
+        # 因此双站实现必须升级为 UTD（含 Fresnel 函数），不能直接 skip。
+        #
+        # if angle_raw < -1e-6 or angle_raw > alfa + 1e-6:
+        #     # TODO: 双站阴影区处理（UTD Fresnel 过渡）
+        #     pass
+        # angle_obs = np.clip(angle_raw, 0.0, alfa)
+
+        angle_obs = angle_raw % alfa           # 单站时 angle_obs == angle0，% 无副作用
 
         # ── 4. 计算衍射系数 D ──
         gamma0 = np.arcsin(sin_gamma0)

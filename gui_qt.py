@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QDockWidget, QWidget,
                                QSplitter, QFrame, QGroupBox, QScrollArea, QFileDialog, QTabWidget,
                                QListWidget, QAbstractItemView, QListWidgetItem,
                                QDoubleSpinBox)
-from PySide6.QtCore import Qt, QThread, Signal, QObject
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize
 from PySide6.QtGui import QAction, QIcon, QFont, QColor, QPalette
 
 # 3D Visualization
@@ -57,7 +57,9 @@ class CEMPoQtWindow(QMainWindow):
         self.comparison_data = [] # List of dicts: {'name': str, 'data': DataFrame, 'path': str}
         self._surface_actors = []          # vtkActor per surface index
         self._actor_to_surface_idx = {}    # actor -> int
-        self._highlighted_idx = -1         # currently highlighted surface
+        self._highlighted_indices = set()  # currently highlighted surface indices
+        self._ptd_auto_fill = True         # allow auto-fill on next on_preview (set by Build btn)
+        self._ptd_highlighted_pair = None  # 当前高亮的 PTD chip 文本，如 "(0,1)"
         self._picking_setup = False
         self._input_cache = {}             # Cache for dynamic widget values across geo_type switches
         self._comp_mgr = ComparisonManager(self)
@@ -222,21 +224,22 @@ class CEMPoQtWindow(QMainWindow):
         self.surface_list.itemDoubleClicked.connect(self.on_surface_selected)
         l_surf.addWidget(self.surface_list)
 
-        h_ops = QHBoxLayout()
+        h_ops1 = QHBoxLayout()
         self.chk_surf_invert = QCheckBox("Invert Normal")
         self.chk_surf_invert.toggled.connect(self.on_invert_surface_toggled)
         self.chk_surf_invert.setEnabled(False)
-        h_ops.addWidget(self.chk_surf_invert)
-
+        h_ops1.addWidget(self.chk_surf_invert)
         self.btn_show_all = QPushButton("Show All")
         self.btn_show_all.clicked.connect(self.on_show_all_surfaces)
-        h_ops.addWidget(self.btn_show_all)
+        h_ops1.addWidget(self.btn_show_all)
+        l_surf.addLayout(h_ops1)
 
+        h_ops2 = QHBoxLayout()
         self.btn_add_ptd_pair = QPushButton("Add to PTD Pairs")
         self.btn_add_ptd_pair.clicked.connect(self.on_add_ptd_pairs)
         self.btn_add_ptd_pair.setToolTip("Select 2+ surfaces, then click to add all adjacent pairs to PTD Face Pairs list")
-        h_ops.addWidget(self.btn_add_ptd_pair)
-        l_surf.addLayout(h_ops)
+        h_ops2.addWidget(self.btn_add_ptd_pair)
+        l_surf.addLayout(h_ops2)
         
         # View Controls
         h_view = QHBoxLayout()
@@ -293,6 +296,8 @@ class CEMPoQtWindow(QMainWindow):
         # === Tab 2: Solver ===
         self.tab_solver = QWidget()
         layout_solver = QVBoxLayout(self.tab_solver)
+        layout_solver.setSpacing(6)
+        layout_solver.setContentsMargins(6, 6, 6, 6)
         
         # 1. Algorithm
         group_algo = QGroupBox("Algorithm")
@@ -339,35 +344,57 @@ class CEMPoQtWindow(QMainWindow):
 
         # 3. PTD Correction
         self.group_ptd = QGroupBox("PTD Correction")
-        l_ptd = QFormLayout()
+        l_ptd = QVBoxLayout()
+        l_ptd.setSpacing(4)
+        l_ptd.setContentsMargins(6, 4, 6, 4)
 
+        h_ptd_top = QHBoxLayout()
         self.chk_ptd_enabled = QCheckBox("Enable PTD")
         self.chk_ptd_enabled.setChecked(False)
-        l_ptd.addRow(self.chk_ptd_enabled)
+        h_ptd_top.addWidget(self.chk_ptd_enabled)
+        h_ptd_top.addStretch()
+        lbl_pol = QLabel("Pol:")
+        self.ptd_pol = QComboBox()
+        self.ptd_pol.addItems(["VV", "HH"])
+        self.ptd_pol.setFixedWidth(55)
+        h_ptd_top.addWidget(lbl_pol)
+        h_ptd_top.addWidget(self.ptd_pol)
+        l_ptd.addLayout(h_ptd_top)
 
+        # Face pairs displayed as wrapping chips
         self.ptd_pairs_list = QListWidget()
-        self.ptd_pairs_list.setFixedHeight(80)
+        self.ptd_pairs_list.setViewMode(QListWidget.IconMode)
+        self.ptd_pairs_list.setFlow(QListWidget.LeftToRight)
+        self.ptd_pairs_list.setWrapping(True)
+        self.ptd_pairs_list.setResizeMode(QListWidget.Adjust)
+        self.ptd_pairs_list.setSpacing(2)
+        self.ptd_pairs_list.setMinimumHeight(50)
+        self.ptd_pairs_list.setMaximumHeight(110)
         self.ptd_pairs_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.ptd_pairs_list.setToolTip("Face pairs for PTD edge extraction. Use 'Add to PTD Pairs' in Model tab.")
-        l_ptd.addRow("Face Pairs:", self.ptd_pairs_list)
+        self.ptd_pairs_list.setDragEnabled(False)
+        self.ptd_pairs_list.setToolTip("单击选中，双击高亮该边；Remove 删除选中项")
+        self.ptd_pairs_list.itemDoubleClicked.connect(self._on_ptd_pair_dblclick)
+        l_ptd.addWidget(self.ptd_pairs_list)
 
         h_ptd_btns = QHBoxLayout()
+        h_ptd_btns.setSpacing(4)
         self.ptd_edges = QLineEdit("")
-        self.ptd_edges.setPlaceholderText("manual: (0,1);(1,2)")
+        self.ptd_edges.setPlaceholderText("(0,1);(1,2) + Enter")
         self.ptd_edges.setToolTip("Manually type pairs then press Enter to add")
         self.ptd_edges.returnPressed.connect(self._on_ptd_edges_manual_add)
-        h_ptd_btns.addWidget(self.ptd_edges)
-        btn_ptd_remove = QPushButton("Remove")
-        btn_ptd_remove.clicked.connect(self._on_ptd_pairs_remove)
-        h_ptd_btns.addWidget(btn_ptd_remove)
+        h_ptd_btns.addWidget(self.ptd_edges, 1)
+        btn_ptd_add = QPushButton("Add")
+        btn_ptd_add.setToolTip("将 3D 视图中选中的面的公共边添加到列表")
+        btn_ptd_add.clicked.connect(self._on_ptd_pairs_add_from_selection)
+        h_ptd_btns.addWidget(btn_ptd_add)
+        self.btn_ptd_remove = QPushButton("Remove")
+        self.btn_ptd_remove.setToolTip("删除列表中选中的条目；或删除 3D 视图多选面的公共边")
+        self.btn_ptd_remove.clicked.connect(self._on_ptd_pairs_remove)
+        h_ptd_btns.addWidget(self.btn_ptd_remove)
         btn_ptd_clear = QPushButton("Clear All")
         btn_ptd_clear.clicked.connect(self.ptd_pairs_list.clear)
         h_ptd_btns.addWidget(btn_ptd_clear)
-        l_ptd.addRow(h_ptd_btns)
-
-        self.ptd_pol = QComboBox()
-        self.ptd_pol.addItems(["VV", "HH"])
-        l_ptd.addRow("Polarization:", self.ptd_pol)
+        l_ptd.addLayout(h_ptd_btns)
 
         self.group_ptd.setLayout(l_ptd)
         layout_solver.addWidget(self.group_ptd)
@@ -391,8 +418,8 @@ class CEMPoQtWindow(QMainWindow):
         
         group_compute.setLayout(l_compute)
         layout_solver.addWidget(group_compute)
-        
-        layout_solver.addSpacing(10)
+
+        layout_solver.addStretch()
         h_btns = QHBoxLayout()
         
         self.btn_run = QPushButton("RUN SIMULATION")
@@ -607,13 +634,16 @@ class CEMPoQtWindow(QMainWindow):
         for a, b in pairs:
             key = (min(a, b), max(a, b))
             if key not in existing:
-                self.ptd_pairs_list.addItem(f"({key[0]},{key[1]})")
+                item = QListWidgetItem(f"({key[0]},{key[1]})")
+                item.setSizeHint(QSize(44, 22))
+                item.setTextAlignment(Qt.AlignCenter)
+                self.ptd_pairs_list.addItem(item)
                 existing.add(key)
                 added += 1
         return added
 
     def on_add_ptd_pairs(self):
-        """将 surface_list 中选中的面的所有相邻对添加到 PTD Face Pairs。"""
+        """将 surface_list 中选中的面的共享边面对添加到 PTD Face Pairs。"""
         selected_rows = sorted(
             self.surface_list.row(item)
             for item in self.surface_list.selectedItems()
@@ -621,14 +651,33 @@ class CEMPoQtWindow(QMainWindow):
         if len(selected_rows) < 2:
             self.log("请在 Surface Inspection 列表中选中至少 2 个面。")
             return
+        if not self.current_geo:
+            return
+
         from itertools import combinations
-        pairs = list(combinations(selected_rows, 2))
-        added = self._ptd_add_pairs(pairs)
-        skipped = len(pairs) - added
-        msg = f"已添加 {added} 个面对"
-        if skipped:
-            msg += f"，跳过 {skipped} 个重复"
-        self.log(msg)
+        from solvers.ptd_edge_finder import faces_share_edge
+
+        sharing, no_edge, duplicate = [], [], []
+        for a, b in combinations(selected_rows, 2):
+            if a >= len(self.current_geo) or b >= len(self.current_geo):
+                continue
+            key = (min(a, b), max(a, b))
+            if key in self._ptd_existing_pairs():
+                duplicate.append(key)
+                continue
+            if faces_share_edge(self.current_geo[a], self.current_geo[b]):
+                sharing.append(key)
+            else:
+                no_edge.append(key)
+
+        added = self._ptd_add_pairs(sharing)
+        parts = [f"已添加 {added} 个面对"]
+        if duplicate:
+            parts.append(f"跳过 {len(duplicate)} 个重复")
+        if no_edge:
+            no_edge_str = ", ".join(f"({a},{b})" for a, b in no_edge)
+            parts.append(f"无共享边跳过: {no_edge_str}")
+        self.log("；".join(parts))
 
     def _on_ptd_edges_manual_add(self):
         """手动输入框按 Enter 时解析并添加面对。"""
@@ -649,10 +698,104 @@ class CEMPoQtWindow(QMainWindow):
         self.log(msg)
         self.ptd_edges.clear()
 
+    def _on_ptd_pairs_add_from_selection(self):
+        """Add 按钮：将 3D 视图中高亮的面的公共边添加到 PTD 列表。"""
+        selected = sorted(self._highlighted_indices)
+        if len(selected) < 2:
+            self.log("请先在 3D 视图或面列表中选中至少 2 个面。")
+            return
+        if not self.current_geo:
+            return
+        from itertools import combinations
+        from solvers.ptd_edge_finder import faces_share_edge
+        sharing, no_edge, duplicate = [], [], []
+        for a, b in combinations(selected, 2):
+            if a >= len(self.current_geo) or b >= len(self.current_geo):
+                continue
+            key = (min(a, b), max(a, b))
+            if key in self._ptd_existing_pairs():
+                duplicate.append(key)
+                continue
+            if faces_share_edge(self.current_geo[a], self.current_geo[b]):
+                sharing.append(key)
+            else:
+                no_edge.append(key)
+        added = self._ptd_add_pairs(sharing)
+        parts = [f"已添加 {added} 个面对"]
+        if duplicate:
+            parts.append(f"跳过 {len(duplicate)} 个重复")
+        if no_edge:
+            parts.append(f"无共享边跳过: {', '.join(f'({a},{b})' for a,b in no_edge)}")
+        self.log("；".join(parts))
+
     def _on_ptd_pairs_remove(self):
-        """删除 ptd_pairs_list 中选中的条目。"""
-        for item in self.ptd_pairs_list.selectedItems():
-            self.ptd_pairs_list.takeItem(self.ptd_pairs_list.row(item))
+        """Remove 按钮：
+        - 若 PTD 列表有选中条目，删除它们；
+        - 否则，删除列表中所有属于当前 3D 多选面的公共边。
+        """
+        list_selected_rows = sorted(
+            {self.ptd_pairs_list.row(item) for item in self.ptd_pairs_list.selectedItems()},
+            reverse=True
+        )
+        if list_selected_rows:
+            for row in list_selected_rows:
+                self.ptd_pairs_list.takeItem(row)
+            return
+
+        # 无列表选中 → 按 3D 视图选中面计算公共边后删除
+        selected = sorted(self._highlighted_indices)
+        if len(selected) < 2 or not self.current_geo:
+            return
+        from itertools import combinations
+        keys_to_remove = {
+            (min(a, b), max(a, b))
+            for a, b in combinations(selected, 2)
+            if a < len(self.current_geo) and b < len(self.current_geo)
+        }
+        # 逆序删除匹配的行
+        rows = []
+        for i in range(self.ptd_pairs_list.count()):
+            import re
+            m = re.match(r'\((\d+),\s*(\d+)\)', self.ptd_pairs_list.item(i).text())
+            if m:
+                key = (min(int(m.group(1)), int(m.group(2))),
+                       max(int(m.group(1)), int(m.group(2))))
+                if key in keys_to_remove:
+                    rows.append(i)
+        for row in sorted(rows, reverse=True):
+            self.ptd_pairs_list.takeItem(row)
+
+    def _on_ptd_pair_dblclick(self, item):
+        """双击 PTD 面对条目：高亮对应棱边（再次双击同一条目取消高亮）。"""
+        import re
+        text = item.text()
+        # 切换逻辑：已高亮则取消
+        if self._ptd_highlighted_pair == text:
+            self._ptd_highlighted_pair = None
+            self.on_preview()
+            return
+        m = re.match(r'\((\d+),\s*(\d+)\)', text)
+        if not m or not self.current_geo:
+            return
+        a, b = int(m.group(1)), int(m.group(2))
+        if a >= len(self.current_geo) or b >= len(self.current_geo):
+            return
+        try:
+            from solvers.ptd_edge_finder import find_shared_edge
+            edge_pts, normals_a, normals_b, ext_angle = find_shared_edge(
+                self.current_geo[a], self.current_geo[b], n_samples=120)
+            self._ptd_highlighted_pair = text
+            self._highlight_surfaces_3d({a, b})
+            line = pv.MultipleLines(points=edge_pts)
+            self.plotter.add_mesh(line, color='red', line_width=5)
+            mid = edge_pts[len(edge_pts) // 2].reshape(1, 3)
+            self.plotter.add_point_labels(
+                pv.PolyData(mid),
+                [f"({a},{b})  α={np.degrees(ext_angle):.0f}°"],
+                font_size=9, text_color='red', always_visible=True, shape_opacity=0.0)
+            self.plotter.render()
+        except Exception as e:
+            self.log(f"<font color='orange'>高亮棱边失败: {e}</font>")
 
     def _get_ptd_pairs_str(self):
         """将 ptd_pairs_list 内容拼接为 '(a,b);(c,d)' 字符串。"""
@@ -682,6 +825,7 @@ class CEMPoQtWindow(QMainWindow):
                     pass
 
     def update_geo_inputs(self, gtype):
+        self._ptd_auto_fill = True  # 切换几何类型视为重建，允许重新自动填充
         # Cache current widget values before destroying them
         self._cache_dynamic_inputs()
 
@@ -968,18 +1112,15 @@ class CEMPoQtWindow(QMainWindow):
             # Handle Wedge/Brick/InfiniteWedge which return (surfaces, ptd_id) tuple
             if isinstance(result, tuple):
                 geo_list, ptd_id = result
-                # Auto-fill PTD face pairs if PTD is already enabled
-                if ptd_id and self.chk_ptd_enabled.isChecked():
+                if self._ptd_auto_fill and ptd_id:
                     import re as _re
                     pairs = [(int(a), int(b)) for a, b in _re.findall(r'(\d+)\s*,\s*(\d+)', ptd_id)]
+                    if gtype == "Infinite Wedge":
+                        # Infinite Wedge 始终重置为固定的一对
+                        self.chk_ptd_enabled.setChecked(True)
+                        self.ptd_pairs_list.clear()
                     self._ptd_add_pairs(pairs)
-                # Infinite Wedge: auto-enable PTD and fill face pairs
-                if gtype == "Infinite Wedge" and ptd_id:
-                    self.chk_ptd_enabled.setChecked(True)
-                    self.ptd_pairs_list.clear()
-                    import re as _re
-                    pairs = [(int(a), int(b)) for a, b in _re.findall(r'(\d+)\s*,\s*(\d+)', ptd_id)]
-                    self._ptd_add_pairs(pairs)
+                self._ptd_auto_fill = False  # 消耗后重置，避免 checkbox 刷新时重复填充
             else:
                 geo_list = result
 
@@ -994,7 +1135,8 @@ class CEMPoQtWindow(QMainWindow):
             self.plotter.clear()
             self._surface_actors = []
             self._actor_to_surface_idx = {}
-            self._highlighted_idx = -1
+            self._ptd_highlighted_pair = None  # 视图重建，重置 PTD 高亮状态
+            self._highlighted_indices = set()
 
             # 1. Visualize Surface
             for i, surface in enumerate(geo_list):
@@ -1484,6 +1626,7 @@ class CEMPoQtWindow(QMainWindow):
             self.log(f"<font color='red'>Export Failed: {e}</font>")
 
     def on_build_geometry(self):
+        self._ptd_auto_fill = True
         self.on_preview()
 
     def update_surface_list(self):
@@ -1507,53 +1650,75 @@ class CEMPoQtWindow(QMainWindow):
             print(f"  Warning: 3D picking not available: {e}")
 
     def _on_3d_click(self, click_pos):
-        """Callback from 3D viewport click — pick the surface under cursor."""
+        """Callback from 3D viewport click — pick the surface under cursor.
+        Ctrl+click toggles the surface into/out of the current selection.
+        """
         if not self._actor_to_surface_idx:
             return
         from vtkmodules.vtkRenderingCore import vtkCellPicker
+        from PySide6.QtWidgets import QApplication
         picker = vtkCellPicker()
         picker.SetTolerance(0.005)
         picker.Pick(click_pos[0], click_pos[1], 0, self.plotter.renderer)
         picked_actor = picker.GetActor()
-        if picked_actor in self._actor_to_surface_idx:
-            idx = self._actor_to_surface_idx[picked_actor]
-            self._highlight_surface_3d(idx)
-
-    def _highlight_surface_3d(self, idx):
-        """Highlight one surface in the all-surfaces view, sync list selection."""
-        if idx < 0 or idx >= len(self._surface_actors):
+        if picked_actor not in self._actor_to_surface_idx:
             return
+        idx = self._actor_to_surface_idx[picked_actor]
+        ctrl_held = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+        if ctrl_held:
+            new_sel = set(self._highlighted_indices)
+            if idx in new_sel:
+                new_sel.discard(idx)
+            else:
+                new_sel.add(idx)
+            self._highlight_surfaces_3d(new_sel)
+        else:
+            self._highlight_surfaces_3d({idx})
 
-        # Update actor colours: selected = orange, others = lightblue
+    def _highlight_surfaces_3d(self, indices):
+        """Highlight a set of surfaces in the all-surfaces view, sync list selection."""
+        indices = {i for i in indices if 0 <= i < len(self._surface_actors)}
         for i, actor in enumerate(self._surface_actors):
             prop = actor.GetProperty()
-            if i == idx:
+            if i in indices:
                 prop.SetColor(1.0, 0.65, 0.0)   # orange
                 prop.SetOpacity(0.9)
             else:
                 prop.SetColor(0.68, 0.85, 0.9)   # lightblue
                 prop.SetOpacity(0.6)
         self.plotter.render()
-        self._highlighted_idx = idx
+        self._highlighted_indices = indices
 
-        # Sync QListWidget (block signal to avoid loop)
+        # Sync QListWidget
         self.surface_list.blockSignals(True)
-        self.surface_list.setCurrentRow(idx)
+        self.surface_list.clearSelection()
+        for i in indices:
+            item = self.surface_list.item(i)
+            if item:
+                item.setSelected(True)
         self.surface_list.blockSignals(False)
 
-        # Update invert checkbox
-        if self.current_geo and idx < len(self.current_geo):
-            surf = self.current_geo[idx]
-            self.chk_surf_invert.blockSignals(True)
-            self.chk_surf_invert.setEnabled(True)
-            self.chk_surf_invert.setChecked(getattr(surf, 'invert_normal', False))
-            self.chk_surf_invert.blockSignals(False)
+        # Update invert checkbox (only when exactly one surface selected)
+        if len(indices) == 1 and self.current_geo:
+            idx = next(iter(indices))
+            if idx < len(self.current_geo):
+                surf = self.current_geo[idx]
+                self.chk_surf_invert.blockSignals(True)
+                self.chk_surf_invert.setEnabled(True)
+                self.chk_surf_invert.setChecked(getattr(surf, 'invert_normal', False))
+                self.chk_surf_invert.blockSignals(False)
+        else:
+            self.chk_surf_invert.setEnabled(False)
+
+    def _highlight_surface_3d(self, idx):
+        """Highlight a single surface (convenience wrapper)."""
+        self._highlight_surfaces_3d({idx})
 
     def on_surface_clicked(self, item):
-        """Single click in list — highlight in 3D (if actors available)."""
-        idx = self.surface_list.row(item)
+        """Single click in list — highlight all selected surfaces in 3D."""
         if self._surface_actors:
-            self._highlight_surface_3d(idx)
+            selected = {self.surface_list.row(i) for i in self.surface_list.selectedItems()}
+            self._highlight_surfaces_3d(selected)
         else:
             self.on_surface_selected(item)
 
@@ -1573,7 +1738,7 @@ class CEMPoQtWindow(QMainWindow):
         self.plotter.clear()
         self._surface_actors = []
         self._actor_to_surface_idx = {}
-        self._highlighted_idx = -1
+        self._highlighted_indices = set()
         
         # Surface
         points, faces = self.tessellate_surface(surf, resolution=40)
