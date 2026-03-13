@@ -217,20 +217,25 @@ class CEMPoQtWindow(QMainWindow):
         group_surf = QGroupBox("Surface Inspection")
         l_surf = QVBoxLayout()
         self.surface_list = QListWidget()
-        self.surface_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.surface_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.surface_list.itemClicked.connect(self.on_surface_clicked)
         self.surface_list.itemDoubleClicked.connect(self.on_surface_selected)
         l_surf.addWidget(self.surface_list)
-        
+
         h_ops = QHBoxLayout()
         self.chk_surf_invert = QCheckBox("Invert Normal")
         self.chk_surf_invert.toggled.connect(self.on_invert_surface_toggled)
         self.chk_surf_invert.setEnabled(False)
         h_ops.addWidget(self.chk_surf_invert)
-        
+
         self.btn_show_all = QPushButton("Show All")
         self.btn_show_all.clicked.connect(self.on_show_all_surfaces)
         h_ops.addWidget(self.btn_show_all)
+
+        self.btn_add_ptd_pair = QPushButton("Add to PTD Pairs")
+        self.btn_add_ptd_pair.clicked.connect(self.on_add_ptd_pairs)
+        self.btn_add_ptd_pair.setToolTip("Select 2+ surfaces, then click to add all adjacent pairs to PTD Face Pairs list")
+        h_ops.addWidget(self.btn_add_ptd_pair)
         l_surf.addLayout(h_ops)
         
         # View Controls
@@ -242,7 +247,7 @@ class CEMPoQtWindow(QMainWindow):
         # 勾选时始终刷新全模型视图，不触发单面模式
         self.chk_show_normals.stateChanged.connect(self.on_preview)
         self.chk_show_ptd_edges.stateChanged.connect(self.on_preview)
-        self.chk_show_wave.stateChanged.connect(self.on_preview)
+        self.chk_show_wave.stateChanged.connect(self._sync_show_wave_from_model)
 
         h_view.addWidget(self.chk_show_normals)
         h_view.addWidget(self.chk_show_ptd_edges)
@@ -324,7 +329,11 @@ class CEMPoQtWindow(QMainWindow):
         h_phi.addWidget(self.phi_end)
         h_phi.addWidget(self.phi_n)
         l_scan.addRow("Phi (Start/End/N):", h_phi)
-        
+
+        self.chk_show_wave_solver = QCheckBox("Show Inc. Wave")
+        self.chk_show_wave_solver.stateChanged.connect(self._sync_show_wave_from_solver)
+        l_scan.addRow(self.chk_show_wave_solver)
+
         group_scan.setLayout(l_scan)
         layout_solver.addWidget(group_scan)
 
@@ -336,9 +345,25 @@ class CEMPoQtWindow(QMainWindow):
         self.chk_ptd_enabled.setChecked(False)
         l_ptd.addRow(self.chk_ptd_enabled)
 
+        self.ptd_pairs_list = QListWidget()
+        self.ptd_pairs_list.setFixedHeight(80)
+        self.ptd_pairs_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.ptd_pairs_list.setToolTip("Face pairs for PTD edge extraction. Use 'Add to PTD Pairs' in Model tab.")
+        l_ptd.addRow("Face Pairs:", self.ptd_pairs_list)
+
+        h_ptd_btns = QHBoxLayout()
         self.ptd_edges = QLineEdit("")
-        self.ptd_edges.setPlaceholderText("e.g. (0,1) or (0,1);(1,2)")
-        l_ptd.addRow("Face Pairs:", self.ptd_edges)
+        self.ptd_edges.setPlaceholderText("manual: (0,1);(1,2)")
+        self.ptd_edges.setToolTip("Manually type pairs then press Enter to add")
+        self.ptd_edges.returnPressed.connect(self._on_ptd_edges_manual_add)
+        h_ptd_btns.addWidget(self.ptd_edges)
+        btn_ptd_remove = QPushButton("Remove")
+        btn_ptd_remove.clicked.connect(self._on_ptd_pairs_remove)
+        h_ptd_btns.addWidget(btn_ptd_remove)
+        btn_ptd_clear = QPushButton("Clear All")
+        btn_ptd_clear.clicked.connect(self.ptd_pairs_list.clear)
+        h_ptd_btns.addWidget(btn_ptd_clear)
+        l_ptd.addRow(h_ptd_btns)
 
         self.ptd_pol = QComboBox()
         self.ptd_pol.addItems(["VV", "HH"])
@@ -517,7 +542,7 @@ class CEMPoQtWindow(QMainWindow):
                     "workers": int(self.cpu_workers.text()),
                     "ptd": {
                         "enabled": self.chk_ptd_enabled.isChecked(),
-                        "edges": self.ptd_edges.text().strip(),
+                        "edges": self._get_ptd_pairs_str(),
                     }
                 },
                 "scan": {
@@ -547,6 +572,94 @@ class CEMPoQtWindow(QMainWindow):
         except Exception as e:
             self.log(f"<font color='red'>Export failed: {e}</font>")
             traceback.print_exc()
+
+    def _sync_show_wave_from_solver(self, state):
+        """Solver 栏的 Show Inc. Wave checkbox 与 Model 栏保持同步。"""
+        self.chk_show_wave.blockSignals(True)
+        self.chk_show_wave.setChecked(state == Qt.Checked)
+        self.chk_show_wave.blockSignals(False)
+        self.on_preview()
+
+    def _sync_show_wave_from_model(self, state):
+        """Model 栏的 Inc. Wave checkbox 与 Solver 栏保持同步。"""
+        self.chk_show_wave_solver.blockSignals(True)
+        self.chk_show_wave_solver.setChecked(state == Qt.Checked)
+        self.chk_show_wave_solver.blockSignals(False)
+        self.on_preview()
+
+    # ── PTD Face Pairs helpers ──────────────────────────────────────────────
+
+    def _ptd_existing_pairs(self):
+        """返回已添加的面对集合，元素为 (min, max) tuple。"""
+        pairs = set()
+        for i in range(self.ptd_pairs_list.count()):
+            text = self.ptd_pairs_list.item(i).text()   # "(a,b)"
+            import re
+            m = re.match(r'\((\d+),\s*(\d+)\)', text)
+            if m:
+                pairs.add((int(m.group(1)), int(m.group(2))))
+        return pairs
+
+    def _ptd_add_pairs(self, pairs):
+        """将面对列表添加到 ptd_pairs_list，跳过重复项，返回新增数量。"""
+        existing = self._ptd_existing_pairs()
+        added = 0
+        for a, b in pairs:
+            key = (min(a, b), max(a, b))
+            if key not in existing:
+                self.ptd_pairs_list.addItem(f"({key[0]},{key[1]})")
+                existing.add(key)
+                added += 1
+        return added
+
+    def on_add_ptd_pairs(self):
+        """将 surface_list 中选中的面的所有相邻对添加到 PTD Face Pairs。"""
+        selected_rows = sorted(
+            self.surface_list.row(item)
+            for item in self.surface_list.selectedItems()
+        )
+        if len(selected_rows) < 2:
+            self.log("请在 Surface Inspection 列表中选中至少 2 个面。")
+            return
+        from itertools import combinations
+        pairs = list(combinations(selected_rows, 2))
+        added = self._ptd_add_pairs(pairs)
+        skipped = len(pairs) - added
+        msg = f"已添加 {added} 个面对"
+        if skipped:
+            msg += f"，跳过 {skipped} 个重复"
+        self.log(msg)
+
+    def _on_ptd_edges_manual_add(self):
+        """手动输入框按 Enter 时解析并添加面对。"""
+        import re
+        text = self.ptd_edges.text().strip()
+        if not text:
+            return
+        raw_pairs = re.findall(r'(\d+)\s*,\s*(\d+)', text)
+        if not raw_pairs:
+            self.log("格式错误，请使用 (0,1);(1,2) 格式")
+            return
+        pairs = [(int(a), int(b)) for a, b in raw_pairs]
+        added = self._ptd_add_pairs(pairs)
+        skipped = len(pairs) - added
+        msg = f"已添加 {added} 个面对"
+        if skipped:
+            msg += f"，跳过 {skipped} 个重复"
+        self.log(msg)
+        self.ptd_edges.clear()
+
+    def _on_ptd_pairs_remove(self):
+        """删除 ptd_pairs_list 中选中的条目。"""
+        for item in self.ptd_pairs_list.selectedItems():
+            self.ptd_pairs_list.takeItem(self.ptd_pairs_list.row(item))
+
+    def _get_ptd_pairs_str(self):
+        """将 ptd_pairs_list 内容拼接为 '(a,b);(c,d)' 字符串。"""
+        return ";".join(
+            self.ptd_pairs_list.item(i).text()
+            for i in range(self.ptd_pairs_list.count())
+        )
 
     def _cache_dynamic_inputs(self):
         """Save current dynamic widget values before they are destroyed."""
@@ -857,11 +970,16 @@ class CEMPoQtWindow(QMainWindow):
                 geo_list, ptd_id = result
                 # Auto-fill PTD face pairs if PTD is already enabled
                 if ptd_id and self.chk_ptd_enabled.isChecked():
-                    self.ptd_edges.setText(ptd_id)
+                    import re as _re
+                    pairs = [(int(a), int(b)) for a, b in _re.findall(r'(\d+)\s*,\s*(\d+)', ptd_id)]
+                    self._ptd_add_pairs(pairs)
                 # Infinite Wedge: auto-enable PTD and fill face pairs
                 if gtype == "Infinite Wedge" and ptd_id:
                     self.chk_ptd_enabled.setChecked(True)
-                    self.ptd_edges.setText(ptd_id)
+                    self.ptd_pairs_list.clear()
+                    import re as _re
+                    pairs = [(int(a), int(b)) for a, b in _re.findall(r'(\d+)\s*,\s*(\d+)', ptd_id)]
+                    self._ptd_add_pairs(pairs)
             else:
                 geo_list = result
 
@@ -905,7 +1023,7 @@ class CEMPoQtWindow(QMainWindow):
 
             # 3. Visualize PTD Edges (face-pair format)
             if self.chk_show_ptd_edges.isChecked():
-                raw_ptd = self.ptd_edges.text().strip()
+                raw_ptd = self._get_ptd_pairs_str()
                 if raw_ptd:
                     try:
                         from solvers.ptd_edge_finder import find_shared_edge
@@ -1179,7 +1297,7 @@ class CEMPoQtWindow(QMainWindow):
 
         try:
             # PTD face pairs (passed as raw string for downstream parsing)
-            ptd_edges_str = self.ptd_edges.text().strip()
+            ptd_edges_str = self._get_ptd_pairs_str()
 
             params = {
                 'frequency': float(self.freq_input.text()) * 1e6,

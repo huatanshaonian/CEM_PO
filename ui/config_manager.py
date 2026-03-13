@@ -64,7 +64,7 @@ def save_config(window):
             "phi_n":       window.phi_n.text(),
 
             "ptd_enabled":      window.chk_ptd_enabled.isChecked(),
-            "ptd_edges":        window.ptd_edges.text(),
+            "ptd_edges":        window._get_ptd_pairs_str(),
             "ptd_pol":          window.ptd_pol.currentText(),
 
             "use_gpu":      window.use_gpu.isChecked(),
@@ -148,7 +148,12 @@ def load_config(window):
         window.phi_n.setText(str(cfg.get("phi_n", "1")))
 
         window.chk_ptd_enabled.setChecked(cfg.get("ptd_enabled", False))
-        window.ptd_edges.setText(cfg.get("ptd_edges", ""))
+        import re as _re
+        saved_pairs = cfg.get("ptd_edges", "")
+        window.ptd_pairs_list.clear()
+        if saved_pairs:
+            pairs = [(int(a), int(b)) for a, b in _re.findall(r'(\d+)\s*,\s*(\d+)', saved_pairs)]
+            window._ptd_add_pairs(pairs)
         window.ptd_pol.setCurrentText(cfg.get("ptd_pol", "VV"))
 
         window.use_gpu.setChecked(cfg.get("use_gpu", False))
