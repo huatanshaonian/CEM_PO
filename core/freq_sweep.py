@@ -7,7 +7,7 @@ PTD 频扫：预算衍射系数和几何量，向量化处理。
 """
 
 import numpy as np
-from scipy.signal import chebwin
+from scipy.signal.windows import chebwin
 from physics.constants import C0
 from core.env import HAS_GPU, cp
 
