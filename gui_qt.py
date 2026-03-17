@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QDockWidget, QWidget,
                                QCheckBox, QPushButton, QTextEdit, QLabel, QProgressBar,
                                QSplitter, QFrame, QGroupBox, QScrollArea, QFileDialog, QTabWidget,
                                QListWidget, QAbstractItemView, QListWidgetItem,
-                               QDoubleSpinBox)
+                               QDoubleSpinBox, QSizePolicy)
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize
 from PySide6.QtGui import QAction, QIcon, QFont, QColor, QPalette
 
@@ -160,7 +160,6 @@ class CEMPoQtWindow(QMainWindow):
         comp_layout.addWidget(self.comp_canvas)
         
         self.tabs.addTab(self.comp_frame, "RCS Patterns")
-
         # Tab 4: Radar Imaging
         self.imaging_frame = QWidget()
         imaging_layout = QVBoxLayout(self.imaging_frame)
@@ -169,13 +168,17 @@ class CEMPoQtWindow(QMainWindow):
         self.imaging_toolbar = NavigationToolbar(self.imaging_canvas, self.imaging_frame)
         imaging_layout.addWidget(self.imaging_toolbar)
         imaging_layout.addWidget(self.imaging_canvas)
-        # Export button
+        # Export buttons
         img_export_layout = QHBoxLayout()
         img_export_layout.addStretch()
-        self.btn_export_imaging = QPushButton("Export Range Profile CSV")
-        self.btn_export_imaging.clicked.connect(self.export_range_profile_csv)
-        self.btn_export_imaging.setStyleSheet("background-color: #4CAF50; color: white; border: 1px solid #388E3C;")
-        img_export_layout.addWidget(self.btn_export_imaging)
+        self.btn_export_rcs_csv = QPushButton("Export RCS CSV")
+        self.btn_export_rcs_csv.clicked.connect(self.export_freq_sweep_rcs_csv)
+        self.btn_export_rcs_csv.setStyleSheet("background-color: #2196F3; color: white; border: 1px solid #1565C0;")
+        img_export_layout.addWidget(self.btn_export_rcs_csv)
+        self.btn_export_range_csv = QPushButton("Export Range Profile CSV")
+        self.btn_export_range_csv.clicked.connect(self.export_range_profile_csv)
+        self.btn_export_range_csv.setStyleSheet("background-color: #4CAF50; color: white; border: 1px solid #388E3C;")
+        img_export_layout.addWidget(self.btn_export_range_csv)
         imaging_layout.addLayout(img_export_layout)
         self.tabs.addTab(self.imaging_frame, "Radar Imaging")
 
@@ -539,6 +542,13 @@ class CEMPoQtWindow(QMainWindow):
         self.spin_slice_angle.valueChanged.connect(self._comp_mgr.update_comparison_plot)
         h_angle.addWidget(self.spin_slice_angle)
         l_mode.addLayout(h_angle)
+        h_freq = QHBoxLayout()
+        h_freq.addWidget(QLabel("Freq slice (MHz):"))
+        self.combo_slice_freq = QComboBox()
+        self.combo_slice_freq.setEnabled(False)
+        self.combo_slice_freq.currentTextChanged.connect(self._comp_mgr.update_comparison_plot)
+        h_freq.addWidget(self.combo_slice_freq)
+        l_mode.addLayout(h_freq)
         group_mode.setLayout(l_mode)
         layout_comp.addWidget(group_mode)
 
@@ -642,8 +652,12 @@ class CEMPoQtWindow(QMainWindow):
         l_img.setSpacing(4)
 
         self.img_window = QComboBox()
-        self.img_window.addItems(["hamming", "hanning", "blackman", "rectangular"])
+        self.img_window.addItems(["hamming", "hanning", "blackman", "chebyshev", "rectangular"])
         l_img.addRow("Window:", self.img_window)
+
+        self.img_cheby_at = QLineEdit("40")
+        self.img_cheby_at.setPlaceholderText("sidelobe attenuation dB")
+        l_img.addRow("Sidelobe (dB):", self.img_cheby_at)
 
         self.img_zeropad = QLineEdit("4")
         l_img.addRow("Zero Pad:", self.img_zeropad)
@@ -664,15 +678,22 @@ class CEMPoQtWindow(QMainWindow):
         self.img_range_limit.setPlaceholderText("leave blank = auto")
         l_img.addRow("Display Range (m):", self.img_range_limit)
 
+        btn_refresh = QPushButton("Refresh Plot")
+        btn_refresh.clicked.connect(self._plot_selected_imaging)
+        l_img.addRow("", btn_refresh)
+
         group_img.setLayout(l_img)
         layout_imaging.addWidget(group_img)
 
         # Dataset selector
         group_ds = QGroupBox("Dataset")
+        group_ds.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         l_ds = QVBoxLayout()
         l_ds.setSpacing(4)
+        l_ds.setContentsMargins(6, 4, 6, 6)
         self.imaging_ds_list = QListWidget()
-        self.imaging_ds_list.setMaximumHeight(100)
+        self.imaging_ds_list.setMaximumHeight(80)
+        self.imaging_ds_list.setMinimumHeight(56)
         self.imaging_ds_list.addItem("(Current Simulation)")
         self.imaging_ds_list.setCurrentRow(0)
         l_ds.addWidget(self.imaging_ds_list)
@@ -2060,6 +2081,7 @@ class CEMPoQtWindow(QMainWindow):
                 'f_step':       float(self.fsweep_step.text()),
                 'window':       self.img_window.currentText(),
                 'zero_pad':     int(self.img_zeropad.text()),
+                'cheby_at':     float(self.img_cheby_at.text() or '40'),
                 'polarization': self.ptd_pol.currentText(),
             }
         except Exception as e:
@@ -2299,8 +2321,94 @@ class CEMPoQtWindow(QMainWindow):
         self.plot_radar_imaging(result)
         self.tabs.setCurrentIndex(3)
 
+    def export_freq_sweep_rcs_csv(self):
+        """导出频扫 RCS 为长格式 CSV（列名与角扫 CSV 兼容，末列为 Frequency (MHz)）。"""
+        if not self.last_freq_sweep_result:
+            self.log("<font color='orange'>No freq sweep results to export.</font>")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Freq Sweep RCS CSV", "", "CSV Files (*.csv)"
+        )
+        if not path:
+            return
+
+        try:
+            res       = self.last_freq_sweep_result
+            freqs     = res['frequencies']           # (Nf,) Hz
+            theta_deg = res['theta_deg']             # (n_theta,)
+            phi_deg   = res['phi_deg']               # (n_phi,)
+            scan_mode = res.get('scan_mode', '1d')
+            fsp       = res.get('freq_sweep_params') or {}
+            params    = res.get('params') or {}
+            ptd_p     = params.get('ptd', {})
+            ang_p     = params.get('angles', {})
+
+            rcs_mat   = np.atleast_2d(res['rcs_matrix'])        # (N_angles, Nf)
+            I_total   = np.atleast_2d(res['I_total_matrix'])    # (N_angles, Nf)
+            I_po_raw  = res.get('I_po_matrix')
+            I_ptd_raw = res.get('I_ptd_matrix')
+            has_po    = I_po_raw is not None
+            has_ptd   = I_ptd_raw is not None
+
+            rcs_po_mat = rcs_ptd_mat = None
+            k_arr = 2.0 * np.pi * freqs / 299792458.0   # (Nf,)
+            if has_po:
+                I_po_mat = np.atleast_2d(I_po_raw)
+                sigma_po = (k_arr[np.newaxis, :] ** 2 / np.pi) * np.abs(I_po_mat) ** 2
+                rcs_po_mat = 10.0 * np.log10(np.maximum(sigma_po, 1e-30))
+            if has_ptd:
+                I_ptd_mat = np.atleast_2d(I_ptd_raw)
+                sigma_ptd = (k_arr[np.newaxis, :] ** 2 / np.pi) * np.abs(I_ptd_mat) ** 2
+                rcs_ptd_mat = 10.0 * np.log10(np.maximum(sigma_ptd, 1e-30))
+
+            # angle_list mirrors run_freq_sweep: outer theta, inner phi
+            angle_list = [(th, ph) for th in theta_deg for ph in phi_deg]
+
+            with open(path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["# CEM PO Solver – Frequency Sweep RCS Results"])
+                writer.writerow(["# Algorithm",          params.get('algorithm', '')])
+                writer.writerow(["# Polarization",       fsp.get('polarization', '')])
+                writer.writerow(["# PTD Enabled",        ptd_p.get('enabled', False)])
+                writer.writerow(["# PTD Edges",          ptd_p.get('edges', '')])
+                writer.writerow(["# Freq Start (MHz)",   fsp.get('f_start', '')])
+                writer.writerow(["# Freq End (MHz)",     fsp.get('f_end', '')])
+                writer.writerow(["# Freq Step (MHz)",    fsp.get('f_step', '')])
+                writer.writerow(["# Theta Start (deg)",  ang_p.get('theta_start', '')])
+                writer.writerow(["# Theta End (deg)",    ang_p.get('theta_end', '')])
+                writer.writerow(["# N Theta",            ang_p.get('n_theta', '')])
+                writer.writerow(["# Phi Start (deg)",    ang_p.get('phi_start', '')])
+                writer.writerow(["# Phi End (deg)",      ang_p.get('phi_end', '')])
+                writer.writerow(["# N Phi",              ang_p.get('n_phi', '')])
+                writer.writerow(["# Scan Mode",          scan_mode])
+                writer.writerow(["# Elapsed Time (s)",   f"{res.get('elapsed_time', 0):.3f}"])
+                writer.writerow([])
+
+                header = ["Theta (deg)", "Phi (deg)", "RCS Total (dBsm)"]
+                if has_po:
+                    header.append("RCS PO (dBsm)")
+                if has_ptd:
+                    header.append("RCS PTD (dBsm)")
+                header += ["I Total (Re)", "I Total (Im)", "Frequency (MHz)"]
+                writer.writerow(header)
+
+                for i, (th, ph) in enumerate(angle_list):
+                    for j, freq_hz in enumerate(freqs):
+                        row = [th, ph, rcs_mat[i, j]]
+                        if has_po:
+                            row.append(rcs_po_mat[i, j])
+                        if has_ptd:
+                            row.append(rcs_ptd_mat[i, j])
+                        row += [I_total[i, j].real, I_total[i, j].imag, freq_hz / 1e6]
+                        writer.writerow(row)
+
+            self.log(f"Freq sweep RCS exported: {path}")
+        except Exception as e:
+            self.log(f"Export error: {e}")
+
     def export_range_profile_csv(self):
-        """导出频域和距离域数据到 CSV。"""
+        """导出距离像数据到 CSV（不含频域原始数据）。"""
         if not self.last_freq_sweep_result:
             self.log("<font color='orange'>No freq sweep results to export.</font>")
             return
@@ -2312,72 +2420,45 @@ class CEMPoQtWindow(QMainWindow):
             return
 
         try:
-            res = self.last_freq_sweep_result
-            freqs = res['frequencies']
-            range_axis = res['range_axis']
-            rcs_mat = np.atleast_2d(res['rcs_matrix'])
+            res         = self.last_freq_sweep_result
+            range_axis  = res['range_axis']
             profile_mat = np.atleast_2d(res['profile_matrix'])
-            I_total = np.atleast_2d(res['I_total_matrix'])
+            stats       = res.get('stats') or {}
+            fsp         = res.get('freq_sweep_params') or {}
+            params      = res.get('params') or {}
+            ang_p       = params.get('angles', {})
+            scan_mode   = res.get('scan_mode', '1d')
 
             with open(path, 'w', newline='') as f:
                 writer = csv.writer(f)
-                stats   = res.get('stats') or {}
-                fsp     = res.get('freq_sweep_params') or {}
-                params  = res.get('params') or {}
-                ptd_p   = params.get('ptd', {})
-                ang_p   = params.get('angles', {})
-
-                writer.writerow(["# CEM PO Solver – Frequency Sweep Results"])
-                writer.writerow(["# Algorithm",          params.get('algorithm', '')])
-                writer.writerow(["# Polarization",       fsp.get('polarization', '')])
-                writer.writerow(["# PTD Enabled",        ptd_p.get('enabled', False)])
-                writer.writerow(["# PTD Edges",          ptd_p.get('edges', '')])
-                writer.writerow(["# Freq Start (MHz)",   fsp.get('f_start', '')])
-                writer.writerow(["# Freq End (MHz)",     fsp.get('f_end', '')])
-                writer.writerow(["# Freq Step (MHz)",    fsp.get('f_step', '')])
-                writer.writerow(["# N Freqs",            stats.get('n_freqs', '')])
-                writer.writerow(["# Bandwidth (MHz)",    stats.get('bandwidth_mhz', '')])
+                writer.writerow(["# CEM PO Solver – Range Profile Results"])
+                writer.writerow(["# Window",               fsp.get('window', '')])
+                writer.writerow(["# Zero Pad",             fsp.get('zero_pad', '')])
                 writer.writerow(["# Range Resolution (m)", stats.get('range_resolution_m', '')])
-                writer.writerow(["# Max Range (m)",      stats.get('max_range_m', '')])
-                writer.writerow(["# Window",             fsp.get('window', '')])
-                writer.writerow(["# Zero Pad",           fsp.get('zero_pad', '')])
-                writer.writerow(["# Theta Start (deg)",  ang_p.get('theta_start', '')])
-                writer.writerow(["# Theta End (deg)",    ang_p.get('theta_end', '')])
-                writer.writerow(["# N Theta",            ang_p.get('n_theta', '')])
-                writer.writerow(["# Phi Start (deg)",    ang_p.get('phi_start', '')])
-                writer.writerow(["# Phi End (deg)",      ang_p.get('phi_end', '')])
-                writer.writerow(["# N Phi",              ang_p.get('n_phi', '')])
-                writer.writerow(["# Scan Mode",          res.get('scan_mode', '')])
-                writer.writerow(["# Elapsed Time (s)",   f"{res.get('elapsed_time', 0):.3f}"])
+                writer.writerow(["# Max Range (m)",        stats.get('max_range_m', '')])
+                writer.writerow(["# Bandwidth (MHz)",      stats.get('bandwidth_mhz', '')])
+                writer.writerow(["# Freq Start (MHz)",     fsp.get('f_start', '')])
+                writer.writerow(["# Freq End (MHz)",       fsp.get('f_end', '')])
+                writer.writerow(["# Theta Start (deg)",    ang_p.get('theta_start', '')])
+                writer.writerow(["# Theta End (deg)",      ang_p.get('theta_end', '')])
+                writer.writerow(["# N Theta",              ang_p.get('n_theta', '')])
+                writer.writerow(["# Phi Start (deg)",      ang_p.get('phi_start', '')])
+                writer.writerow(["# Phi End (deg)",        ang_p.get('phi_end', '')])
+                writer.writerow(["# N Phi",                ang_p.get('n_phi', '')])
+                writer.writerow(["# Scan Mode",            scan_mode])
                 writer.writerow([])
 
-                # 频域表
-                writer.writerow(["# === Frequency Domain ==="])
-                hdr = ["Freq (MHz)", "k (1/m)"]
-                for i in range(len(rcs_mat)):
-                    hdr += [f"RCS_{i} (dBsm)", f"I_re_{i}", f"I_im_{i}"]
-                writer.writerow(hdr)
-                k_arr = 2.0 * np.pi * freqs / 299792458.0
-                for j, f in enumerate(freqs):
-                    row = [f / 1e6, k_arr[j]]
-                    for i in range(len(rcs_mat)):
-                        row += [rcs_mat[i, j], I_total[i, j].real, I_total[i, j].imag]
-                    writer.writerow(row)
-
-                writer.writerow([])
-
-                # 距离域表
-                writer.writerow(["# === Range Domain ==="])
-                hdr2 = ["Range (m)"]
-                for i in range(len(profile_mat)):
-                    hdr2.append(f"Profile_{i} (dB)")
-                writer.writerow(hdr2)
                 N_half = len(range_axis) // 2
-                for j in range(N_half):
-                    row2 = [range_axis[j]]
-                    for i in range(len(profile_mat)):
-                        row2.append(profile_mat[i, j])
-                    writer.writerow(row2)
+                if scan_mode == '1d':
+                    writer.writerow(["Range (m)", "Profile (dB)"])
+                    for j in range(N_half):
+                        writer.writerow([range_axis[j], profile_mat[0, j]])
+                else:
+                    hdr = ["Range (m)"] + [f"Profile_{i} (dB)" for i in range(len(profile_mat))]
+                    writer.writerow(hdr)
+                    for j in range(N_half):
+                        row = [range_axis[j]] + [profile_mat[i, j] for i in range(len(profile_mat))]
+                        writer.writerow(row)
 
             self.log(f"Range profile exported: {path}")
         except Exception as e:

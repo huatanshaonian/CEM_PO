@@ -27,16 +27,19 @@ class ComparisonManager:
             try:
                 df = pd.read_csv(path, comment='#')
                 name = os.path.basename(path)
+                is_freq_sweep = 'Frequency (MHz)' in df.columns
                 self.w.comparison_data.append({
                     'name': name,
                     'data': df,
-                    'path': path
+                    'path': path,
+                    'is_freq_sweep': is_freq_sweep,
                 })
                 self.w.comp_files_list.addItem(name)
             except Exception as e:
                 self.w.log(f"Error loading {path}: {e}")
 
         self._refresh_dataset_combos()
+        self._refresh_freq_selector()
         self.update_comparison_plot()
 
     def remove_comparison_file(self):
@@ -50,6 +53,7 @@ class ComparisonManager:
             del self.w.comparison_data[row]
 
         self._refresh_dataset_combos()
+        self._refresh_freq_selector()
         self.update_comparison_plot()
 
     # ------------------------------------------------------------------
@@ -71,6 +75,51 @@ class ComparisonManager:
             combo.setCurrentIndex(idx if idx >= 0 else 0)
             combo.blockSignals(False)
 
+    def _refresh_freq_selector(self):
+        """Populate combo_slice_freq from all loaded freq sweep CSVs; enable/disable accordingly."""
+        combo = getattr(self.w, 'combo_slice_freq', None)
+        if combo is None:
+            return
+
+        freq_sets = []
+        for item in self.w.comparison_data:
+            if item.get('is_freq_sweep'):
+                vals = item['data']['Frequency (MHz)'].unique()
+                freq_sets.append(vals)
+
+        combo.blockSignals(True)
+        prev = combo.currentText()
+        combo.clear()
+        if freq_sets:
+            all_freqs = np.unique(np.concatenate(freq_sets))
+            combo.addItems([f"{f:.3f}" for f in all_freqs])
+            idx = combo.findText(prev)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.setEnabled(True)
+        else:
+            combo.setEnabled(False)
+        combo.blockSignals(False)
+
+    def _apply_freq_filter(self, item):
+        """If item is a freq sweep CSV, return a new item with df filtered to the selected frequency.
+
+        If no valid frequency is selected or item is not a freq sweep, returns item unchanged.
+        """
+        if not item.get('is_freq_sweep'):
+            return item
+        combo = getattr(self.w, 'combo_slice_freq', None)
+        if combo is None or not combo.isEnabled() or not combo.currentText():
+            return item
+        try:
+            selected_mhz = float(combo.currentText())
+        except ValueError:
+            return item
+        df = item['data']
+        unique_freqs = df['Frequency (MHz)'].unique()
+        nearest = unique_freqs[np.argmin(np.abs(unique_freqs - selected_mhz))]
+        df_filtered = df[df['Frequency (MHz)'] == nearest].drop(columns=['Frequency (MHz)'])
+        return {**item, 'data': df_filtered}
+
     def _resolve_dataset(self, label):
         """Return (theta_1d, phi_1d, rcs_2d, name) for the given combo label, or None."""
         if not label or label == "(none)":
@@ -84,7 +133,7 @@ class ComparisonManager:
                     "Calculated")
         for item in self.w.comparison_data:
             if item['name'] == label:
-                res = self._parse_csv_2d(item)
+                res = self._parse_csv_2d(self._apply_freq_filter(item))
                 return res[:4] if res else None  # (theta, phi, rcs_total, name)
         return None
 
@@ -119,7 +168,7 @@ class ComparisonManager:
             return None
         for item in self.w.comparison_data:
             if item['name'] == label:
-                res = self._parse_csv_1d(item)
+                res = self._parse_csv_1d(self._apply_freq_filter(item))
                 return res[:3] if res else None  # (angle, rcs_total, name)
         return None
 
@@ -208,7 +257,7 @@ class ComparisonManager:
                     datasets.append((res[0], res[1], res[2], '-', None))
 
         for item in self.w.comparison_data:
-            res = self._parse_csv_1d(item)
+            res = self._parse_csv_1d(self._apply_freq_filter(item))
             if not res:
                 continue
             angle, rcs_total, name, rcs_po, rcs_ptd = res
@@ -330,7 +379,7 @@ class ComparisonManager:
                 # CSV：用完整解析结果（含 PO/PTD）
                 csv_item = next((x for x in self.w.comparison_data if x['name'] == label_a), None)
                 if csv_item:
-                    full = self._parse_csv_2d(csv_item)
+                    full = self._parse_csv_2d(self._apply_freq_filter(csv_item))
                     if full and (full[4] is not None or full[5] is not None):
                         # 有 PO 或 PTD 列 → 多分量显示
                         _, _, rcs_total, name, rcs_po, rcs_ptd = full

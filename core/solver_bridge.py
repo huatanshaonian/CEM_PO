@@ -259,6 +259,7 @@ class SolverBridge:
             f_step  = freq_sweep_params['f_step']  * 1e6
             window      = freq_sweep_params.get('window', 'hamming')
             zero_pad    = int(freq_sweep_params.get('zero_pad', 4))
+            cheby_at    = float(freq_sweep_params.get('cheby_at', 40.0))
             polarization = freq_sweep_params.get('polarization', 'VV')
 
             Nf = max(2, int(round((f_end - f_start) / f_step)) + 1)
@@ -286,18 +287,31 @@ class SolverBridge:
             # sinc 模式从算法注册表读取
             sinc_mode = AVAILABLE_ALGORITHMS.get(algo_id, {}).get('kwargs', {}).get('sinc_mode', 'none')
 
-            # --- 3. 建立网格（以 f_max 最高分辨率）---
-            if progress_callback:
-                progress_callback(0, 100, f"建立 {f_max/1e6:.1f} MHz 网格 ({Nf} 个频率)...")
-
-            solver = get_integrator(algo_id, min_points=min_points)
+            # --- 3. 建立网格（以 f_max 最高分辨率，尝试复用缓存）---
             wavelength_max = C0 / f_max
             surfaces = geo if isinstance(geo, list) else [geo]
 
-            mesh_list = []
-            for surf in surfaces:
-                m = solver.precompute_mesh(surf, wavelength_max, samples, use_degenerate_mesh=use_degen)
-                mesh_list.append(m)
+            cached = self._resolve_mesh_cache(geo, f_max, samples, use_degen, algo_id, False)
+            if cached is not None:
+                mesh_list = cached if isinstance(cached, list) else [cached]
+                if progress_callback:
+                    progress_callback(0, 100, f"Using cached mesh at {f_max/1e6:.1f} MHz ({Nf} freqs)...")
+            else:
+                if progress_callback:
+                    progress_callback(0, 100, f"Building mesh at {f_max/1e6:.1f} MHz ({Nf} freqs)...")
+                solver = get_integrator(algo_id, min_points=min_points)
+                mesh_list = []
+                for surf in surfaces:
+                    m = solver.precompute_mesh(surf, wavelength_max, samples, use_degenerate_mesh=use_degen)
+                    mesh_list.append(m)
+                # 写入缓存，供后续单频 run_simulation 或重复频扫复用
+                check_params = {
+                    'freq': f_max,
+                    'samples': samples,
+                    'use_degenerate_mesh': use_degen,
+                    'n_surfaces': len(surfaces),
+                }
+                self.update_mesh_cache(mesh_list, check_params)
 
             # --- 4. 提取 PTD 边缘（若启用）---
             ptd_edges = []
@@ -357,7 +371,7 @@ class SolverBridge:
 
                 I_total_matrix[i] = I_total
 
-                prof_db, r_ax, _, stats_i = compute_range_profile(I_total, frequencies, window, zero_pad)
+                prof_db, r_ax, _, stats_i = compute_range_profile(I_total, frequencies, window, zero_pad, cheby_at)
                 profile_matrix[i] = prof_db
                 if range_axis is None:
                     range_axis = r_ax

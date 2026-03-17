@@ -7,6 +7,7 @@ PTD 频扫：预算衍射系数和几何量，向量化处理。
 """
 
 import numpy as np
+from scipy.signal import chebwin
 from physics.constants import C0
 from core.env import HAS_GPU, cp
 
@@ -229,7 +230,7 @@ def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use
     return I_ptd
 
 
-def compute_range_profile(I_freq, frequencies, window='hamming', zero_pad=4):
+def compute_range_profile(I_freq, frequencies, window='hamming', zero_pad=4, cheby_at=40.0):
     """
     从频域散射数据计算距离像（IFFT 方法）。
 
@@ -271,6 +272,8 @@ def compute_range_profile(I_freq, frequencies, window='hamming', zero_pad=4):
         win = np.hanning(Nf)
     elif window == 'blackman':
         win = np.blackman(Nf)
+    elif window == 'chebyshev':
+        win = chebwin(Nf, at=float(cheby_at))
     else:  # rectangular
         win = np.ones(Nf)
 
@@ -308,12 +311,192 @@ def compute_range_profile(I_freq, frequencies, window='hamming', zero_pad=4):
     return profile_db, range_axis, profile_complex, stats
 
 
-def load_freq_sweep_csv(path):
+def _is_new_format_csv(path):
+    """检测 CSV 是否为新长格式（含 Frequency (MHz) 列头）。"""
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            return 'Frequency (MHz)' in line
+    return False
+
+
+def _load_new_format_freq_sweep_csv(path):
     """
-    读取由 export_range_profile_csv 保存的频扫 CSV 文件。
+    读取新长格式频扫 RCS CSV（由 export_freq_sweep_rcs_csv 生成）。
 
     格式：
-      - 以 '# Key, Value' 表示元数据（旧文件缺失字段时使用默认值）
+      - 以 '# Key, Value' 表示元数据
+      - 列头：Theta (deg), Phi (deg), RCS Total (dBsm), [...,] I Total (Re), I Total (Im), Frequency (MHz)
+      - 每行对应一个 (角度, 频率) 组合
+
+    返回与 run_freq_sweep() 兼容的 result dict，带 'source': 'csv'。
+    range_axis / profile_matrix 为正距离半段（由 I Total 重算距离像）。
+    """
+    import pandas as pd
+
+    meta = {}
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            line = line.rstrip('\n').strip()
+            if line.startswith('#'):
+                content = line[1:].strip()
+                if ',' in content:
+                    key, _, val = content.partition(',')
+                    meta[key.strip()] = val.strip()
+
+    df = pd.read_csv(path, comment='#')
+
+    # 提取唯一角度和频率
+    freq_mhz_arr = np.sort(df['Frequency (MHz)'].unique())
+    freq_arr     = freq_mhz_arr * 1e6   # Hz
+    Nf           = len(freq_arr)
+
+    theta_arr = np.sort(df['Theta (deg)'].unique())
+    phi_arr   = np.sort(df['Phi (deg)'].unique())
+    angle_list = [(th, ph) for th in theta_arr for ph in phi_arr]
+    N_angles   = len(angle_list)
+
+    rcs_matrix     = np.full((N_angles, Nf), -999.0)
+    I_total_matrix = np.zeros((N_angles, Nf), dtype=np.complex128)
+    has_i_total    = ('I Total (Re)' in df.columns and 'I Total (Im)' in df.columns)
+
+    # 用 pivot_table 向量化填充（快速）
+    rcs_pivot = df.pivot_table(
+        index=['Theta (deg)', 'Phi (deg)'],
+        columns='Frequency (MHz)',
+        values='RCS Total (dBsm)',
+        aggfunc='mean',
+    )
+    for i, (th, ph) in enumerate(angle_list):
+        key = (th, ph)
+        if key in rcs_pivot.index:
+            for jj, fmhz in enumerate(freq_mhz_arr):
+                if fmhz in rcs_pivot.columns:
+                    rcs_matrix[i, jj] = rcs_pivot.loc[key, fmhz]
+
+    if has_i_total:
+        re_pivot = df.pivot_table(
+            index=['Theta (deg)', 'Phi (deg)'],
+            columns='Frequency (MHz)',
+            values='I Total (Re)',
+            aggfunc='mean',
+        )
+        im_pivot = df.pivot_table(
+            index=['Theta (deg)', 'Phi (deg)'],
+            columns='Frequency (MHz)',
+            values='I Total (Im)',
+            aggfunc='mean',
+        )
+        for i, (th, ph) in enumerate(angle_list):
+            key = (th, ph)
+            if key in re_pivot.index:
+                for jj, fmhz in enumerate(freq_mhz_arr):
+                    if fmhz in re_pivot.columns:
+                        I_total_matrix[i, jj] = complex(re_pivot.loc[key, fmhz],
+                                                         im_pivot.loc[key, fmhz])
+
+    # 重算距离像（正距离半段）
+    window   = meta.get('Window', 'hamming')
+    zero_pad = int(float(meta.get('Zero Pad', 4)))
+    N_pad    = Nf * zero_pad
+    N_half   = N_pad // 2
+
+    profile_matrix = None
+    range_axis     = None
+    stats          = None
+    if has_i_total and Nf >= 2:
+        profile_matrix = np.zeros((N_angles, N_half))
+        for i in range(N_angles):
+            prof_db, r_ax, _, stats_i = compute_range_profile(
+                I_total_matrix[i], freq_arr, window, zero_pad)
+            profile_matrix[i] = prof_db[:N_half]
+            if range_axis is None:
+                range_axis = r_ax[:N_half]
+                stats = stats_i
+
+    # 统计量
+    delta_f   = (freq_arr[-1] - freq_arr[0]) / (Nf - 1) if Nf > 1 else 1.0
+    bandwidth = freq_arr[-1] - freq_arr[0]
+
+    def _f(key, fallback):
+        try:
+            return float(meta[key]) if key in meta else fallback
+        except (ValueError, TypeError):
+            return fallback
+
+    if stats is None:
+        stats = {
+            'range_resolution_m': _f('Range Resolution (m)', C0 / (2 * bandwidth) if bandwidth > 0 else 0),
+            'max_range_m':        _f('Max Range (m)',        C0 / (2 * delta_f)   if delta_f  > 0 else 0),
+            'bandwidth_mhz':      bandwidth / 1e6,
+            'n_freqs':            Nf,
+            'delta_f_mhz':        delta_f / 1e6,
+        }
+
+    scan_mode = meta.get('Scan Mode', '1d' if N_angles == 1 else '2d_angle_freq')
+
+    if scan_mode == '1d':
+        rcs_matrix     = rcs_matrix.squeeze(axis=0)
+        I_total_matrix = I_total_matrix.squeeze(axis=0)
+        if profile_matrix is not None:
+            profile_matrix = profile_matrix.squeeze(axis=0)
+
+    freq_sweep_params = {
+        'f_start':      _f('Freq Start (MHz)', freq_arr[0] / 1e6),
+        'f_end':        _f('Freq End (MHz)',   freq_arr[-1] / 1e6),
+        'f_step':       _f('Freq Step (MHz)',  delta_f / 1e6),
+        'window':       window,
+        'zero_pad':     zero_pad,
+        'polarization': meta.get('Polarization', 'VV'),
+    }
+
+    return {
+        'mode':             'freq_sweep',
+        'source':           'csv',
+        'frequencies':      freq_arr,
+        'theta_deg':        theta_arr,
+        'phi_deg':          phi_arr,
+        'scan_mode':        scan_mode,
+        'I_po_matrix':      None,
+        'I_ptd_matrix':     None,
+        'I_total_matrix':   I_total_matrix,
+        'rcs_matrix':       rcs_matrix,
+        'profile_matrix':   profile_matrix,
+        'range_axis':       range_axis,
+        'stats':            stats,
+        'elapsed_time':     0.0,
+        'params': {
+            'algorithm':   meta.get('Algorithm', ''),
+            'ptd': {
+                'enabled':      meta.get('PTD Enabled', 'False').lower() == 'true',
+                'edges':        meta.get('PTD Edges', ''),
+                'polarization': meta.get('Polarization', 'VV'),
+            },
+            'angles': {
+                'theta_start': float(meta.get('Theta Start (deg)', theta_arr[0]  if len(theta_arr) else 0)),
+                'theta_end':   float(meta.get('Theta End (deg)',   theta_arr[-1] if len(theta_arr) else 0)),
+                'n_theta':     len(theta_arr),
+                'phi_start':   float(meta.get('Phi Start (deg)',   phi_arr[0]    if len(phi_arr) else 0)),
+                'phi_end':     float(meta.get('Phi End (deg)',     phi_arr[-1]   if len(phi_arr) else 0)),
+                'n_phi':       len(phi_arr),
+            },
+        },
+        'freq_sweep_params': freq_sweep_params,
+        'timestamp':        0.0,
+    }
+
+
+def load_freq_sweep_csv(path):
+    """
+    读取频扫 CSV 文件，自动检测新/旧格式。
+
+    新格式（export_freq_sweep_rcs_csv 生成）：
+      长格式，列头含 Frequency (MHz)，从 I Total 重算距离像。
+
+    旧格式（旧版 export_range_profile_csv 生成）：
+      - 以 '# Key, Value' 表示元数据
       - '# === Frequency Domain ===' 后跟频域数据表
       - '# === Range Domain ===' 后跟距离域数据表（仅正距离半段）
 
@@ -324,6 +507,8 @@ def load_freq_sweep_csv(path):
       - ValueError：文件中没有有效的频域数据
       - 其他 IO/解析错误正常传播
     """
+    if _is_new_format_csv(path):
+        return _load_new_format_freq_sweep_csv(path)
     meta = {}
     freq_header = None
     range_header = None

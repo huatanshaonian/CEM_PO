@@ -69,7 +69,19 @@ def save_config(window):
 
             "use_gpu":      window.use_gpu.isChecked(),
             "use_parallel": window.use_parallel.isChecked(),
-            "cpu_workers":  window.cpu_workers.text()
+            "cpu_workers":  window.cpu_workers.text(),
+
+            "freq_sweep_enabled": window.chk_freq_sweep_enabled.isChecked(),
+            "fsweep_start":       window.fsweep_start.text(),
+            "fsweep_end":         window.fsweep_end.text(),
+            "fsweep_step":        window.fsweep_step.text(),
+
+            "img_window":      window.img_window.currentText(),
+            "img_cheby_at":    window.img_cheby_at.text(),
+            "img_zeropad":     window.img_zeropad.text(),
+            "img_db_min":      window.img_db_min.text(),
+            "img_db_max":      window.img_db_max.text(),
+            "img_range_limit": window.img_range_limit.text(),
         }
 
         with open(CONFIG_FILE, 'w') as f:
@@ -159,6 +171,18 @@ def load_config(window):
         window.use_gpu.setChecked(cfg.get("use_gpu", False))
         window.use_parallel.setChecked(cfg.get("use_parallel", False))
         window.cpu_workers.setText(str(cfg.get("cpu_workers", "4")))
+
+        window.chk_freq_sweep_enabled.setChecked(cfg.get("freq_sweep_enabled", False))
+        window.fsweep_start.setText(str(cfg.get("fsweep_start", "1000")))
+        window.fsweep_end.setText(str(cfg.get("fsweep_end", "5000")))
+        window.fsweep_step.setText(str(cfg.get("fsweep_step", "10")))
+
+        window.img_window.setCurrentText(cfg.get("img_window", "hamming"))
+        window.img_cheby_at.setText(str(cfg.get("img_cheby_at", "40")))
+        window.img_zeropad.setText(str(cfg.get("img_zeropad", "4")))
+        window.img_db_min.setText(str(cfg.get("img_db_min", "-60")))
+        window.img_db_max.setText(str(cfg.get("img_db_max", "5")))
+        window.img_range_limit.setText(cfg.get("img_range_limit", ""))
 
         window.log("Configuration loaded.")
 
