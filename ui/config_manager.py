@@ -76,9 +76,10 @@ def save_config(window):
             "fsweep_end":         window.fsweep_end.text(),
             "fsweep_step":        window.fsweep_step.text(),
 
-            "img_window":      window.img_window.currentText(),
-            "img_cheby_at":    window.img_cheby_at.text(),
-            "img_zeropad":     window.img_zeropad.text(),
+            "img_window":       window.img_window.currentText(),
+            "img_cheby_at":     window.img_cheby_at.text(),
+            "img_taylor_nbar":  window.img_taylor_nbar.text(),
+            "img_zeropad":      window.img_zeropad.text(),
             "img_db_min":      window.img_db_min.text(),
             "img_db_max":      window.img_db_max.text(),
             "img_range_limit": window.img_range_limit.text(),
@@ -179,6 +180,7 @@ def load_config(window):
 
         window.img_window.setCurrentText(cfg.get("img_window", "hamming"))
         window.img_cheby_at.setText(str(cfg.get("img_cheby_at", "40")))
+        window.img_taylor_nbar.setText(str(cfg.get("img_taylor_nbar", "4")))
         window.img_zeropad.setText(str(cfg.get("img_zeropad", "4")))
         window.img_db_min.setText(str(cfg.get("img_db_min", "-60")))
         window.img_db_max.setText(str(cfg.get("img_db_max", "5")))

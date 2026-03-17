@@ -652,12 +652,16 @@ class CEMPoQtWindow(QMainWindow):
         l_img.setSpacing(4)
 
         self.img_window = QComboBox()
-        self.img_window.addItems(["hamming", "hanning", "blackman", "chebyshev", "rectangular"])
+        self.img_window.addItems(["hamming", "hanning", "blackman", "chebyshev", "taylor", "rectangular"])
         l_img.addRow("Window:", self.img_window)
 
         self.img_cheby_at = QLineEdit("40")
-        self.img_cheby_at.setPlaceholderText("sidelobe attenuation dB")
+        self.img_cheby_at.setPlaceholderText("Chebyshev / Taylor SLL (dB)")
         l_img.addRow("Sidelobe (dB):", self.img_cheby_at)
+
+        self.img_taylor_nbar = QLineEdit("4")
+        self.img_taylor_nbar.setPlaceholderText("Taylor nbar (均匀旁瓣段数, 4~8)")
+        l_img.addRow("Taylor nbar:", self.img_taylor_nbar)
 
         self.img_zeropad = QLineEdit("4")
         l_img.addRow("Zero Pad:", self.img_zeropad)
@@ -2082,6 +2086,8 @@ class CEMPoQtWindow(QMainWindow):
                 'window':       self.img_window.currentText(),
                 'zero_pad':     int(self.img_zeropad.text()),
                 'cheby_at':     float(self.img_cheby_at.text() or '40'),
+                'taylor_nbar':  int(float(self.img_taylor_nbar.text() or '4')),
+                'taylor_sll':   float(self.img_cheby_at.text() or '40'),
                 'polarization': self.ptd_pol.currentText(),
             }
         except Exception as e:
@@ -2433,6 +2439,8 @@ class CEMPoQtWindow(QMainWindow):
                 writer = csv.writer(f)
                 writer.writerow(["# CEM PO Solver – Range Profile Results"])
                 writer.writerow(["# Window",               fsp.get('window', '')])
+                writer.writerow(["# Sidelobe (dB)",        fsp.get('cheby_at', '')])
+                writer.writerow(["# Taylor nbar",          fsp.get('taylor_nbar', '')])
                 writer.writerow(["# Zero Pad",             fsp.get('zero_pad', '')])
                 writer.writerow(["# Range Resolution (m)", stats.get('range_resolution_m', '')])
                 writer.writerow(["# Max Range (m)",        stats.get('max_range_m', '')])

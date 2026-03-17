@@ -7,7 +7,7 @@ PTD 频扫：预算衍射系数和几何量，向量化处理。
 """
 
 import numpy as np
-from scipy.signal.windows import chebwin
+from scipy.signal.windows import chebwin, taylor
 from physics.constants import C0
 from core.env import HAS_GPU, cp
 
@@ -230,15 +230,20 @@ def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use
     return I_ptd
 
 
-def compute_range_profile(I_freq, frequencies, window='hamming', zero_pad=4, cheby_at=40.0):
+def compute_range_profile(I_freq, frequencies, window='hamming', zero_pad=4, cheby_at=40.0,
+                          taylor_nbar=4, taylor_sll=30.0):
     """
     从频域散射数据计算距离像（IFFT 方法）。
 
     参数:
-        I_freq:      ndarray complex (Nf,)，频域散射积分
-        frequencies: ndarray (Nf,)，频率数组 (Hz)
-        window:      窗函数类型 'hamming' | 'hanning' | 'blackman' | 'rectangular'
-        zero_pad:    零填充倍数（整数）
+        I_freq:       ndarray complex (Nf,)，频域散射积分
+        frequencies:  ndarray (Nf,)，频率数组 (Hz)
+        window:       窗函数类型 'hamming' | 'hanning' | 'blackman' | 'chebyshev' |
+                      'taylor' | 'rectangular'
+        zero_pad:     零填充倍数（整数）
+        cheby_at:     Chebyshev 窗副瓣衰减 (dB)
+        taylor_nbar:  Taylor 窗等副瓣段数（通常 4~8）
+        taylor_sll:   Taylor 窗副瓣电平 (dB, 正值)
 
     返回:
         (profile_db, range_axis, profile_complex, stats_dict)
@@ -274,6 +279,8 @@ def compute_range_profile(I_freq, frequencies, window='hamming', zero_pad=4, che
         win = np.blackman(Nf)
     elif window == 'chebyshev':
         win = chebwin(Nf, at=float(cheby_at))
+    elif window == 'taylor':
+        win = taylor(Nf, nbar=int(taylor_nbar), sll=float(taylor_sll), norm=True)
     else:  # rectangular
         win = np.ones(Nf)
 
@@ -398,10 +405,13 @@ def _load_new_format_freq_sweep_csv(path):
                                                          im_pivot.loc[key, fmhz])
 
     # 重算距离像（正距离半段）
-    window   = meta.get('Window', 'hamming')
-    zero_pad = int(float(meta.get('Zero Pad', 4)))
-    N_pad    = Nf * zero_pad
-    N_half   = N_pad // 2
+    window      = meta.get('Window', 'hamming')
+    zero_pad    = int(float(meta.get('Zero Pad', 4)))
+    cheby_at    = float(meta.get('Sidelobe (dB)', 40.0))
+    taylor_nbar = int(float(meta.get('Taylor nbar', 4)))
+    taylor_sll  = cheby_at   # SLL 复用同一元数据字段
+    N_pad  = Nf * zero_pad
+    N_half = N_pad // 2
 
     profile_matrix = None
     range_axis     = None
@@ -410,7 +420,8 @@ def _load_new_format_freq_sweep_csv(path):
         profile_matrix = np.zeros((N_angles, N_half))
         for i in range(N_angles):
             prof_db, r_ax, _, stats_i = compute_range_profile(
-                I_total_matrix[i], freq_arr, window, zero_pad)
+                I_total_matrix[i], freq_arr, window, zero_pad, cheby_at,
+                taylor_nbar=taylor_nbar, taylor_sll=taylor_sll)
             profile_matrix[i] = prof_db[:N_half]
             if range_axis is None:
                 range_axis = r_ax[:N_half]

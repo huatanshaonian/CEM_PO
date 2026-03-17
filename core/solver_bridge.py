@@ -260,6 +260,8 @@ class SolverBridge:
             window      = freq_sweep_params.get('window', 'hamming')
             zero_pad    = int(freq_sweep_params.get('zero_pad', 4))
             cheby_at    = float(freq_sweep_params.get('cheby_at', 40.0))
+            taylor_nbar = int(freq_sweep_params.get('taylor_nbar', 4))
+            taylor_sll  = float(freq_sweep_params.get('taylor_sll', 30.0))
             polarization = freq_sweep_params.get('polarization', 'VV')
 
             Nf = max(2, int(round((f_end - f_start) / f_step)) + 1)
@@ -371,7 +373,9 @@ class SolverBridge:
 
                 I_total_matrix[i] = I_total
 
-                prof_db, r_ax, _, stats_i = compute_range_profile(I_total, frequencies, window, zero_pad, cheby_at)
+                prof_db, r_ax, _, stats_i = compute_range_profile(
+                    I_total, frequencies, window, zero_pad, cheby_at,
+                    taylor_nbar=taylor_nbar, taylor_sll=taylor_sll)
                 profile_matrix[i] = prof_db
                 if range_axis is None:
                     range_axis = r_ax
