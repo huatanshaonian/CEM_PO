@@ -38,7 +38,7 @@ from physics.analytical_rcs import get_analytical_solution
 from physics.analytical_rcs import get_analytical_solution, compute_error_stats
 
 # UI modules
-from ui.workers import CalculationWorker, MeshStatsWorker, LogBridge
+from ui.workers import CalculationWorker, MeshStatsWorker, LogBridge, FreqSweepWorker
 from ui.styles import LIGHT_STYLE
 from ui.comparison_panel import ComparisonManager
 from ui.config_manager import save_config, load_config
@@ -54,6 +54,8 @@ class CEMPoQtWindow(QMainWindow):
         self.step_file_path = ""
         self.iges_file_path = ""
         self.last_result = None
+        self.last_freq_sweep_result = None
+        self.imaging_datasets = []   # list of {'name': str, 'result': dict}
         self.comparison_data = [] # List of dicts: {'name': str, 'data': DataFrame, 'path': str}
         self._surface_actors = []          # vtkActor per surface index
         self._actor_to_surface_idx = {}    # actor -> int
@@ -158,7 +160,25 @@ class CEMPoQtWindow(QMainWindow):
         comp_layout.addWidget(self.comp_canvas)
         
         self.tabs.addTab(self.comp_frame, "RCS Patterns")
-        
+
+        # Tab 4: Radar Imaging
+        self.imaging_frame = QWidget()
+        imaging_layout = QVBoxLayout(self.imaging_frame)
+        self.imaging_figure = Figure(figsize=(5, 4), dpi=100)
+        self.imaging_canvas = FigureCanvas(self.imaging_figure)
+        self.imaging_toolbar = NavigationToolbar(self.imaging_canvas, self.imaging_frame)
+        imaging_layout.addWidget(self.imaging_toolbar)
+        imaging_layout.addWidget(self.imaging_canvas)
+        # Export button
+        img_export_layout = QHBoxLayout()
+        img_export_layout.addStretch()
+        self.btn_export_imaging = QPushButton("Export Range Profile CSV")
+        self.btn_export_imaging.clicked.connect(self.export_range_profile_csv)
+        self.btn_export_imaging.setStyleSheet("background-color: #4CAF50; color: white; border: 1px solid #388E3C;")
+        img_export_layout.addWidget(self.btn_export_imaging)
+        imaging_layout.addLayout(img_export_layout)
+        self.tabs.addTab(self.imaging_frame, "Radar Imaging")
+
         # Log Area
         log_widget = QWidget()
         log_layout = QVBoxLayout(log_widget)
@@ -419,9 +439,61 @@ class CEMPoQtWindow(QMainWindow):
         group_compute.setLayout(l_compute)
         layout_solver.addWidget(group_compute)
 
+        # 5. Frequency Sweep
+        self.group_freq_sweep = QGroupBox("Frequency Sweep")
+        l_fsweep = QVBoxLayout()
+        l_fsweep.setSpacing(4)
+
+        self.chk_freq_sweep_enabled = QCheckBox("Enable Frequency Sweep")
+        self.chk_freq_sweep_enabled.setChecked(False)
+        l_fsweep.addWidget(self.chk_freq_sweep_enabled)
+
+        l_fsweep_form = QFormLayout()
+        l_fsweep_form.setSpacing(4)
+
+        # Row 1: Min ~ Max MHz
+        h_minmax = QHBoxLayout()
+        self.fsweep_start = QLineEdit("1000")
+        self.fsweep_start.setFixedWidth(62)
+        self.fsweep_end   = QLineEdit("5000")
+        self.fsweep_end.setFixedWidth(62)
+        h_minmax.addWidget(self.fsweep_start)
+        h_minmax.addWidget(QLabel("~"))
+        h_minmax.addWidget(self.fsweep_end)
+        h_minmax.addWidget(QLabel("MHz"))
+        h_minmax.addStretch()
+        l_fsweep_form.addRow("Min / Max:", h_minmax)
+
+        # Row 2: Step MHz
+        h_step = QHBoxLayout()
+        self.fsweep_step = QLineEdit("10")
+        self.fsweep_step.setFixedWidth(62)
+        h_step.addWidget(self.fsweep_step)
+        h_step.addWidget(QLabel("MHz"))
+        h_step.addStretch()
+        l_fsweep_form.addRow("Step:", h_step)
+
+        self.lbl_fsweep_info = QLabel("Resolution: -- cm | Max range: -- m")
+        self.lbl_fsweep_info.setStyleSheet("color: #666; font-size: 10px;")
+        l_fsweep_form.addRow(self.lbl_fsweep_info)
+
+        self.lbl_model_size = QLabel("Model: --")
+        self.lbl_model_size.setStyleSheet("color: #666; font-size: 10px;")
+        l_fsweep_form.addRow(self.lbl_model_size)
+
+        l_fsweep.addLayout(l_fsweep_form)
+        self.group_freq_sweep.setLayout(l_fsweep)
+        layout_solver.addWidget(self.group_freq_sweep)
+
+        # Update resolution hint on any change
+        self.fsweep_start.textChanged.connect(self._update_freq_sweep_info)
+        self.fsweep_end.textChanged.connect(self._update_freq_sweep_info)
+        self.fsweep_step.textChanged.connect(self._update_freq_sweep_info)
+        self.chk_freq_sweep_enabled.toggled.connect(self._update_freq_sweep_info)
+
         layout_solver.addStretch()
         h_btns = QHBoxLayout()
-        
+
         self.btn_run = QPushButton("RUN SIMULATION")
         self.btn_run.setObjectName("RunBtn")
         self.btn_run.setMinimumHeight(40)
@@ -558,6 +630,73 @@ class CEMPoQtWindow(QMainWindow):
 
         layout_comp.addStretch()
         self.param_tabs.addTab(self.tab_comp, "Post-processing")
+
+        # === Tab 4: Imaging ===
+        self.tab_imaging = QWidget()
+        layout_imaging = QVBoxLayout(self.tab_imaging)
+        layout_imaging.setSpacing(6)
+        layout_imaging.setContentsMargins(6, 6, 6, 6)
+
+        group_img = QGroupBox("Radar Imaging")
+        l_img = QFormLayout()
+        l_img.setSpacing(4)
+
+        self.img_window = QComboBox()
+        self.img_window.addItems(["hamming", "hanning", "blackman", "rectangular"])
+        l_img.addRow("Window:", self.img_window)
+
+        self.img_zeropad = QLineEdit("4")
+        l_img.addRow("Zero Pad:", self.img_zeropad)
+
+        h_db = QHBoxLayout()
+        self.img_db_min = QLineEdit("-60")
+        self.img_db_min.setFixedWidth(46)
+        self.img_db_max = QLineEdit("5")
+        self.img_db_max.setFixedWidth(46)
+        h_db.addWidget(self.img_db_min)
+        h_db.addWidget(QLabel("~"))
+        h_db.addWidget(self.img_db_max)
+        h_db.addWidget(QLabel("dB"))
+        h_db.addStretch()
+        l_img.addRow("dB Range:", h_db)
+
+        self.img_range_limit = QLineEdit("")
+        self.img_range_limit.setPlaceholderText("leave blank = auto")
+        l_img.addRow("Display Range (m):", self.img_range_limit)
+
+        group_img.setLayout(l_img)
+        layout_imaging.addWidget(group_img)
+
+        # Dataset selector
+        group_ds = QGroupBox("Dataset")
+        l_ds = QVBoxLayout()
+        l_ds.setSpacing(4)
+        self.imaging_ds_list = QListWidget()
+        self.imaging_ds_list.setMaximumHeight(100)
+        self.imaging_ds_list.addItem("(Current Simulation)")
+        self.imaging_ds_list.setCurrentRow(0)
+        l_ds.addWidget(self.imaging_ds_list)
+        h_ds_btns = QHBoxLayout()
+        btn_img_load = QPushButton("Load CSV")
+        btn_img_load.clicked.connect(self._load_imaging_csv)
+        btn_img_remove = QPushButton("Remove")
+        btn_img_remove.clicked.connect(self._remove_imaging_csv)
+        btn_img_plot = QPushButton("Plot Selected")
+        btn_img_plot.clicked.connect(self._plot_selected_imaging)
+        h_ds_btns.addWidget(btn_img_load)
+        h_ds_btns.addWidget(btn_img_remove)
+        h_ds_btns.addWidget(btn_img_plot)
+        l_ds.addLayout(h_ds_btns)
+        group_ds.setLayout(l_ds)
+        layout_imaging.addWidget(group_ds)
+
+        self.lbl_imaging_stats = QLabel("Last run: resolution -- cm, max range -- m")
+        self.lbl_imaging_stats.setStyleSheet("color: #555; font-size: 10px;")
+        self.lbl_imaging_stats.setWordWrap(True)
+        layout_imaging.addWidget(self.lbl_imaging_stats)
+
+        layout_imaging.addStretch()
+        self.param_tabs.addTab(self.tab_imaging, "Imaging")
 
         self.update_geo_inputs("Cylinder")
 
@@ -1148,6 +1287,7 @@ class CEMPoQtWindow(QMainWindow):
             # if self.chk_invert_global.isChecked(): ...
 
             self.current_geo = geo_list
+            self._update_model_size_label()
             self.plotter.clear()
             self._surface_actors = []
             self._actor_to_surface_idx = {}
@@ -1452,6 +1592,11 @@ class CEMPoQtWindow(QMainWindow):
         if not self.current_geo:
             self.on_preview()
             if not self.current_geo: return
+
+        # 频扫模式分支
+        if self.chk_freq_sweep_enabled.isChecked():
+            self._run_freq_sweep()
+            return
 
         try:
             # PTD face pairs (passed as raw string for downstream parsing)
@@ -1875,6 +2020,368 @@ class CEMPoQtWindow(QMainWindow):
         self.surface_list.clearSelection()
         self.chk_surf_invert.setEnabled(False)
         self.on_preview()
+
+    # ─────────────────────────── 频率扫描方法 ───────────────────────────
+
+    def _run_freq_sweep(self):
+        """读取参数，启动 FreqSweepWorker。"""
+        try:
+            ptd_edges_str = self._get_ptd_pairs_str()
+            params = {
+                'frequency': float(self.freq_input.text()) * 1e6,
+                'algorithm': self.algo_combo.currentData(),
+                'angles': {
+                    'theta_start': float(self.theta_start.text()),
+                    'theta_end':   float(self.theta_end.text()),
+                    'n_theta':     int(self.theta_n.text()),
+                    'phi_start':   float(self.phi_start.text()),
+                    'phi_end':     float(self.phi_end.text()),
+                    'n_phi':       int(self.phi_n.text()),
+                },
+                'mesh': {
+                    'density':        float(self.mesh_density.text()),
+                    'min_points':     int(self.min_points.text()),
+                    'use_degenerate': self.degen_mesh.isChecked(),
+                },
+                'ptd': {
+                    'enabled':      self.chk_ptd_enabled.isChecked(),
+                    'edges':        ptd_edges_str,
+                    'polarization': self.ptd_pol.currentText(),
+                },
+                'compute': {
+                    'gpu':      self.use_gpu.isChecked(),
+                    'parallel': self.use_parallel.isChecked(),
+                    'workers':  int(self.cpu_workers.text()),
+                },
+            }
+            freq_sweep_params = {
+                'f_start':      float(self.fsweep_start.text()),
+                'f_end':        float(self.fsweep_end.text()),
+                'f_step':       float(self.fsweep_step.text()),
+                'window':       self.img_window.currentText(),
+                'zero_pad':     int(self.img_zeropad.text()),
+                'polarization': self.ptd_pol.currentText(),
+            }
+        except Exception as e:
+            self.log(f"FreqSweep Param Error: {e}")
+            return
+
+        self.btn_run.setEnabled(False)
+        self.progress_bar.setValue(0)
+
+        self.fsweep_worker = FreqSweepWorker(
+            self.bridge, self.current_geo, params, freq_sweep_params
+        )
+        self.fsweep_worker.progress_signal.connect(self._on_progress)
+        self.fsweep_worker.result_signal.connect(self._on_freq_sweep_finished)
+        self.fsweep_worker.error_signal.connect(
+            lambda e: (self.log(f"FreqSweep ERROR: {e}"), self.btn_run.setEnabled(True))
+        )
+        self.fsweep_worker.finished.connect(lambda: self.btn_run.setEnabled(True))
+        self.fsweep_worker.start()
+
+    def _on_freq_sweep_finished(self, result):
+        self.last_freq_sweep_result = result
+        stats = result.get('stats') or {}
+        elapsed = result.get('elapsed_time', 0)
+        Nf = len(result.get('frequencies', []))
+        dr_cm = stats.get('range_resolution_m', 0) * 100
+        r_max = stats.get('max_range_m', 0)
+        bw    = stats.get('bandwidth_mhz', 0)
+
+        self.log(f"FreqSweep SUCCESS: {Nf} pts, BW={bw:.1f} MHz, "
+                 f"res={dr_cm:.1f} cm, Rmax={r_max:.1f} m, t={elapsed:.2f}s")
+        self.lbl_imaging_stats.setText(
+            f"Last run: resolution {dr_cm:.1f} cm, max range {r_max:.1f} m, BW={bw:.1f} MHz"
+        )
+
+        # 更新数据集列表中的 "(Current Simulation)" 条目
+        self.imaging_ds_list.item(0).setText("(Current Simulation)")
+        self.imaging_ds_list.setCurrentRow(0)
+
+        self.plot_radar_imaging(result)
+        self.tabs.setCurrentIndex(3)   # 切到 Radar Imaging tab
+
+    def plot_radar_imaging(self, result):
+        """绘制雷达成像结果（1D 距离像 或 2D 距离-角度图）。"""
+        self.imaging_figure.clear()
+        scan_mode    = result.get('scan_mode', '1d')
+        frequencies  = result['frequencies']
+        range_axis   = result['range_axis']
+        stats        = result.get('stats') or {}
+
+        try:
+            db_min = float(self.img_db_min.text())
+            db_max = float(self.img_db_max.text())
+        except ValueError:
+            db_min, db_max = -60.0, 5.0
+
+        range_limit_txt = self.img_range_limit.text().strip()
+        range_limit = None
+        try:
+            if range_limit_txt:
+                range_limit = float(range_limit_txt)
+        except ValueError:
+            pass
+
+        f_mhz = frequencies / 1e6
+
+        from_csv = result.get('source') == 'csv'
+
+        if scan_mode == '1d':
+            rcs_1d     = np.asarray(result['rcs_matrix'])      # (Nf,)
+            profile_1d = np.asarray(result['profile_matrix'])  # (N_pad,) or (N_half,) from CSV
+
+            ax_freq  = self.imaging_figure.add_subplot(2, 1, 1)
+            ax_range = self.imaging_figure.add_subplot(2, 1, 2)
+
+            ax_freq.plot(f_mhz, rcs_1d, color='#007ACC', linewidth=1.5)
+            ax_freq.set_xlabel("Frequency (MHz)")
+            ax_freq.set_ylabel("RCS (dBsm)")
+            ax_freq.set_title("RCS vs Frequency")
+            ax_freq.grid(True, linestyle='--', alpha=0.5)
+
+            if from_csv:
+                r_plot = range_axis           # already positive-range half
+                p_plot = profile_1d
+            else:
+                N_half = len(profile_1d) // 2
+                r_plot = range_axis[:N_half]
+                p_plot = profile_1d[:N_half]
+
+            if range_limit is not None:
+                mask = r_plot <= range_limit
+                r_plot = r_plot[mask]
+                p_plot = p_plot[mask]
+
+            ax_range.plot(r_plot, p_plot, color='#E65100', linewidth=1.5)
+            dr_m = stats.get('range_resolution_m', 0)
+            ax_range.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+            ax_range.set_xlabel("Range (m)")
+            ax_range.set_ylabel("Amplitude (dB)")
+            ax_range.set_title(f"1D Range Profile  res={dr_m*100:.1f} cm")
+            ax_range.set_ylim(db_min, db_max)
+            ax_range.grid(True, linestyle='--', alpha=0.5)
+
+        else:  # 2d_angle_freq
+            rcs_mat     = np.asarray(result['rcs_matrix'])      # (N_angles, Nf)
+            profile_mat = np.asarray(result['profile_matrix'])  # (N_angles, N_pad)
+            theta_deg   = np.asarray(result['theta_deg'])
+            phi_deg     = np.asarray(result['phi_deg'])
+
+            angle_list = [(th, ph) for th in theta_deg for ph in phi_deg]
+            angle_idx  = np.arange(len(angle_list))
+
+            ax_top = self.imaging_figure.add_subplot(2, 1, 1)
+            ax_bot = self.imaging_figure.add_subplot(2, 1, 2)
+
+            c1 = ax_top.pcolormesh(
+                f_mhz, angle_idx, rcs_mat,
+                cmap='jet', shading='auto', vmin=db_min, vmax=db_max
+            )
+            self.imaging_figure.colorbar(c1, ax=ax_top, label='RCS (dBsm)')
+            ax_top.set_xlabel("Frequency (MHz)")
+            ax_top.set_ylabel("Angle index")
+            ax_top.set_title("RCS vs Frequency vs Angle")
+
+            if from_csv:
+                r_half = range_axis
+                p_half = profile_mat
+            else:
+                N_half = len(range_axis) // 2
+                r_half = range_axis[:N_half]
+                p_half = profile_mat[:, :N_half]
+
+            if range_limit is not None:
+                mask = r_half <= range_limit
+                r_half = r_half[mask]
+                p_half = p_half[:, mask]
+
+            c2 = ax_bot.pcolormesh(
+                r_half, angle_idx, p_half,
+                cmap='jet', shading='auto', vmin=db_min, vmax=db_max
+            )
+            self.imaging_figure.colorbar(c2, ax=ax_bot, label='Amplitude (dB)')
+            ax_bot.set_xlabel("Range (m)")
+            ax_bot.set_ylabel("Angle index")
+            dr_m = stats.get('range_resolution_m', 0)
+            ax_bot.set_title(f"2D Range-Angle Profile  res={dr_m*100:.1f} cm")
+
+        self.imaging_figure.tight_layout()
+        self.imaging_canvas.draw()
+
+    def _update_freq_sweep_info(self):
+        """实时更新频扫分辨率/最大距离标签。"""
+        try:
+            from physics.constants import C0 as _C0
+            f_start = float(self.fsweep_start.text()) * 1e6
+            f_end   = float(self.fsweep_end.text())   * 1e6
+            f_step  = float(self.fsweep_step.text())  * 1e6
+            if f_end <= f_start or f_step <= 0:
+                raise ValueError
+            bw    = f_end - f_start
+            dr_m  = _C0 / (2.0 * bw)
+            r_max = _C0 / (2.0 * f_step)
+            Nf    = int(round(bw / f_step)) + 1
+            self.lbl_fsweep_info.setText(
+                f"Resolution: {dr_m*100:.1f} cm | Max range: {r_max:.1f} m | {Nf} pts"
+            )
+        except Exception:
+            self.lbl_fsweep_info.setText("Resolution: -- cm | Max range: -- m")
+
+    def _update_model_size_label(self):
+        """采样几何包围盒，更新 lbl_model_size。"""
+        if not hasattr(self, 'lbl_model_size'):
+            return
+        if not self.current_geo:
+            self.lbl_model_size.setText("Model: --")
+            return
+        try:
+            pts_all = []
+            for surf in self.current_geo:
+                u0, u1 = surf.u_domain
+                v0, v1 = surf.v_domain
+                us = np.linspace(u0, u1, 8)
+                vs = np.linspace(v0, v1, 8)
+                ug, vg = np.meshgrid(us, vs)
+                data = surf.get_data(ug, vg)
+                pts_all.append(data[0].reshape(-1, 3))
+            pts = np.concatenate(pts_all, axis=0)
+            mins = pts.min(axis=0)
+            maxs = pts.max(axis=0)
+            dims = maxs - mins
+            self.lbl_model_size.setText(
+                f"Model: {dims[0]:.2f}×{dims[1]:.2f}×{dims[2]:.2f} m"
+            )
+        except Exception:
+            self.lbl_model_size.setText("Model: --")
+
+    def _load_imaging_csv(self):
+        """从 CSV 文件加载频扫结果到 Imaging 数据集列表。"""
+        from core.freq_sweep import load_freq_sweep_csv
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Load Freq Sweep CSV", "", "CSV Files (*.csv)"
+        )
+        for path in paths:
+            try:
+                result = load_freq_sweep_csv(path)
+                import os
+                name = os.path.basename(path)
+                self.imaging_datasets.append({'name': name, 'result': result})
+                self.imaging_ds_list.addItem(name)
+                self.log(f"Imaging: loaded {name}  "
+                         f"({result['stats']['bandwidth_mhz']:.0f} MHz BW, "
+                         f"pol={result['freq_sweep_params']['polarization']})")
+            except Exception as e:
+                self.log(f"<font color='red'>Imaging load error ({path}): {e}</font>")
+
+    def _remove_imaging_csv(self):
+        """从列表中移除选中的 CSV 条目（不能移除第 0 行 Current Simulation）。"""
+        row = self.imaging_ds_list.currentRow()
+        if row <= 0:
+            self.log("Cannot remove '(Current Simulation)'.")
+            return
+        self.imaging_ds_list.takeItem(row)
+        del self.imaging_datasets[row - 1]   # offset by 1 (row 0 = current sim)
+
+    def _plot_selected_imaging(self):
+        """绘制数据集列表中当前选中的结果。"""
+        row = self.imaging_ds_list.currentRow()
+        if row < 0:
+            return
+        if row == 0:
+            if self.last_freq_sweep_result is None:
+                self.log("<font color='orange'>No simulation result yet. Run a freq sweep first.</font>")
+                return
+            result = self.last_freq_sweep_result
+        else:
+            result = self.imaging_datasets[row - 1]['result']
+        self.plot_radar_imaging(result)
+        self.tabs.setCurrentIndex(3)
+
+    def export_range_profile_csv(self):
+        """导出频域和距离域数据到 CSV。"""
+        if not self.last_freq_sweep_result:
+            self.log("<font color='orange'>No freq sweep results to export.</font>")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Range Profile CSV", "", "CSV Files (*.csv)"
+        )
+        if not path:
+            return
+
+        try:
+            res = self.last_freq_sweep_result
+            freqs = res['frequencies']
+            range_axis = res['range_axis']
+            rcs_mat = np.atleast_2d(res['rcs_matrix'])
+            profile_mat = np.atleast_2d(res['profile_matrix'])
+            I_total = np.atleast_2d(res['I_total_matrix'])
+
+            with open(path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                stats   = res.get('stats') or {}
+                fsp     = res.get('freq_sweep_params') or {}
+                params  = res.get('params') or {}
+                ptd_p   = params.get('ptd', {})
+                ang_p   = params.get('angles', {})
+
+                writer.writerow(["# CEM PO Solver – Frequency Sweep Results"])
+                writer.writerow(["# Algorithm",          params.get('algorithm', '')])
+                writer.writerow(["# Polarization",       fsp.get('polarization', '')])
+                writer.writerow(["# PTD Enabled",        ptd_p.get('enabled', False)])
+                writer.writerow(["# PTD Edges",          ptd_p.get('edges', '')])
+                writer.writerow(["# Freq Start (MHz)",   fsp.get('f_start', '')])
+                writer.writerow(["# Freq End (MHz)",     fsp.get('f_end', '')])
+                writer.writerow(["# Freq Step (MHz)",    fsp.get('f_step', '')])
+                writer.writerow(["# N Freqs",            stats.get('n_freqs', '')])
+                writer.writerow(["# Bandwidth (MHz)",    stats.get('bandwidth_mhz', '')])
+                writer.writerow(["# Range Resolution (m)", stats.get('range_resolution_m', '')])
+                writer.writerow(["# Max Range (m)",      stats.get('max_range_m', '')])
+                writer.writerow(["# Window",             fsp.get('window', '')])
+                writer.writerow(["# Zero Pad",           fsp.get('zero_pad', '')])
+                writer.writerow(["# Theta Start (deg)",  ang_p.get('theta_start', '')])
+                writer.writerow(["# Theta End (deg)",    ang_p.get('theta_end', '')])
+                writer.writerow(["# N Theta",            ang_p.get('n_theta', '')])
+                writer.writerow(["# Phi Start (deg)",    ang_p.get('phi_start', '')])
+                writer.writerow(["# Phi End (deg)",      ang_p.get('phi_end', '')])
+                writer.writerow(["# N Phi",              ang_p.get('n_phi', '')])
+                writer.writerow(["# Scan Mode",          res.get('scan_mode', '')])
+                writer.writerow(["# Elapsed Time (s)",   f"{res.get('elapsed_time', 0):.3f}"])
+                writer.writerow([])
+
+                # 频域表
+                writer.writerow(["# === Frequency Domain ==="])
+                hdr = ["Freq (MHz)", "k (1/m)"]
+                for i in range(len(rcs_mat)):
+                    hdr += [f"RCS_{i} (dBsm)", f"I_re_{i}", f"I_im_{i}"]
+                writer.writerow(hdr)
+                k_arr = 2.0 * np.pi * freqs / 299792458.0
+                for j, f in enumerate(freqs):
+                    row = [f / 1e6, k_arr[j]]
+                    for i in range(len(rcs_mat)):
+                        row += [rcs_mat[i, j], I_total[i, j].real, I_total[i, j].imag]
+                    writer.writerow(row)
+
+                writer.writerow([])
+
+                # 距离域表
+                writer.writerow(["# === Range Domain ==="])
+                hdr2 = ["Range (m)"]
+                for i in range(len(profile_mat)):
+                    hdr2.append(f"Profile_{i} (dB)")
+                writer.writerow(hdr2)
+                N_half = len(range_axis) // 2
+                for j in range(N_half):
+                    row2 = [range_axis[j]]
+                    for i in range(len(profile_mat)):
+                        row2.append(profile_mat[i, j])
+                    writer.writerow(row2)
+
+            self.log(f"Range profile exported: {path}")
+        except Exception as e:
+            self.log(f"Export error: {e}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

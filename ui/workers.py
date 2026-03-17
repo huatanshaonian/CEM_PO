@@ -36,6 +36,34 @@ class LogBridge(QObject):
     def flush(self): pass
 
 
+class FreqSweepWorker(QThread):
+    """Worker thread for frequency sweep computation."""
+    progress_signal = Signal(float, str)
+    result_signal   = Signal(dict)
+    error_signal    = Signal(str)
+
+    def __init__(self, bridge, geo, params, freq_sweep_params):
+        super().__init__()
+        self.bridge           = bridge
+        self.geo              = geo
+        self.params           = params
+        self.freq_sweep_params = freq_sweep_params
+
+    def run(self):
+        def callback(current, total, msg=""):
+            p = (current / total * 100) if total > 0 else 0
+            self.progress_signal.emit(p, msg)
+
+        try:
+            result = self.bridge.run_freq_sweep(
+                self.geo, self.params, self.freq_sweep_params,
+                progress_callback=callback
+            )
+            self.result_signal.emit(result)
+        except Exception as e:
+            self.error_signal.emit(str(e))
+
+
 class MeshStatsWorker(QThread):
     """Worker thread for generating mesh statistics"""
     progress_signal = Signal(float, str)

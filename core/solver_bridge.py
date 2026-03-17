@@ -1,9 +1,12 @@
 import time
 import numpy as np
 import traceback
+from physics.constants import C0
+from physics.wave import IncidentWave
 from solvers.api import get_integrator, AVAILABLE_ALGORITHMS
 from solvers.rcs_analyzer import RCSAnalyzer
 from core.mesh_data import merge_meshes
+from core.freq_sweep import compute_po_freq_sweep, compute_ptd_freq_sweep, compute_range_profile
 
 class SolverBridge:
     """
@@ -233,6 +236,173 @@ class SolverBridge:
         """允许外部（如可视化模块）更新 Solver 的网格缓存"""
         self.cached_mesh_data = mesh_data
         self.cached_mesh_params = params
+
+    def run_freq_sweep(self, geo, params, freq_sweep_params, progress_callback=None):
+        """
+        频率扫描（相位旋转法）：固定角度扫频率，计算各频率的 PO/PTD 积分和距离像。
+
+        Args:
+            geo:               几何对象列表
+            params:            solver 参数字典（与 run_simulation 相同结构）
+            freq_sweep_params: 频扫专用参数 {'f_start','f_end','f_step'(MHz), 'window','zero_pad','polarization'}
+            progress_callback: (current, total, msg) 回调
+
+        Returns:
+            dict: 包含 freq_sweep 结果的字典
+        """
+        try:
+            start_time = time.time()
+
+            # --- 1. 解包频扫参数 ---
+            f_start = freq_sweep_params['f_start'] * 1e6   # Hz
+            f_end   = freq_sweep_params['f_end']   * 1e6
+            f_step  = freq_sweep_params['f_step']  * 1e6
+            window      = freq_sweep_params.get('window', 'hamming')
+            zero_pad    = int(freq_sweep_params.get('zero_pad', 4))
+            polarization = freq_sweep_params.get('polarization', 'VV')
+
+            Nf = max(2, int(round((f_end - f_start) / f_step)) + 1)
+            frequencies = np.linspace(f_start, f_end, Nf)
+            f_max = frequencies[-1]
+
+            # --- 2. 解包 solver 参数 ---
+            algo_id    = params['algorithm']
+            if 'discrete_po' not in algo_id:
+                raise ValueError(f"频率扫描仅支持 discrete_po 算法，当前算法: {algo_id}")
+
+            mesh_params    = params.get('mesh', {})
+            compute_params = params.get('compute', {})
+            ptd_params     = params.get('ptd', {})
+            angle_params   = params.get('angles', {})
+
+            samples    = mesh_params.get('density', 10.0)
+            min_points = mesh_params.get('min_points', 18)
+            use_degen  = mesh_params.get('use_degenerate', False)
+            use_gpu    = compute_params.get('gpu', False)
+
+            enable_ptd    = ptd_params.get('enabled', False)
+            ptd_edges_str = ptd_params.get('edges', '')
+
+            # sinc 模式从算法注册表读取
+            sinc_mode = AVAILABLE_ALGORITHMS.get(algo_id, {}).get('kwargs', {}).get('sinc_mode', 'none')
+
+            # --- 3. 建立网格（以 f_max 最高分辨率）---
+            if progress_callback:
+                progress_callback(0, 100, f"建立 {f_max/1e6:.1f} MHz 网格 ({Nf} 个频率)...")
+
+            solver = get_integrator(algo_id, min_points=min_points)
+            wavelength_max = C0 / f_max
+            surfaces = geo if isinstance(geo, list) else [geo]
+
+            mesh_list = []
+            for surf in surfaces:
+                m = solver.precompute_mesh(surf, wavelength_max, samples, use_degenerate_mesh=use_degen)
+                mesh_list.append(m)
+
+            # --- 4. 提取 PTD 边缘（若启用）---
+            ptd_edges = []
+            if enable_ptd and ptd_edges_str:
+                from solvers.ptd import PTDProcessor
+                try:
+                    ptd_edges = PTDProcessor.extract_edges_from_face_pairs(surfaces, ptd_edges_str)
+                    print(f"  [PTD] 已提取 {len(ptd_edges)} 条边缘 (频扫)")
+                except Exception as e:
+                    print(f"  [PTD] 边缘提取失败: {e}")
+
+            # --- 5. 构建角度列表 ---
+            theta_start = angle_params.get('theta_start', 0)
+            theta_end   = angle_params.get('theta_end', 0)
+            n_theta     = angle_params.get('n_theta', 1)
+            phi_start   = angle_params.get('phi_start', 0)
+            phi_end     = angle_params.get('phi_end', 0)
+            n_phi       = angle_params.get('n_phi', 1)
+
+            theta_deg = np.linspace(theta_start, theta_end, n_theta)
+            phi_deg   = np.linspace(phi_start,   phi_end,   n_phi)
+
+            angle_list = [(th, ph) for th in theta_deg for ph in phi_deg]
+            N_angles = len(angle_list)
+
+            # --- 6. 分配结果矩阵 ---
+            N_pad = Nf * zero_pad
+            I_po_matrix    = np.zeros((N_angles, Nf), dtype=np.complex128)
+            I_ptd_matrix   = np.zeros((N_angles, Nf), dtype=np.complex128) if (enable_ptd and ptd_edges) else None
+            I_total_matrix = np.zeros((N_angles, Nf), dtype=np.complex128)
+            profile_matrix = np.zeros((N_angles, N_pad))
+            range_axis = None
+            stats = None
+
+            # --- 7. 角度循环 ---
+            for i, (th_deg, ph_deg) in enumerate(angle_list):
+                if progress_callback:
+                    progress_callback(
+                        int(i * 95 / N_angles), 100,
+                        f"频扫角度 {i+1}/{N_angles}: θ={th_deg:.1f}°, φ={ph_deg:.1f}°"
+                    )
+
+                th_rad = np.radians(th_deg)
+                ph_rad = np.radians(ph_deg)
+                wave  = IncidentWave(f_max, th_rad, ph_rad)
+                k_dir = wave.k_dir
+
+                I_po = compute_po_freq_sweep(mesh_list, k_dir, frequencies, sinc_mode, use_gpu)
+                I_po_matrix[i] = I_po
+
+                if enable_ptd and ptd_edges:
+                    I_ptd = compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization, use_gpu)
+                    I_ptd_matrix[i] = I_ptd
+                    I_total = I_po + I_ptd
+                else:
+                    I_total = I_po
+
+                I_total_matrix[i] = I_total
+
+                prof_db, r_ax, _, stats_i = compute_range_profile(I_total, frequencies, window, zero_pad)
+                profile_matrix[i] = prof_db
+                if range_axis is None:
+                    range_axis = r_ax
+                    stats = stats_i
+
+            if progress_callback:
+                progress_callback(100, 100, "频扫完成")
+
+            # --- 8. 计算 RCS 矩阵 ---
+            k_arr = 2.0 * np.pi * frequencies / C0   # (Nf,)
+            sigma_mat  = (k_arr ** 2 / np.pi) * np.abs(I_total_matrix) ** 2  # (N_angles, Nf)
+            rcs_matrix = 10.0 * np.log10(np.maximum(sigma_mat, 1e-30))
+
+            # --- 9. 判断扫描模式 ---
+            scan_mode = '1d' if N_angles == 1 else '2d_angle_freq'
+
+            if enable_ptd and ptd_edges:
+                print(f"  [频扫] I_ptd 已计算，max|I_ptd|={np.max(np.abs(I_ptd_matrix)):.3e}")
+
+            def _squeeze(arr):
+                return arr.squeeze(axis=0) if (scan_mode == '1d' and arr is not None) else arr
+
+            result = {
+                'mode': 'freq_sweep',
+                'frequencies': frequencies,
+                'theta_deg': theta_deg,
+                'phi_deg': phi_deg,
+                'scan_mode': scan_mode,
+                'I_po_matrix':    _squeeze(I_po_matrix),
+                'I_ptd_matrix':   _squeeze(I_ptd_matrix) if I_ptd_matrix is not None else None,
+                'I_total_matrix': _squeeze(I_total_matrix),
+                'rcs_matrix':     _squeeze(rcs_matrix),
+                'profile_matrix': _squeeze(profile_matrix),
+                'range_axis':     range_axis,
+                'stats':          stats,
+                'elapsed_time':   time.time() - start_time,
+                'params':         params,
+                'freq_sweep_params': freq_sweep_params,
+                'timestamp':      time.time(),
+            }
+            return result
+
+        except Exception as e:
+            traceback.print_exc()
+            raise e
 
     def generate_mesh(self, geo, params):
         """
