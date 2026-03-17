@@ -1620,12 +1620,25 @@ class CEMPoQtWindow(QMainWindow):
                 writer.writerow(["# Algorithm", res.get('params', {}).get('algorithm')])
                 writer.writerow([])
                 
+                def _cplx_cols(key_c, idx=None):
+                    """从 result 取复振幅，返回 [re, im] 或 [] (无数据时)"""
+                    v = res.get(key_c)
+                    if v is None:
+                        return []
+                    c = complex(v[idx] if idx is not None else v)
+                    return [c.real, c.imag]
+
                 if mode == '2d':
                     has_po  = res.get('rcs_po')  is not None
                     has_ptd = res.get('rcs_ptd') is not None
+                    has_I   = res.get('I_total') is not None
                     header = ["Theta (deg)", "Phi (deg)", "RCS Total (dBsm)", "RCS Total (m^2)"]
                     if has_po:  header.append("RCS PO (dBsm)")
                     if has_ptd: header.append("RCS PTD (dBsm)")
+                    if has_I:
+                        header += ["I Total (Re)", "I Total (Im)",
+                                   "I PO (Re)", "I PO (Im)",
+                                   "I PTD (Re)", "I PTD (Im)"]
                     writer.writerow(header)
 
                     theta = res['theta_deg']
@@ -1636,14 +1649,23 @@ class CEMPoQtWindow(QMainWindow):
                             row = [t, p, val_db, 10 ** (val_db / 10)]
                             if has_po:  row.append(res['rcs_po'][i, j])
                             if has_ptd: row.append(res['rcs_ptd'][i, j])
+                            if has_I:
+                                row += _cplx_cols('I_total', (i, j))
+                                row += _cplx_cols('I_po',    (i, j))
+                                row += _cplx_cols('I_ptd',   (i, j))
                             writer.writerow(row)
 
                 elif mode == '1d_phi':
                     has_po  = res.get('rcs_po')  is not None
                     has_ptd = res.get('rcs_ptd') is not None
+                    has_I   = res.get('I_total') is not None
                     header = ["Phi (deg)", "RCS Total (dBsm)", "RCS Total (m^2)"]
                     if has_po:  header.append("RCS PO (dBsm)")
                     if has_ptd: header.append("RCS PTD (dBsm)")
+                    if has_I:
+                        header += ["I Total (Re)", "I Total (Im)",
+                                   "I PO (Re)", "I PO (Im)",
+                                   "I PTD (Re)", "I PTD (Im)"]
                     writer.writerow(header)
 
                     for i, p in enumerate(res['phi_deg']):
@@ -1651,14 +1673,23 @@ class CEMPoQtWindow(QMainWindow):
                         row = [p, val_db, 10 ** (val_db / 10)]
                         if has_po:  row.append(res['rcs_po'][i])
                         if has_ptd: row.append(res['rcs_ptd'][i])
+                        if has_I:
+                            row += _cplx_cols('I_total', i)
+                            row += _cplx_cols('I_po',    i)
+                            row += _cplx_cols('I_ptd',   i)
                         writer.writerow(row)
 
                 else:
                     has_po  = res.get('rcs_po')  is not None
                     has_ptd = res.get('rcs_ptd') is not None
+                    has_I   = res.get('I_total') is not None
                     header = ["Theta (deg)", "RCS Total (dBsm)", "RCS Total (m^2)"]
                     if has_po:  header.append("RCS PO (dBsm)")
                     if has_ptd: header.append("RCS PTD (dBsm)")
+                    if has_I:
+                        header += ["I Total (Re)", "I Total (Im)",
+                                   "I PO (Re)", "I PO (Im)",
+                                   "I PTD (Re)", "I PTD (Im)"]
                     writer.writerow(header)
 
                     for i, t in enumerate(res['theta_deg']):
@@ -1666,6 +1697,10 @@ class CEMPoQtWindow(QMainWindow):
                         row = [t, val_db, 10 ** (val_db / 10)]
                         if has_po:  row.append(res['rcs_po'][i])
                         if has_ptd: row.append(res['rcs_ptd'][i])
+                        if has_I:
+                            row += _cplx_cols('I_total', i)
+                            row += _cplx_cols('I_po',    i)
+                            row += _cplx_cols('I_ptd',   i)
                         writer.writerow(row)
                         
             self.log(f"Exported successfully to {path}")

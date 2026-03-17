@@ -129,7 +129,10 @@ class RCSAnalyzer:
         return {
             'total': to_rcs_db(total_I, k_mag),
             'po':    to_rcs_db(total_I_po, k_mag),
-            'ptd':   to_rcs_db(total_I_ptd, k_mag)
+            'ptd':   to_rcs_db(total_I_ptd, k_mag),
+            'total_c': complex(total_I),
+            'po_c':    complex(total_I_po),
+            'ptd_c':   complex(total_I_ptd),
         }
 
     def compute_monostatic_rcs(self, geometry, wave_params, angles,
@@ -183,7 +186,8 @@ class RCSAnalyzer:
     def _compute_serial(self, geometry_data, wave_params, angles,
                         samples_per_lambda, k_mag, show_progress, progress_callback=None,
                         ptd_edges=None, polarization='VV', is_cached=False, ptd_workers=None):
-        rcs_list = {'total': [], 'po': [], 'ptd': []}
+        rcs_list = {'total': [], 'po': [], 'ptd': [],
+                    'total_c': [], 'po_c': [], 'ptd_c': []}
         n_angles = len(angles)
 
         is_merged = isinstance(geometry_data, MergedMeshData)
@@ -234,6 +238,9 @@ class RCSAnalyzer:
             rcs_list['total'].append(to_rcs_db(total_I, k_mag))
             rcs_list['po'].append(to_rcs_db(total_I_po, k_mag))
             rcs_list['ptd'].append(to_rcs_db(total_I_ptd, k_mag))
+            rcs_list['total_c'].append(complex(total_I))
+            rcs_list['po_c'].append(complex(total_I_po))
+            rcs_list['ptd_c'].append(complex(total_I_ptd))
 
             if (i + 1) % max(1, n_angles // 20) == 0 or (i + 1) == n_angles:
                 progress = (i + 1) / n_angles * 100
@@ -284,12 +291,16 @@ class RCSAnalyzer:
                         if show_progress: logger.info(msg)
                         if progress_callback: progress_callback(completed, n_angles, msg)
 
-            final_rcs = {'total': [], 'po': [], 'ptd': []}
+            final_rcs = {'total': [], 'po': [], 'ptd': [],
+                         'total_c': [], 'po_c': [], 'ptd_c': []}
             for i in range(n_angles):
                 res = rcs_dict[i]
                 final_rcs['total'].append(res['total'])
                 final_rcs['po'].append(res['po'])
                 final_rcs['ptd'].append(res['ptd'])
+                final_rcs['total_c'].append(res['total_c'])
+                final_rcs['po_c'].append(res['po_c'])
+                final_rcs['ptd_c'].append(res['ptd_c'])
 
             done_msg = "并行计算完成!"
             if show_progress: logger.info(done_msg)
@@ -342,7 +353,10 @@ class RCSAnalyzer:
         rcs_2d = {
             'total': np.zeros((n_theta, n_phi)),
             'po':    np.zeros((n_theta, n_phi)),
-            'ptd':   np.zeros((n_theta, n_phi))
+            'ptd':   np.zeros((n_theta, n_phi)),
+            'total_c': np.zeros((n_theta, n_phi), dtype=complex),
+            'po_c':    np.zeros((n_theta, n_phi), dtype=complex),
+            'ptd_c':   np.zeros((n_theta, n_phi), dtype=complex),
         }
 
         is_merged = isinstance(geometry_data, MergedMeshData)
@@ -373,6 +387,9 @@ class RCSAnalyzer:
                 rcs_2d['total'][i, j] = to_rcs_db(total_I, k_mag)
                 rcs_2d['po'][i, j]    = to_rcs_db(total_I_po, k_mag)
                 rcs_2d['ptd'][i, j]   = to_rcs_db(total_I_ptd, k_mag)
+                rcs_2d['total_c'][i, j] = complex(total_I)
+                rcs_2d['po_c'][i, j]    = complex(total_I_po)
+                rcs_2d['ptd_c'][i, j]   = complex(total_I_ptd)
 
                 computed += 1
                 if computed % max(1, total_points // 20) == 0 or computed == total_points:
@@ -411,7 +428,10 @@ class RCSAnalyzer:
         rcs_2d = {
             'total': np.zeros((n_theta, n_phi)),
             'po':    np.zeros((n_theta, n_phi)),
-            'ptd':   np.zeros((n_theta, n_phi))
+            'ptd':   np.zeros((n_theta, n_phi)),
+            'total_c': np.zeros((n_theta, n_phi), dtype=complex),
+            'po_c':    np.zeros((n_theta, n_phi), dtype=complex),
+            'ptd_c':   np.zeros((n_theta, n_phi), dtype=complex),
         }
 
         try:
@@ -428,6 +448,9 @@ class RCSAnalyzer:
                     rcs_2d['total'][i, j] = res['total']
                     rcs_2d['po'][i, j]    = res['po']
                     rcs_2d['ptd'][i, j]   = res['ptd']
+                    rcs_2d['total_c'][i, j] = res['total_c']
+                    rcs_2d['po_c'][i, j]    = res['po_c']
+                    rcs_2d['ptd_c'][i, j]   = res['ptd_c']
 
                     computed += 1
                     if computed % max(1, total_points // 20) == 0 or computed == total_points:

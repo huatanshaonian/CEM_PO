@@ -97,16 +97,20 @@ class SolverBridge:
                 # 结果标准化
                 if isinstance(rcs_result_raw, dict):
                     rcs_total = rcs_result_raw['total']
-                    rcs_po = rcs_result_raw.get('po')
-                    rcs_ptd = rcs_result_raw.get('ptd')
+                    rcs_po    = rcs_result_raw.get('po')
+                    rcs_ptd   = rcs_result_raw.get('ptd')
+                    I_total   = rcs_result_raw.get('total_c')
+                    I_po      = rcs_result_raw.get('po_c')
+                    I_ptd     = rcs_result_raw.get('ptd_c')
                 else:
                     rcs_total = rcs_result_raw
-                    rcs_po, rcs_ptd = None, None
+                    rcs_po = rcs_ptd = I_total = I_po = I_ptd = None
 
                 result_data = {
                     'mode': '2d',
                     'theta_deg': theta_deg, 'phi_deg': phi_deg,
-                    'rcs_total': rcs_total, 'rcs_po': rcs_po, 'rcs_ptd': rcs_ptd
+                    'rcs_total': rcs_total, 'rcs_po': rcs_po, 'rcs_ptd': rcs_ptd,
+                    'I_total': I_total, 'I_po': I_po, 'I_ptd': I_ptd,
                 }
                 
             elif is_phi_scan:
@@ -125,18 +129,22 @@ class SolverBridge:
                 )
 
                 if isinstance(rcs_result_raw, dict):
-                    rcs_total = rcs_result_raw['total'][0]   # squeeze theta dim
-                    rcs_po = rcs_result_raw['po'][0] if rcs_result_raw.get('po') is not None else None
-                    rcs_ptd = rcs_result_raw['ptd'][0] if rcs_result_raw.get('ptd') is not None else None
+                    rcs_total = rcs_result_raw['total'][0]
+                    rcs_po    = rcs_result_raw['po'][0]    if rcs_result_raw.get('po')    is not None else None
+                    rcs_ptd   = rcs_result_raw['ptd'][0]   if rcs_result_raw.get('ptd')   is not None else None
+                    I_total   = rcs_result_raw['total_c'][0] if rcs_result_raw.get('total_c') is not None else None
+                    I_po      = rcs_result_raw['po_c'][0]    if rcs_result_raw.get('po_c')    is not None else None
+                    I_ptd     = rcs_result_raw['ptd_c'][0]   if rcs_result_raw.get('ptd_c')   is not None else None
                 else:
                     rcs_total = rcs_result_raw[0]
-                    rcs_po, rcs_ptd = None, None
+                    rcs_po = rcs_ptd = I_total = I_po = I_ptd = None
 
                 result_data = {
                     'mode': '1d_phi',
                     'theta_deg': theta_deg[0],
                     'phi_deg': phi_deg,
-                    'rcs_total': rcs_total, 'rcs_po': rcs_po, 'rcs_ptd': rcs_ptd
+                    'rcs_total': rcs_total, 'rcs_po': rcs_po, 'rcs_ptd': rcs_ptd,
+                    'I_total': I_total, 'I_po': I_po, 'I_ptd': I_ptd,
                 }
 
             else:
@@ -156,17 +164,21 @@ class SolverBridge:
 
                 if isinstance(rcs_result_raw, dict):
                     rcs_total = rcs_result_raw['total']
-                    rcs_po = rcs_result_raw.get('po')
-                    rcs_ptd = rcs_result_raw.get('ptd')
+                    rcs_po    = rcs_result_raw.get('po')
+                    rcs_ptd   = rcs_result_raw.get('ptd')
+                    I_total   = rcs_result_raw.get('total_c')
+                    I_po      = rcs_result_raw.get('po_c')
+                    I_ptd     = rcs_result_raw.get('ptd_c')
                 else:
                     rcs_total = rcs_result_raw
-                    rcs_po, rcs_ptd = None, None
+                    rcs_po = rcs_ptd = I_total = I_po = I_ptd = None
 
                 result_data = {
                     'mode': '1d',
                     'theta_deg': theta_deg,
                     'phi_deg': np.degrees(phi_rad[0]),
-                    'rcs_total': rcs_total, 'rcs_po': rcs_po, 'rcs_ptd': rcs_ptd
+                    'rcs_total': rcs_total, 'rcs_po': rcs_po, 'rcs_ptd': rcs_ptd,
+                    'I_total': I_total, 'I_po': I_po, 'I_ptd': I_ptd,
                 }
 
             # --- 6. 结果打包 ---

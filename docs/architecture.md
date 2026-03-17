@@ -65,7 +65,7 @@ CEM_PO/
 ```
 gui_qt.py / main.py
     │
-    ├── core/solver_bridge.py   ← 隔离 UI 与计算
+    ├── core/solver_bridge.py   ← 隔离 UI 与计算 (API 核心入口)
     │       │
     │       ├── solvers/api.py  ← 算法调度
     │       │       ├── solvers/po.py        (PO 积分)
@@ -81,6 +81,8 @@ gui_qt.py / main.py
     ├── physics/                ← 被 solvers/ 调用
     └── core/env.py             ← GPU 环境检测
 ```
+
+详细的接口调用说明请参考：[API 参考指南](api_reference.md)
 
 ## 关键数据流
 
