@@ -248,13 +248,10 @@ def get_analytical_solution(geometry_type, geometry_params, frequency, theta_rad
         return rcs, label
 
     elif geometry_type == 'plate':
-        rcs = plate_rcs(
-            geometry_params['width'],
-            geometry_params['height'],
-            frequency,
-            theta_rad
-        )
-        label = f"解析解 (平板 PO)"
+        width = float(geometry_params.get('width', geometry_params.get('length', 1.0)))
+        length = float(geometry_params.get('length', geometry_params.get('height', 1.0)))
+        rcs = plate_rcs(width, length, frequency, theta_rad)
+        label = f"解析解 (平板 PO, {width}m×{length}m)"
         return rcs, label
 
     elif geometry_type == 'sphere':

@@ -62,7 +62,8 @@ class SolverBridge:
             phi_deg = np.linspace(phi_start, phi_end, n_phi)
             phi_rad = np.radians(phi_deg)
             
-            is_2d = n_phi > 1
+            is_2d = n_phi > 1 and n_theta > 1
+            is_phi_scan = n_phi > 1 and n_theta == 1  # 仅 phi 变化的 1D 扫描
 
             # --- 3. 网格缓存处理 ---
             cached_mesh = self._resolve_mesh_cache(geo, freq, samples, use_degen, algo_id, use_gpu, progress_callback)
@@ -108,14 +109,41 @@ class SolverBridge:
                     'rcs_total': rcs_total, 'rcs_po': rcs_po, 'rcs_ptd': rcs_ptd
                 }
                 
+            elif is_phi_scan:
+                # 1D phi scan: n_theta=1, n_phi>1 — scan along phi at fixed theta
+                if progress_callback:
+                    progress_callback(5, 100, f"Starting 1D phi scan: {n_phi} angles...")
+
+                rcs_result_raw = analyzer.compute_monostatic_rcs_2d(
+                    geo, freq, theta_rad, phi_rad,
+                    samples_per_lambda=samples,
+                    parallel=parallel, n_workers=n_workers,
+                    show_progress=False, progress_callback=progress_callback,
+                    enable_ptd=enable_ptd, ptd_edge_identifiers=ptd_edges,
+                    cached_mesh_data=cached_mesh, polarization=ptd_pol,
+                    gpu=use_gpu, use_degenerate_mesh=use_degen
+                )
+
+                if isinstance(rcs_result_raw, dict):
+                    rcs_total = rcs_result_raw['total'][0]   # squeeze theta dim
+                    rcs_po = rcs_result_raw['po'][0] if rcs_result_raw.get('po') is not None else None
+                    rcs_ptd = rcs_result_raw['ptd'][0] if rcs_result_raw.get('ptd') is not None else None
+                else:
+                    rcs_total = rcs_result_raw[0]
+                    rcs_po, rcs_ptd = None, None
+
+                result_data = {
+                    'mode': '1d_phi',
+                    'theta_deg': theta_deg[0],
+                    'phi_deg': phi_deg,
+                    'rcs_total': rcs_total, 'rcs_po': rcs_po, 'rcs_ptd': rcs_ptd
+                }
+
             else:
-                # 1D Scan
+                # 1D Scan along theta
                 if progress_callback:
                     progress_callback(5, 100, f"Starting 1D scan: {n_theta} angles...")
-                
-                # Fix: compute_monostatic_rcs signature uses dict for wave_params or separate args?
-                # Looking at gui.py: compute_monostatic_rcs(geo, {'frequency': freq, 'phi': phi_rad}, ...)
-                
+
                 rcs_result_raw = analyzer.compute_monostatic_rcs(
                     geo, {'frequency': freq, 'phi': phi_rad[0]}, theta_rad,
                     samples_per_lambda=samples,

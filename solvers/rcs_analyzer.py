@@ -12,6 +12,16 @@ from .ptd import PTDProcessor
 logger = logging.getLogger("CEM-PO.Analyzer")
 
 
+def _ptd_angle_task(args):
+    """模块级 PTD 单角度计算任务，供 ProcessPoolExecutor 使用（返回复振幅）。"""
+    theta, ptd_edges, frequency, phi, polarization = args
+    wave = IncidentWave(frequency, theta, phi)
+    total = 0j
+    for edge in ptd_edges:
+        total += PTDProcessor.compute_contribution(edge, wave, polarization)
+    return total
+
+
 def to_rcs_db(val, k_mag):
     """Convert a complex scatter integral to monostatic RCS in dBsm."""
     sigma = (k_mag**2 / np.pi) * np.abs(val)**2
@@ -161,19 +171,41 @@ class RCSAnalyzer:
                     is_cached=is_cached
                 )
 
+        # GPU 模式下，若同时勾选 Parallel 且有 PTD 边，则并行预计算 PTD
+        ptd_workers = n_workers if (gpu and parallel and ptd_edges) else None
+
         return self._compute_serial(
             geometry_data, wave_params, angles, samples_per_lambda,
             k_mag, show_progress, progress_callback, ptd_edges, polarization,
-            is_cached=is_cached
+            is_cached=is_cached, ptd_workers=ptd_workers
         )
 
     def _compute_serial(self, geometry_data, wave_params, angles,
                         samples_per_lambda, k_mag, show_progress, progress_callback=None,
-                        ptd_edges=None, polarization='VV', is_cached=False):
+                        ptd_edges=None, polarization='VV', is_cached=False, ptd_workers=None):
         rcs_list = {'total': [], 'po': [], 'ptd': []}
         n_angles = len(angles)
 
         is_merged = isinstance(geometry_data, MergedMeshData)
+
+        # 若指定了 ptd_workers，提前并行计算所有角度的 PTD 复振幅
+        ptd_precomputed = None
+        if ptd_edges and ptd_workers and ptd_workers > 1:
+            msg = f"PTD 并行预计算: {ptd_workers} 个进程, {n_angles} 个角度..."
+            if show_progress: logger.info(msg)
+            if progress_callback: progress_callback(0, n_angles, msg)
+            freq = wave_params['frequency']
+            phi  = wave_params['phi']
+            args_list = [
+                (theta, ptd_edges, freq, phi, polarization)
+                for theta in angles
+            ]
+            ptd_precomputed = [None] * n_angles
+            with ProcessPoolExecutor(max_workers=ptd_workers) as ex:
+                future_to_idx = {ex.submit(_ptd_angle_task, a): i
+                                 for i, a in enumerate(args_list)}
+                for f in as_completed(future_to_idx):
+                    ptd_precomputed[future_to_idx[f]] = f.result()
 
         for i, theta in enumerate(angles):
             wave = self._make_wave(wave_params['frequency'], theta, wave_params['phi'])
@@ -191,8 +223,11 @@ class RCSAnalyzer:
 
             total_I_ptd = 0j
             if ptd_edges:
-                for edge in ptd_edges:
-                    total_I_ptd += PTDProcessor.compute_contribution(edge, wave, polarization=polarization)
+                if ptd_precomputed is not None:
+                    total_I_ptd = ptd_precomputed[i]
+                else:
+                    for edge in ptd_edges:
+                        total_I_ptd += PTDProcessor.compute_contribution(edge, wave, polarization=polarization)
 
             total_I = total_I_po + total_I_ptd
 

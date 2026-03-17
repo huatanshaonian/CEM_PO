@@ -77,9 +77,10 @@ class GeometryFactory:
                 scale = 0.01
 
             invert_indices = params.get('invert_indices', [])
+            max_param_range = params.get('max_param_range', 1e9)
 
-            # 调用原有的 STEP 加载逻辑，直接传递 invert_indices
-            surfaces = load_step_file(file_path, scale=scale, invert_indices=invert_indices)
+            surfaces = load_step_file(file_path, max_param_range=max_param_range,
+                                      scale=scale, invert_indices=invert_indices)
 
             return surfaces
 

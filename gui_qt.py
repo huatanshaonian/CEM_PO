@@ -820,7 +820,7 @@ class CEMPoQtWindow(QMainWindow):
                 except RuntimeError:
                     pass  # C++ object already deleted
         # Line edits
-        for attr in ('invert_indices_input',
+        for attr in ('invert_indices_input', 'step_max_param_input',
                      'iges_invert_indices_input', 'iges_delete_indices_input', 'iges_rotation_input'):
             w = getattr(self, attr, None)
             if w is not None:
@@ -870,11 +870,17 @@ class CEMPoQtWindow(QMainWindow):
             self.invert_indices_input.setPlaceholderText("e.g. 0,1,3,5")
             self.geo_dynamic_layout.addRow("Invert Normals:", self.invert_indices_input)
 
+            self.step_max_param_input = QLineEdit("1e9")
+            self.step_max_param_input.setToolTip("参数域范围上限，超过此值的面会被跳过（用于过滤无限平面）。若读取失败/面被跳过，可调大此值。")
+            self.geo_dynamic_layout.addRow("Max Param Range:", self.step_max_param_input)
+
             # Restore cached values
             if 'step_unit_combo' in self._input_cache:
                 self.step_unit_combo.setCurrentText(self._input_cache['step_unit_combo'])
             if 'invert_indices_input' in self._input_cache:
                 self.invert_indices_input.setText(self._input_cache['invert_indices_input'])
+            if 'step_max_param_input' in self._input_cache:
+                self.step_max_param_input.setText(self._input_cache['step_max_param_input'])
             if self.step_file_path and hasattr(self, 'lbl_step'):
                 self.lbl_step.setText(os.path.basename(self.step_file_path))
 
@@ -1035,6 +1041,11 @@ class CEMPoQtWindow(QMainWindow):
                     params['invert_indices'] = []
             else:
                 params['invert_indices'] = []
+            # Max param range
+            try:
+                params['max_param_range'] = float(self.step_max_param_input.text().strip())
+            except (ValueError, AttributeError):
+                params['max_param_range'] = 1e9
         elif self.geo_type_combo.currentText() == "IGES File":
             params['file_path'] = getattr(self, 'iges_file_path', '')
             params['unit'] = self.iges_unit_combo.currentText() if hasattr(self, 'iges_unit_combo') else 'mm'
@@ -1530,6 +1541,27 @@ class CEMPoQtWindow(QMainWindow):
             ax.invert_yaxis()
             ax.set_title(f"RCS Pattern (2D Scan, f={freq_mhz:.1f} MHz)")
 
+        elif mode == '1d_phi':
+            angles = result['phi_deg']
+            ax.plot(angles, _conv(result['rcs_total']),
+                    label='Total RCS', linewidth=2, color='#007ACC')
+
+            if result.get('rcs_po') is not None:
+                ax.plot(angles, _conv(result['rcs_po']),
+                        '--', label='PO', alpha=0.7, color='orange')
+
+            if result.get('rcs_ptd') is not None:
+                ax.plot(angles, _conv(result['rcs_ptd']),
+                        ':', label='PTD Fringe (numerical)',
+                        alpha=0.85, color='green', linewidth=1.5)
+
+            theta_fixed = result.get('theta_deg', 0)
+            ax.set_xlabel("Phi (deg)")
+            ax.set_ylabel(f"RCS ({unit_label})")
+            ax.set_title(f"RCS Pattern (Phi scan, θ={theta_fixed:.1f}°, f={freq_mhz:.1f} MHz)")
+            ax.grid(True, linestyle='--', alpha=0.6)
+            ax.legend()
+
         else:
             angles = result['theta_deg']
             ax.plot(angles, _conv(result['rcs_total']),
@@ -1589,40 +1621,51 @@ class CEMPoQtWindow(QMainWindow):
                 writer.writerow([])
                 
                 if mode == '2d':
-                    # 2D Export: Theta, Phi, RCS
-                    # Note: RCSAnalyzer returns dB values directly
-                    writer.writerow(["Theta (deg)", "Phi (deg)", "RCS (dBsm)", "RCS (m^2)"])
-                    rcs_db = res['rcs_total']  # Already in dB
-                    theta = res['theta_deg']
-                    phi = res['phi_deg']
-
-                    for i, t in enumerate(theta):
-                        for j, p in enumerate(phi):
-                            val_db = rcs_db[i, j]
-                            val_m2 = 10 ** (val_db / 10)  # Convert dB to linear m²
-                            writer.writerow([t, p, val_db, val_m2])
-                else:
-                    # 1D Export
-                    # Note: RCSAnalyzer returns dB values directly
-                    header = ["Theta (deg)", "RCS Total (dBsm)", "RCS Total (m^2)"]
-                    has_po = res.get('rcs_po') is not None
-                    if has_po: header.extend(["RCS PO (dBsm)"])
-
+                    has_po  = res.get('rcs_po')  is not None
+                    has_ptd = res.get('rcs_ptd') is not None
+                    header = ["Theta (deg)", "Phi (deg)", "RCS Total (dBsm)", "RCS Total (m^2)"]
+                    if has_po:  header.append("RCS PO (dBsm)")
+                    if has_ptd: header.append("RCS PTD (dBsm)")
                     writer.writerow(header)
 
                     theta = res['theta_deg']
-                    rcs_db = res['rcs_total']  # Already in dB
-                    rcs_po_db = res.get('rcs_po')  # Already in dB
-
+                    phi   = res['phi_deg']
                     for i, t in enumerate(theta):
-                        val_db = rcs_db[i]
-                        val_m2 = 10 ** (val_db / 10)  # Convert dB to linear m²
-                        row = [t, val_db, val_m2]
+                        for j, p in enumerate(phi):
+                            val_db = res['rcs_total'][i, j]
+                            row = [t, p, val_db, 10 ** (val_db / 10)]
+                            if has_po:  row.append(res['rcs_po'][i, j])
+                            if has_ptd: row.append(res['rcs_ptd'][i, j])
+                            writer.writerow(row)
 
-                        if has_po:
-                            po_db = rcs_po_db[i]
-                            row.append(po_db)
+                elif mode == '1d_phi':
+                    has_po  = res.get('rcs_po')  is not None
+                    has_ptd = res.get('rcs_ptd') is not None
+                    header = ["Phi (deg)", "RCS Total (dBsm)", "RCS Total (m^2)"]
+                    if has_po:  header.append("RCS PO (dBsm)")
+                    if has_ptd: header.append("RCS PTD (dBsm)")
+                    writer.writerow(header)
 
+                    for i, p in enumerate(res['phi_deg']):
+                        val_db = res['rcs_total'][i]
+                        row = [p, val_db, 10 ** (val_db / 10)]
+                        if has_po:  row.append(res['rcs_po'][i])
+                        if has_ptd: row.append(res['rcs_ptd'][i])
+                        writer.writerow(row)
+
+                else:
+                    has_po  = res.get('rcs_po')  is not None
+                    has_ptd = res.get('rcs_ptd') is not None
+                    header = ["Theta (deg)", "RCS Total (dBsm)", "RCS Total (m^2)"]
+                    if has_po:  header.append("RCS PO (dBsm)")
+                    if has_ptd: header.append("RCS PTD (dBsm)")
+                    writer.writerow(header)
+
+                    for i, t in enumerate(res['theta_deg']):
+                        val_db = res['rcs_total'][i]
+                        row = [t, val_db, 10 ** (val_db / 10)]
+                        if has_po:  row.append(res['rcs_po'][i])
+                        if has_ptd: row.append(res['rcs_ptd'][i])
                         writer.writerow(row)
                         
             self.log(f"Exported successfully to {path}")

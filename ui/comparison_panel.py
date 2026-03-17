@@ -84,7 +84,8 @@ class ComparisonManager:
                     "Calculated")
         for item in self.w.comparison_data:
             if item['name'] == label:
-                return self._parse_csv_2d(item)
+                res = self._parse_csv_2d(item)
+                return res[:4] if res else None  # (theta, phi, rcs_total, name)
         return None
 
     def _resolve_dataset_1d(self, label):
@@ -102,6 +103,8 @@ class ComparisonManager:
                 return None
             if r.get('mode') == '1d':
                 return r['theta_deg'], r['rcs_total'], "Simulation"
+            if r.get('mode') == '1d_phi':
+                return r['phi_deg'], r['rcs_total'], "Simulation"
             if r.get('mode') == '2d':
                 axis   = self.w.combo_slice_axis.currentText()   # "Phi" or "Theta"
                 angle  = self.w.spin_slice_angle.value()
@@ -116,7 +119,8 @@ class ComparisonManager:
             return None
         for item in self.w.comparison_data:
             if item['name'] == label:
-                return self._parse_csv_1d(item)
+                res = self._parse_csv_1d(item)
+                return res[:3] if res else None  # (angle, rcs_total, name)
         return None
 
     # ------------------------------------------------------------------
@@ -190,13 +194,14 @@ class ComparisonManager:
         show_ptd   = self.w.chk_show_ptd.isChecked()
 
         if r:
-            if r.get('mode') == '1d':
+            if r.get('mode') in ('1d', '1d_phi'):
+                ang = r['theta_deg'] if r.get('mode') == '1d' else r['phi_deg']
                 if show_total:
-                    datasets.append((r['theta_deg'], r['rcs_total'], 'Sim (Total)', '-', None))
+                    datasets.append((ang, r['rcs_total'], 'Sim (Total)', '-', None))
                 if show_po and r.get('rcs_po') is not None:
-                    datasets.append((r['theta_deg'], r['rcs_po'], 'Sim (PO)', '--', None))
+                    datasets.append((ang, r['rcs_po'], 'Sim (PO)', '--', None))
                 if show_ptd and r.get('rcs_ptd') is not None:
-                    datasets.append((r['theta_deg'], r['rcs_ptd'], 'Sim (PTD)', ':', None))
+                    datasets.append((ang, r['rcs_ptd'], 'Sim (PTD)', ':', None))
             elif r.get('mode') == '2d':
                 res = self._resolve_dataset_1d("Current Simulation")
                 if res and show_total:
@@ -204,8 +209,15 @@ class ComparisonManager:
 
         for item in self.w.comparison_data:
             res = self._parse_csv_1d(item)
-            if res:
-                datasets.append((res[0], res[1], res[2], '--', None))
+            if not res:
+                continue
+            angle, rcs_total, name, rcs_po, rcs_ptd = res
+            if show_total:
+                datasets.append((angle, rcs_total, name, '--', None))
+            if show_po and rcs_po is not None:
+                datasets.append((angle, rcs_po, f'{name} (PO)', '--', None))
+            if show_ptd and rcs_ptd is not None:
+                datasets.append((angle, rcs_ptd, f'{name} (PTD)', ':', None))
 
         if self.w.chk_analytical_comp.isChecked() and r:
             analytic = self._get_analytical_data(r)
@@ -303,16 +315,32 @@ class ComparisonManager:
         ta, pa, ma, na = da
 
         if db is None:
-            # 当前仿真结果：尝试并排显示 Total / PO / PTD 子图
-            if self.w.combo_ds_a.currentText() == "Current Simulation":
+            # B 为空：尝试显示 Total / PO / PTD 多分量子图
+            label_a = self.w.combo_ds_a.currentText()
+            if label_a == "Current Simulation":
                 r = self.w.last_result
                 if r and r.get('mode') == '2d':
-                    self._draw_components_2d(r, ta, pa)
+                    freq = r.get('freq', 0)
+                    freq_str = f'{freq / 1e6:.1f} MHz' if freq else ''
+                    self._draw_components_2d(
+                        r['rcs_total'], r.get('rcs_po'), r.get('rcs_ptd'),
+                        ta, pa, title=f'2D RCS Components  {freq_str}')
                     return
-            # 外部 CSV 或无分量数据：单图显示
+            else:
+                # CSV：用完整解析结果（含 PO/PTD）
+                csv_item = next((x for x in self.w.comparison_data if x['name'] == label_a), None)
+                if csv_item:
+                    full = self._parse_csv_2d(csv_item)
+                    if full and (full[4] is not None or full[5] is not None):
+                        # 有 PO 或 PTD 列 → 多分量显示
+                        _, _, rcs_total, name, rcs_po, rcs_ptd = full
+                        self._draw_components_2d(rcs_total, rcs_po, rcs_ptd,
+                                                 ta, pa, title=f'2D RCS Components — {name}')
+                        return
+            # 无分量数据：单图显示
             ax = self.w.comp_figure.add_subplot(111)
             extent = [pa.min(), pa.max(), ta.max(), ta.min()]
-            phi_range = pa.max() - pa.min() if len(pa) > 1 else 1.0
+            phi_range   = pa.max() - pa.min() if len(pa) > 1 else 1.0
             theta_range = ta.max() - ta.min() if len(ta) > 1 else 1.0
             data_aspect = phi_range / theta_range if theta_range > 0 else 1.0
             vmin, vmax = self._cbar_range(float(np.nanmin(ma)), float(np.nanmax(ma)))
@@ -371,47 +399,85 @@ class ComparisonManager:
     # ------------------------------------------------------------------
 
     def _parse_csv_1d(self, item):
-        """Parse CSV as 1D RCS (theta, rcs). Returns (theta_1d, rcs_1d, name) or None."""
+        """Parse CSV as 1D RCS. Returns (angle_1d, rcs_total, name, rcs_po, rcs_ptd) or None.
+
+        angle column: first column containing 'theta' or 'phi'.
+        rcs_total: first column containing 'total', or first 'dbsm' column.
+        rcs_po:    column containing 'po' and 'dbsm' (or None).
+        rcs_ptd:   column containing 'ptd' and 'dbsm' (or None).
+        """
         df = item['data']
         cols_lower = [c.lower() for c in df.columns]
-        theta_col = next((df.columns[i] for i, c in enumerate(cols_lower) if 'theta' in c), None)
-        rcs_col   = next((df.columns[i] for i, c in enumerate(cols_lower) if 'dbsm' in c), None)
-        if rcs_col is None:
-            rcs_col = next((df.columns[i] for i, c in enumerate(cols_lower)
-                            if 'rcs' in c and df.columns[i] != theta_col), None)
-        if not (theta_col and rcs_col):
+
+        angle_col = next((df.columns[i] for i, c in enumerate(cols_lower)
+                          if 'theta' in c or 'phi' in c), None)
+        total_col = next((df.columns[i] for i, c in enumerate(cols_lower)
+                          if 'total' in c and 'dbsm' in c), None)
+        if total_col is None:
+            total_col = next((df.columns[i] for i, c in enumerate(cols_lower)
+                              if 'dbsm' in c), None)
+        if total_col is None:
+            total_col = next((df.columns[i] for i, c in enumerate(cols_lower)
+                              if 'rcs' in c and df.columns[i] != angle_col), None)
+
+        if not (angle_col and total_col):
             return None
+
+        po_col  = next((df.columns[i] for i, c in enumerate(cols_lower)
+                        if ' po' in c and 'dbsm' in c), None)
+        ptd_col = next((df.columns[i] for i, c in enumerate(cols_lower)
+                        if 'ptd' in c and 'dbsm' in c), None)
+
         try:
-            theta = df[theta_col].values.astype(float)
-            rcs   = df[rcs_col].values.astype(float)
-            return theta, rcs, item['name']
+            angle = df[angle_col].values.astype(float)
+            total = df[total_col].values.astype(float)
+            po    = df[po_col].values.astype(float)  if po_col  else None
+            ptd   = df[ptd_col].values.astype(float) if ptd_col else None
+            return angle, total, item['name'], po, ptd
         except Exception:
             return None
 
     def _parse_csv_2d(self, item):
         """Parse a loaded CSV as 2D RCS data (flat/long format with Theta, Phi, RCS columns).
 
-        Returns (theta_1d, phi_1d, rcs_2d, name) or None if not 2D.
+        Returns (theta_1d, phi_1d, rcs_total_2d, name, rcs_po_2d, rcs_ptd_2d) or None if not 2D.
+        rcs_po_2d and rcs_ptd_2d are None when the columns are absent.
         """
         df = item['data']
         cols_lower = [c.lower() for c in df.columns]
 
         theta_col = next((df.columns[i] for i, c in enumerate(cols_lower) if 'theta' in c), None)
         phi_col   = next((df.columns[i] for i, c in enumerate(cols_lower) if 'phi'   in c), None)
-        rcs_col   = next((df.columns[i] for i, c in enumerate(cols_lower) if 'dbsm'  in c), None)
-        if rcs_col is None:
-            rcs_col = next((df.columns[i] for i, c in enumerate(cols_lower)
-                            if 'rcs' in c and df.columns[i] not in (theta_col, phi_col)), None)
+        total_col = next((df.columns[i] for i, c in enumerate(cols_lower) if 'total' in c and 'dbsm' in c), None)
+        if total_col is None:
+            total_col = next((df.columns[i] for i, c in enumerate(cols_lower) if 'dbsm' in c), None)
+        if total_col is None:
+            total_col = next((df.columns[i] for i, c in enumerate(cols_lower)
+                              if 'rcs' in c and df.columns[i] not in (theta_col, phi_col)), None)
 
-        if not (theta_col and phi_col and rcs_col):
+        if not (theta_col and phi_col and total_col):
             return None
 
+        po_col  = next((df.columns[i] for i, c in enumerate(cols_lower)
+                        if ' po' in c and 'dbsm' in c), None)
+        ptd_col = next((df.columns[i] for i, c in enumerate(cols_lower)
+                        if 'ptd' in c and 'dbsm' in c), None)
+
+        def _pivot(col):
+            if col is None:
+                return None
+            try:
+                p = df.pivot_table(index=theta_col, columns=phi_col, values=col, aggfunc='mean')
+                return p.values.astype(float)
+            except Exception:
+                return None
+
         try:
-            pivot    = df.pivot_table(index=theta_col, columns=phi_col, values=rcs_col, aggfunc='mean')
+            pivot    = df.pivot_table(index=theta_col, columns=phi_col, values=total_col, aggfunc='mean')
             theta_1d = pivot.index.values.astype(float)
             phi_1d   = pivot.columns.values.astype(float)
             rcs_2d   = pivot.values.astype(float)
-            return theta_1d, phi_1d, rcs_2d, item['name']
+            return theta_1d, phi_1d, rcs_2d, item['name'], _pivot(po_col), _pivot(ptd_col)
         except Exception as e:
             self.w.log(f"2D CSV parse failed ({item['name']}): {e}")
             return None
@@ -561,7 +627,7 @@ class ComparisonManager:
 
         self.w.comp_figure.suptitle(f'Dual Model Comparison: {name_a} / {name_b} / {name_ref}', fontsize=11)
 
-    def _draw_components_2d(self, result, theta, phi):
+    def _draw_components_2d(self, rcs_total, rcs_po, rcs_ptd, theta, phi, title=''):
         """并排显示 Total / PO / PTD 三张 2D 热图，共用同一套 colorbar。
 
         根据 chk_show_total/po/ptd 勾选状态和数据可用性决定显示哪些子图。
@@ -571,12 +637,12 @@ class ComparisonManager:
         show_ptd   = self.w.chk_show_ptd.isChecked()
 
         panels = []
-        if show_total:
-            panels.append((self._conv(result['rcs_total']), 'Total'))
-        if show_po and result.get('rcs_po') is not None:
-            panels.append((self._conv(result['rcs_po']), 'PO'))
-        if show_ptd and result.get('rcs_ptd') is not None:
-            panels.append((self._conv(result['rcs_ptd']), 'PTD Fringe'))
+        if show_total and rcs_total is not None:
+            panels.append((self._conv(rcs_total), 'Total'))
+        if show_po and rcs_po is not None:
+            panels.append((self._conv(rcs_po), 'PO'))
+        if show_ptd and rcs_ptd is not None:
+            panels.append((self._conv(rcs_ptd), 'PTD Fringe'))
 
         if not panels:
             self._show_comp_message("No components selected. Enable Total / PO / PTD above.")
@@ -587,31 +653,24 @@ class ComparisonManager:
         theta_range = theta.max() - theta.min() if len(theta) > 1 else 1.0
         data_aspect = phi_range / theta_range if theta_range > 0 else 1.0
 
-        # 共用 colorbar 范围（取所有子图的 finite 值域）
         all_vals = np.concatenate([d[np.isfinite(d)].ravel() for d, _ in panels])
         vmin, vmax = self._cbar_range(float(np.nanmin(all_vals)), float(np.nanmax(all_vals)))
 
         n = len(panels)
-        # 最后一列留给 colorbar
         width_ratios = [1] * n + [0.05]
         gs = self.w.comp_figure.add_gridspec(1, n + 1, width_ratios=width_ratios, wspace=0.25)
 
-        axes = []
         im_last = None
-        for col, (data, title) in enumerate(panels):
+        for col, (data, label) in enumerate(panels):
             ax = self.w.comp_figure.add_subplot(gs[0, col])
             im_last = ax.imshow(data, extent=extent, aspect=data_aspect,
                                 origin='upper', cmap='jet', vmin=vmin, vmax=vmax)
-            ax.set_title(title, fontsize=10)
+            ax.set_title(label, fontsize=10)
             ax.set_xlabel('Phi (deg)')
             if col == 0:
                 ax.set_ylabel('Theta (deg)')
-            axes.append(ax)
 
         cax = self.w.comp_figure.add_subplot(gs[0, n])
         self.w.comp_figure.colorbar(im_last, cax=cax, label=f'RCS ({self._unit_label()})')
-
-        freq = result.get('freq', 0)
-        freq_str = f'{freq / 1e6:.1f} MHz' if freq else ''
-        self.w.comp_figure.suptitle(
-            f'2D RCS Components  {freq_str}', fontsize=11)
+        if title:
+            self.w.comp_figure.suptitle(title, fontsize=11)
