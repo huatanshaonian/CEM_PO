@@ -1783,11 +1783,28 @@ class CEMPoQtWindow(QMainWindow):
             
             with open(path, 'w', newline='') as f:
                 writer = csv.writer(f)
-                
+
                 # Write Header Info
+                p      = res.get('params', {})
+                ang_p  = p.get('angles', {})
+                ptd_p  = p.get('ptd', {})
+                cmp_p  = p.get('compute', {})
                 writer.writerow(["# CEM PO Solver Results"])
-                writer.writerow(["# Frequency (Hz)", res.get('freq')])
-                writer.writerow(["# Algorithm", res.get('params', {}).get('algorithm')])
+                writer.writerow(["# Mode",              mode])
+                writer.writerow(["# Frequency (Hz)",    res.get('freq', '')])
+                writer.writerow(["# Frequency (MHz)",   (res.get('freq') or 0) / 1e6])
+                writer.writerow(["# Algorithm",         p.get('algorithm', '')])
+                writer.writerow(["# Theta Start (deg)", ang_p.get('theta_start', '')])
+                writer.writerow(["# Theta End (deg)",   ang_p.get('theta_end', '')])
+                writer.writerow(["# N Theta",           ang_p.get('n_theta', '')])
+                writer.writerow(["# Phi Start (deg)",   ang_p.get('phi_start', '')])
+                writer.writerow(["# Phi End (deg)",     ang_p.get('phi_end', '')])
+                writer.writerow(["# N Phi",             ang_p.get('n_phi', '')])
+                writer.writerow(["# PTD Enabled",       ptd_p.get('enabled', False)])
+                writer.writerow(["# PTD Edges",         ptd_p.get('edges', '')])
+                writer.writerow(["# Polarization",      ptd_p.get('polarization', '')])
+                writer.writerow(["# GPU",               cmp_p.get('gpu', False)])
+                writer.writerow(["# Elapsed Time (s)",  f"{res.get('elapsed_time', 0):.3f}"])
                 writer.writerow([])
                 
                 def _cplx_cols(key_c, idx=None):
@@ -2358,6 +2375,7 @@ class CEMPoQtWindow(QMainWindow):
             has_ptd   = I_ptd_raw is not None
 
             rcs_po_mat = rcs_ptd_mat = None
+            I_po_mat = I_ptd_mat = None
             k_arr = 2.0 * np.pi * freqs / 299792458.0   # (Nf,)
             if has_po:
                 I_po_mat = np.atleast_2d(I_po_raw)
@@ -2391,22 +2409,26 @@ class CEMPoQtWindow(QMainWindow):
                 writer.writerow(["# Elapsed Time (s)",   f"{res.get('elapsed_time', 0):.3f}"])
                 writer.writerow([])
 
+                has_I_po  = I_po_raw  is not None
+                has_I_ptd = I_ptd_raw is not None
                 header = ["Theta (deg)", "Phi (deg)", "RCS Total (dBsm)"]
-                if has_po:
-                    header.append("RCS PO (dBsm)")
-                if has_ptd:
-                    header.append("RCS PTD (dBsm)")
-                header += ["I Total (Re)", "I Total (Im)", "Frequency (MHz)"]
+                if has_po:  header.append("RCS PO (dBsm)")
+                if has_ptd: header.append("RCS PTD (dBsm)")
+                header += ["I Total (Re)", "I Total (Im)"]
+                if has_I_po:  header += ["I PO (Re)", "I PO (Im)"]
+                if has_I_ptd: header += ["I PTD (Re)", "I PTD (Im)"]
+                header.append("Frequency (MHz)")
                 writer.writerow(header)
 
                 for i, (th, ph) in enumerate(angle_list):
                     for j, freq_hz in enumerate(freqs):
                         row = [th, ph, rcs_mat[i, j]]
-                        if has_po:
-                            row.append(rcs_po_mat[i, j])
-                        if has_ptd:
-                            row.append(rcs_ptd_mat[i, j])
-                        row += [I_total[i, j].real, I_total[i, j].imag, freq_hz / 1e6]
+                        if has_po:  row.append(rcs_po_mat[i, j])
+                        if has_ptd: row.append(rcs_ptd_mat[i, j])
+                        row += [I_total[i, j].real, I_total[i, j].imag]
+                        if has_I_po:  row += [I_po_mat[i, j].real,  I_po_mat[i, j].imag]
+                        if has_I_ptd: row += [I_ptd_mat[i, j].real, I_ptd_mat[i, j].imag]
+                        row.append(freq_hz / 1e6)
                         writer.writerow(row)
 
             self.log(f"Freq sweep RCS exported: {path}")

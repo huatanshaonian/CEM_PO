@@ -368,6 +368,10 @@ def _load_new_format_freq_sweep_csv(path):
     rcs_matrix     = np.full((N_angles, Nf), -999.0)
     I_total_matrix = np.zeros((N_angles, Nf), dtype=np.complex128)
     has_i_total    = ('I Total (Re)' in df.columns and 'I Total (Im)' in df.columns)
+    has_i_po       = ('I PO (Re)'    in df.columns and 'I PO (Im)'    in df.columns)
+    has_i_ptd      = ('I PTD (Re)'   in df.columns and 'I PTD (Im)'   in df.columns)
+    I_po_matrix    = np.zeros((N_angles, Nf), dtype=np.complex128) if has_i_po  else None
+    I_ptd_matrix   = np.zeros((N_angles, Nf), dtype=np.complex128) if has_i_ptd else None
 
     # 用 pivot_table 向量化填充（快速）
     rcs_pivot = df.pivot_table(
@@ -383,26 +387,31 @@ def _load_new_format_freq_sweep_csv(path):
                 if fmhz in rcs_pivot.columns:
                     rcs_matrix[i, jj] = rcs_pivot.loc[key, fmhz]
 
-    if has_i_total:
-        re_pivot = df.pivot_table(
+    def _fill_complex_matrix(mat, re_col, im_col):
+        """用 pivot_table 向量化填充复数矩阵，兼容列缺失。"""
+        re_piv = df.pivot_table(
             index=['Theta (deg)', 'Phi (deg)'],
             columns='Frequency (MHz)',
-            values='I Total (Re)',
-            aggfunc='mean',
+            values=re_col, aggfunc='mean',
         )
-        im_pivot = df.pivot_table(
+        im_piv = df.pivot_table(
             index=['Theta (deg)', 'Phi (deg)'],
             columns='Frequency (MHz)',
-            values='I Total (Im)',
-            aggfunc='mean',
+            values=im_col, aggfunc='mean',
         )
         for i, (th, ph) in enumerate(angle_list):
             key = (th, ph)
-            if key in re_pivot.index:
+            if key in re_piv.index:
                 for jj, fmhz in enumerate(freq_mhz_arr):
-                    if fmhz in re_pivot.columns:
-                        I_total_matrix[i, jj] = complex(re_pivot.loc[key, fmhz],
-                                                         im_pivot.loc[key, fmhz])
+                    if fmhz in re_piv.columns:
+                        mat[i, jj] = complex(re_piv.loc[key, fmhz], im_piv.loc[key, fmhz])
+
+    if has_i_total:
+        _fill_complex_matrix(I_total_matrix, 'I Total (Re)', 'I Total (Im)')
+    if has_i_po:
+        _fill_complex_matrix(I_po_matrix,    'I PO (Re)',    'I PO (Im)')
+    if has_i_ptd:
+        _fill_complex_matrix(I_ptd_matrix,   'I PTD (Re)',   'I PTD (Im)')
 
     # 重算距离像（正距离半段）
     window      = meta.get('Window', 'hamming')
@@ -451,6 +460,8 @@ def _load_new_format_freq_sweep_csv(path):
     if scan_mode == '1d':
         rcs_matrix     = rcs_matrix.squeeze(axis=0)
         I_total_matrix = I_total_matrix.squeeze(axis=0)
+        if I_po_matrix  is not None: I_po_matrix  = I_po_matrix.squeeze(axis=0)
+        if I_ptd_matrix is not None: I_ptd_matrix = I_ptd_matrix.squeeze(axis=0)
         if profile_matrix is not None:
             profile_matrix = profile_matrix.squeeze(axis=0)
 
@@ -470,8 +481,8 @@ def _load_new_format_freq_sweep_csv(path):
         'theta_deg':        theta_arr,
         'phi_deg':          phi_arr,
         'scan_mode':        scan_mode,
-        'I_po_matrix':      None,
-        'I_ptd_matrix':     None,
+        'I_po_matrix':      I_po_matrix,
+        'I_ptd_matrix':     I_ptd_matrix,
         'I_total_matrix':   I_total_matrix,
         'rcs_matrix':       rcs_matrix,
         'profile_matrix':   profile_matrix,
