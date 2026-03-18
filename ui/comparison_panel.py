@@ -21,18 +21,58 @@ class ComparisonManager:
     # File management
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _parse_csv_meta(path):
+        """读取 CSV 文件头部注释行，返回 (meta_dict, raw_comment_lines)。
+
+        尝试按 '# Key, Value' 格式提取结构化元数据；
+        raw_comment_lines 始终包含所有注释原文（供调试输出）。
+        """
+        meta = {}
+        raw_lines = []
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if not stripped.startswith('#'):
+                    break          # 注释块结束
+                raw_lines.append(stripped)
+                content = stripped[1:].strip()
+                if ',' in content:
+                    key, _, val = content.partition(',')
+                    k = key.strip()
+                    if k and not k.startswith('#'):   # 跳过标题行如 "# CEM PO..."
+                        meta[k] = val.strip()
+        return meta, raw_lines
+
     def add_comparison_file(self):
         paths, _ = QFileDialog.getOpenFileNames(self.w, "Select CSV Files", "", "CSV Files (*.csv)")
         for path in paths:
             try:
+                meta, raw_comments = self._parse_csv_meta(path)
                 df = pd.read_csv(path, comment='#')
                 name = os.path.basename(path)
                 is_freq_sweep = 'Frequency (MHz)' in df.columns
+
+                # 记录元数据来源：有结构化元数据就静默，否则把原始注释打到 log
+                if meta:
+                    pol = meta.get('Polarization', '')
+                    algo = meta.get('Algorithm', '')
+                    info = ', '.join(filter(None, [algo, f'pol={pol}' if pol else '']))
+                    if info:
+                        self.w.log(f"Loaded {name}  [{info}]")
+                elif raw_comments:
+                    self.w.log(f"Loaded {name}  (unrecognized header — raw comments below)")
+                    for ln in raw_comments:
+                        self.w.log(f"  {ln}")
+
                 self.w.comparison_data.append({
                     'name': name,
                     'data': df,
                     'path': path,
                     'is_freq_sweep': is_freq_sweep,
+                    'meta': meta,
                 })
                 self.w.comp_files_list.addItem(name)
             except Exception as e:
