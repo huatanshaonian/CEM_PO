@@ -107,28 +107,22 @@ class PTDEdge:
         self.segments = []
 
         if point_normals is not None:
-            # 自适应分段
-            bp = _adaptive_breakpoints(pts, np.deg2rad(max_segment_angle_deg))
-            for k in range(len(bp) - 1):
-                i0, i1 = bp[k], bp[k + 1]
-                # face_a 法向：取区间均值并归一化
-                na_slice = point_normals[i0:i1 + 1]
-                na_mean = na_slice.mean(axis=0)
-                na_len = np.linalg.norm(na_mean)
-                na_seg = na_mean / na_len if na_len > 1e-12 else self.n_lit
+            # find_shared_edge 已完成自适应合并，直接建 N-1 段
+            for i in range(len(pts) - 1):
+                na_mean = (point_normals[i] + point_normals[i + 1]) / 2.0
+                na_len  = np.linalg.norm(na_mean)
+                na_seg  = na_mean / na_len if na_len > 1e-12 else self.n_lit
 
-                # 每段的 alpha
                 if point_normals_b is not None:
-                    nb_slice = point_normals_b[i0:i1 + 1]
-                    nb_mean = nb_slice.mean(axis=0)
-                    nb_len = np.linalg.norm(nb_mean)
-                    nb_seg = nb_mean / nb_len if nb_len > 1e-12 else self.n_lit
+                    nb_mean = (point_normals_b[i] + point_normals_b[i + 1]) / 2.0
+                    nb_len  = np.linalg.norm(nb_mean)
+                    nb_seg  = nb_mean / nb_len if nb_len > 1e-12 else self.n_lit
                     seg_alpha = np.pi + np.arccos(
                         np.clip(np.dot(na_seg, nb_seg), -1.0, 1.0))
                 else:
-                    seg_alpha = self.alpha  # 全局回退
+                    seg_alpha = self.alpha
 
-                seg = PTDSegment(pts[i0], pts[i1], normal=na_seg, alpha=seg_alpha)
+                seg = PTDSegment(pts[i], pts[i + 1], normal=na_seg, alpha=seg_alpha)
                 if seg.length > 1e-12:
                     self.segments.append(seg)
         else:

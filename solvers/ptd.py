@@ -12,14 +12,14 @@ class PTDProcessor:
     """
 
     @staticmethod
-    def extract_edges_from_face_pairs(surfaces, pairs_text, n_samples=120):
+    def extract_edges_from_face_pairs(surfaces, pairs_text, max_angle_deg=2.0):
         """
         解析 "(0,1);(1,2)" 格式的面对字符串，自动找共享边并计算外部二面角。
 
         参数:
-            surfaces:   List[Surface]
-            pairs_text: str，格式 "(a,b);(c,d)"，括号可选
-            n_samples:  边缘离散采样点数
+            surfaces:      List[Surface]
+            pairs_text:    str，格式 "(a,b);(c,d)"，括号可选
+            max_angle_deg: 每段最大切线转角（度），超过则细化
 
         返回:
             List[PTDEdge]
@@ -36,9 +36,11 @@ class PTDProcessor:
                 continue
 
             try:
-                edge_pts, normals_a, normals_b, ext_angle = find_shared_edge(
-                    surfaces[a], surfaces[b], n_samples=n_samples
+                edge_pts, normals_a, normals_b, ext_angle, warn = find_shared_edge(
+                    surfaces[a], surfaces[b], max_angle_deg=max_angle_deg
                 )
+                if warn:
+                    print(f"  [PTD] 警告 面对 ({a},{b}): {warn}")
                 lit_normal = np.mean(normals_a, axis=0)
                 edge = PTDEdge(
                     name=f"({a},{b})",
@@ -49,7 +51,8 @@ class PTDProcessor:
                     point_normals_b=normals_b,
                 )
                 ptd_edges.append(edge)
-                print(f"  [PTD] 面对 ({a},{b}): 外角 = {np.degrees(ext_angle):.1f}°")
+                print(f"  [PTD] 面对 ({a},{b}): 外角 = {np.degrees(ext_angle):.1f}°，"
+                      f"段数 = {len(edge.segments)}")
             except Exception as e:
                 print(f"  [PTD] 面对 ({a},{b}) 边提取失败: {e}")
 

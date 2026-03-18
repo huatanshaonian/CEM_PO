@@ -301,6 +301,13 @@ class CEMPoQtWindow(QMainWindow):
         self.vis_subsample.setToolTip("Subsample rate for mesh visualization (1=all, 10=every 10th)")
         l_mesh.addRow("Vis Subsample:", self.vis_subsample)
 
+        self.ptd_seg_angle = QLineEdit("2.0")
+        self.ptd_seg_angle.setToolTip(
+            "PTD 边缘自适应分段的最大切线转角阈值（度）。\n"
+            "越小段数越多、越精确，但计算量增加。直边不受影响。"
+        )
+        l_mesh.addRow("PTD Seg. Angle (°):", self.ptd_seg_angle)
+
         self.btn_gen_stats = QPushButton("Generate Mesh (Stats)")
         self.btn_gen_stats.clicked.connect(self.on_generate_mesh_stats)
         self.btn_gen_stats.setStyleSheet("border: 1px solid #FF9800; color: #E65100;")
@@ -1647,6 +1654,7 @@ class CEMPoQtWindow(QMainWindow):
                     'enabled': self.chk_ptd_enabled.isChecked(),
                     'edges': ptd_edges_str,
                     'polarization': self.ptd_pol.currentText(),
+                    'seg_angle_deg': float(self.ptd_seg_angle.text() or '2.0'),
                 },
                 'compute': {
                     'gpu': self.use_gpu.isChecked(),
@@ -2086,9 +2094,10 @@ class CEMPoQtWindow(QMainWindow):
                     'use_degenerate': self.degen_mesh.isChecked(),
                 },
                 'ptd': {
-                    'enabled':      self.chk_ptd_enabled.isChecked(),
-                    'edges':        ptd_edges_str,
-                    'polarization': self.ptd_pol.currentText(),
+                    'enabled':       self.chk_ptd_enabled.isChecked(),
+                    'edges':         ptd_edges_str,
+                    'polarization':  self.ptd_pol.currentText(),
+                    'seg_angle_deg': float(self.ptd_seg_angle.text() or '2.0'),
                 },
                 'compute': {
                     'gpu':      self.use_gpu.isChecked(),
