@@ -177,6 +177,11 @@ def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use
                 continue
             e2 = e2_raw / e2_len
 
+            # 消除 e2 符号歧义：e2 应沿 Face A 表面远离 Face B
+            n_b = seg.normal_b if hasattr(seg, 'normal_b') else None
+            if n_b is not None and np.dot(e2, n_b) > 0:
+                e2 = -e2
+
             # ── 3. 入射角 angle0 ──
             k_perp = k_dir - k_dot_t * t
             k_perp_len = float(np.linalg.norm(k_perp))
@@ -187,6 +192,8 @@ def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use
             i_e1 = float(np.dot(inc_unit, e1))
             i_e2 = float(np.dot(inc_unit, e2))
             angle0_raw = float(np.arctan2(i_e1, i_e2))
+            if angle0_raw < -1e-6:
+                angle0_raw += 2.0 * np.pi
             if angle0_raw < -1e-6 or angle0_raw > alfa + 1e-6:
                 continue
             angle0 = float(np.clip(angle0_raw, 0.0, alfa))
@@ -201,7 +208,10 @@ def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use
             s_perp_unit = s_perp / s_perp_len
             s_e1 = float(np.dot(s_perp_unit, e1))
             s_e2 = float(np.dot(s_perp_unit, e2))
-            angle_obs = float(np.arctan2(s_e1, s_e2)) % alfa
+            angle_obs_raw = float(np.arctan2(s_e1, s_e2))
+            if angle_obs_raw < -1e-6:
+                angle_obs_raw += 2.0 * np.pi
+            angle_obs = float(np.clip(angle_obs_raw, 0.0, alfa))
 
             # ── 4. 衍射系数 D（频率无关）──
             gamma0 = float(np.arcsin(sin_gamma0))

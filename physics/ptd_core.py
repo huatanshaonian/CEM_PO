@@ -45,14 +45,20 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
             continue
 
         # ── 2. 建立楔形截面局部坐标系 ──
-        # 基向量 e1：Face 1 的外法向（n_lit），对应楔形坐标 φ = π/2
-        # 基向量 e2：t × n_lit，沿 Face 1 表面（φ = 0 方向）
+        # 基向量 e1：Face A 的外法向（n_lit），对应楔形坐标 φ = π/2
+        # 基向量 e2：沿 Face A 表面、从棱边向外（φ = 0 方向）
         e1 = n_lit
         e2_raw = np.cross(t, n_lit)
         e2_len = np.linalg.norm(e2_raw)
         if e2_len < 1e-10:
             continue
         e2 = e2_raw / e2_len
+
+        # 消除 e2 符号歧义：e2 应沿 Face A 表面远离 Face B
+        # 正确的 e2 满足 dot(e2, n_b) ≤ 0（对 α ∈ (π, 2π) 恒成立）
+        n_b = seg.normal_b if hasattr(seg, 'normal_b') else None
+        if n_b is not None and np.dot(e2, n_b) > 0:
+            e2 = -e2
 
         # ── 3. 计算入射方向和散射方向在截面内的投影 ──
         # 入射方向在截面平面（垂直于 t）的分量
@@ -62,14 +68,17 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
             continue
         k_perp_unit = k_perp / k_perp_len
 
-        # angle0: 入射来源方向在截面内相对于 Face 1（e2 方向）的角度
-        # 注意：使用来源方向 -k_dir（而非传播方向 k_dir），使 φ=0 对应沿 Face 1 入射
+        # angle0: 入射来源方向在截面内相对于 Face A 表面（e2 方向）的角度
+        # 使用来源方向 -k_dir（从目标指向源），使 φ=0 对应沿 Face A 掠射
         inc_unit = -k_perp_unit            # 入射来源方向（从目标指向源）
         i_e1 = np.dot(inc_unit, e1)        # n_lit 分量
-        i_e2 = np.dot(inc_unit, e2)        # Face 1 切向分量
-        angle0_raw = np.arctan2(i_e1, i_e2)  # atan2(e1分量, e2分量) → [−π, π]
+        i_e2 = np.dot(inc_unit, e2)        # Face A 切向分量
+        angle0_raw = np.arctan2(i_e1, i_e2)  # atan2 → [−π, π]
+        # atan2 对 α > π 的楔形，合法角 (π, α] 映射为负值，需展开到 [0, 2π)
+        if angle0_raw < -1e-6:
+            angle0_raw += 2.0 * np.pi
         if angle0_raw < -1e-6 or angle0_raw > alfa + 1e-6:
-            continue   # 入射方向来自楔形内部（背阴），跳过该段
+            continue   # 入射方向来自楔形内部（材料侧），跳过该段
         angle0 = np.clip(angle0_raw, 0.0, alfa)
 
         # ── 3b. 散射方向投影到截面局部坐标，求观察角 angle_obs ──
@@ -104,7 +113,10 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
         #     pass
         # angle_obs = np.clip(angle_raw, 0.0, alfa)
 
-        angle_obs = angle_raw % alfa           # 单站时 angle_obs == angle0，% 无副作用
+        # 与 angle0 同样的展开处理
+        if angle_raw < -1e-6:
+            angle_raw += 2.0 * np.pi
+        angle_obs = np.clip(angle_raw, 0.0, alfa)
 
         # ── 4. 计算衍射系数 D ──
         gamma0 = np.arcsin(sin_gamma0)

@@ -44,7 +44,7 @@ class PTDSegment:
     """
     描述 PTD 边缘的一个微小线段
     """
-    def __init__(self, start, end, normal=None, alpha=None):
+    def __init__(self, start, end, normal=None, normal_b=None, alpha=None):
         self.start = start
         self.end = end
         self.midpoint = (start + end) / 2.0
@@ -57,13 +57,21 @@ class PTDSegment:
         else:
             self.tangent = np.array([0, 0, 0])
 
-        # 该 segment 对应的面法向（用于遮挡检测）
+        # Face A 法向（n_lit，楔形坐标 e1 = φ=π/2）
         if normal is not None:
             n = np.array(normal)
             norm = np.linalg.norm(n)
             self.normal = n / norm if norm > 1e-12 else np.array([0, 0, 1.0])
         else:
             self.normal = None
+
+        # Face B 法向（用于消除 e2 = cross(t, n_lit) 的符号歧义）
+        if normal_b is not None:
+            nb = np.array(normal_b)
+            nb_norm = np.linalg.norm(nb)
+            self.normal_b = nb / nb_norm if nb_norm > 1e-12 else None
+        else:
+            self.normal_b = None
 
 
 class PTDEdge:
@@ -122,7 +130,9 @@ class PTDEdge:
                 else:
                     seg_alpha = self.alpha
 
-                seg = PTDSegment(pts[i], pts[i + 1], normal=na_seg, alpha=seg_alpha)
+                seg = PTDSegment(pts[i], pts[i + 1], normal=na_seg,
+                                 normal_b=nb_seg if point_normals_b is not None else None,
+                                 alpha=seg_alpha)
                 if seg.length > 1e-12:
                     self.segments.append(seg)
         else:
