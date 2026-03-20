@@ -1,7 +1,13 @@
 import time
 import traceback
+import threading
 
 from PySide6.QtCore import QThread, Signal, QObject
+
+
+class SimulationAborted(Exception):
+    """仿真被用户主动终止。"""
+    pass
 
 
 class CalculationWorker(QThread):
@@ -14,15 +20,28 @@ class CalculationWorker(QThread):
         self.bridge = bridge
         self.geo = geo
         self.params = params
+        self._abort_event = threading.Event()
+
+    def request_stop(self):
+        """请求立即停止计算。"""
+        self._abort_event.set()
 
     def run(self):
         def callback(current, total, msg=""):
+            if self._abort_event.is_set():
+                raise SimulationAborted("用户终止仿真")
             p = (current / total * 100) if total > 0 else 0
             self.progress_signal.emit(p, msg)
 
         try:
-            result = self.bridge.run_simulation(self.geo, self.params, progress_callback=callback)
+            result = self.bridge.run_simulation(
+                self.geo, self.params,
+                progress_callback=callback,
+                abort_event=self._abort_event
+            )
             self.result_signal.emit(result)
+        except SimulationAborted:
+            self.error_signal.emit("仿真已终止")
         except Exception as e:
             self.error_signal.emit(str(e))
 
@@ -48,18 +67,28 @@ class FreqSweepWorker(QThread):
         self.geo              = geo
         self.params           = params
         self.freq_sweep_params = freq_sweep_params
+        self._abort_event = threading.Event()
+
+    def request_stop(self):
+        """请求立即停止计算。"""
+        self._abort_event.set()
 
     def run(self):
         def callback(current, total, msg=""):
+            if self._abort_event.is_set():
+                raise SimulationAborted("用户终止频扫")
             p = (current / total * 100) if total > 0 else 0
             self.progress_signal.emit(p, msg)
 
         try:
             result = self.bridge.run_freq_sweep(
                 self.geo, self.params, self.freq_sweep_params,
-                progress_callback=callback
+                progress_callback=callback,
+                abort_event=self._abort_event
             )
             self.result_signal.emit(result)
+        except SimulationAborted:
+            self.error_signal.emit("频扫已终止")
         except Exception as e:
             self.error_signal.emit(str(e))
 

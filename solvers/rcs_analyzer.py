@@ -145,7 +145,8 @@ class RCSAnalyzer:
                                enable_ptd=False, ptd_edge_identifiers=None,
                                cached_mesh_data=None, polarization='VV',
                                gpu=False, use_degenerate_mesh=False,
-                               ptd_seg_angle_deg=2.0):
+                               ptd_seg_angle_deg=2.0,
+                               abort_event=None):
 
         frequency = wave_params['frequency']
         n_angles = len(angles)
@@ -175,7 +176,7 @@ class RCSAnalyzer:
                 return self._compute_parallel(
                     geometry_data, wave_params, angles, k_mag,
                     n_workers, show_progress, progress_callback, ptd_edges, polarization,
-                    is_cached=is_cached
+                    is_cached=is_cached, abort_event=abort_event
                 )
 
         # GPU 模式下，若同时勾选 Parallel 且有 PTD 边，则并行预计算 PTD
@@ -184,12 +185,13 @@ class RCSAnalyzer:
         return self._compute_serial(
             geometry_data, wave_params, angles, samples_per_lambda,
             k_mag, show_progress, progress_callback, ptd_edges, polarization,
-            is_cached=is_cached, ptd_workers=ptd_workers
+            is_cached=is_cached, ptd_workers=ptd_workers, abort_event=abort_event
         )
 
     def _compute_serial(self, geometry_data, wave_params, angles,
                         samples_per_lambda, k_mag, show_progress, progress_callback=None,
-                        ptd_edges=None, polarization='VV', is_cached=False, ptd_workers=None):
+                        ptd_edges=None, polarization='VV', is_cached=False, ptd_workers=None,
+                        abort_event=None):
         rcs_list = {'total': [], 'po': [], 'ptd': [],
                     'total_c': [], 'po_c': [], 'ptd_c': []}
         n_angles = len(angles)
@@ -216,6 +218,10 @@ class RCSAnalyzer:
                     ptd_precomputed[future_to_idx[f]] = f.result()
 
         for i, theta in enumerate(angles):
+            if abort_event and abort_event.is_set():
+                from ui.workers import SimulationAborted
+                raise SimulationAborted("用户终止仿真")
+
             wave = self._make_wave(wave_params['frequency'], theta, wave_params['phi'])
 
             total_I_po = 0j
@@ -260,7 +266,8 @@ class RCSAnalyzer:
 
     def _compute_parallel(self, cached_surfaces, wave_params, angles,
                           k_mag, n_workers, show_progress,
-                          progress_callback=None, ptd_edges=None, polarization='VV', is_cached=True):
+                          progress_callback=None, ptd_edges=None, polarization='VV',
+                          is_cached=True, abort_event=None):
 
         if n_workers is None: n_workers = os.cpu_count() or 4
 
@@ -285,6 +292,14 @@ class RCSAnalyzer:
 
                 completed = 0
                 for future in as_completed(future_to_idx):
+                    if abort_event and abort_event.is_set():
+                        # 取消所有未完成的 future，立即退出
+                        for f in future_to_idx:
+                            f.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        from ui.workers import SimulationAborted
+                        raise SimulationAborted("用户终止仿真")
+
                     idx = future_to_idx[future]
                     rcs_dict[idx] = future.result()
                     completed += 1
@@ -313,6 +328,8 @@ class RCSAnalyzer:
             return {k: np.array(v) for k, v in final_rcs.items()}
 
         except Exception as e:
+            if 'SimulationAborted' in type(e).__name__:
+                raise
             raise RuntimeError(f"并行计算致命错误: {e}")
 
     def compute_monostatic_rcs_2d(self, geometry, frequency, theta_array, phi_array,
@@ -323,7 +340,8 @@ class RCSAnalyzer:
                                    enable_ptd=False, ptd_edge_identifiers=None,
                                    cached_mesh_data=None, polarization='VV',
                                    gpu=False, use_degenerate_mesh=False,
-                                   ptd_seg_angle_deg=2.0):
+                                   ptd_seg_angle_deg=2.0,
+                                   abort_event=None):
 
         n_theta = len(theta_array)
         n_phi = len(phi_array)
@@ -353,7 +371,7 @@ class RCSAnalyzer:
                 return self._compute_parallel_2d(
                     geometry_data, frequency, theta_array, phi_array,
                     k_mag, n_workers, show_progress, progress_callback, ptd_edges, polarization,
-                    is_cached=is_cached
+                    is_cached=is_cached, abort_event=abort_event
                 )
 
         rcs_2d = {
@@ -369,6 +387,9 @@ class RCSAnalyzer:
         computed = 0
 
         for i, theta in enumerate(theta_array):
+            if abort_event and abort_event.is_set():
+                from ui.workers import SimulationAborted
+                raise SimulationAborted("用户终止仿真")
             for j, phi in enumerate(phi_array):
                 wave = self._make_wave(frequency, theta, phi)
 
@@ -412,7 +433,7 @@ class RCSAnalyzer:
     def _compute_parallel_2d(self, cached_surfaces, frequency, theta_array, phi_array,
                              k_mag, n_workers,
                              show_progress, progress_callback=None, ptd_edges=None,
-                             polarization='VV', is_cached=True):
+                             polarization='VV', is_cached=True, abort_event=None):
 
         if n_workers is None: n_workers = os.cpu_count() or 4
 
@@ -449,6 +470,13 @@ class RCSAnalyzer:
 
                 computed = 0
                 for future in as_completed(future_to_idx):
+                    if abort_event and abort_event.is_set():
+                        for f in future_to_idx:
+                            f.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        from ui.workers import SimulationAborted
+                        raise SimulationAborted("用户终止仿真")
+
                     i, j = future_to_idx[future]
                     res = future.result()
                     rcs_2d['total'][i, j] = res['total']
@@ -471,4 +499,6 @@ class RCSAnalyzer:
             return rcs_2d
 
         except Exception as e:
+            if 'SimulationAborted' in type(e).__name__:
+                raise
             raise RuntimeError(f"2D并行计算致命错误: {e}")

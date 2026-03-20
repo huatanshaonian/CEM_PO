@@ -17,15 +17,16 @@ class SolverBridge:
         self.cached_mesh_data = None
         self.cached_mesh_params = {}
 
-    def run_simulation(self, geo, params, progress_callback=None):
+    def run_simulation(self, geo, params, progress_callback=None, abort_event=None):
         """
         运行仿真计算 (同步阻塞调用，建议在独立线程中运行)
-        
+
         Args:
             geo: 几何对象 (Surface 列表或单个 Surface)
             params: 参数字典，包含所有计算配置
             progress_callback: 接受 (current, total, message) 的回调函数
-            
+            abort_event: threading.Event，设置后终止计算
+
         Returns:
             dict: 包含计算结果和元数据的字典
         """
@@ -96,7 +97,8 @@ class SolverBridge:
                     enable_ptd=enable_ptd, ptd_edge_identifiers=ptd_edges,
                     cached_mesh_data=cached_mesh, polarization=ptd_pol,
                     gpu=use_gpu, use_degenerate_mesh=use_degen,
-                    ptd_seg_angle_deg=ptd_seg_angle
+                    ptd_seg_angle_deg=ptd_seg_angle,
+                    abort_event=abort_event
                 )
 
                 # 结果标准化
@@ -131,7 +133,8 @@ class SolverBridge:
                     enable_ptd=enable_ptd, ptd_edge_identifiers=ptd_edges,
                     cached_mesh_data=cached_mesh, polarization=ptd_pol,
                     gpu=use_gpu, use_degenerate_mesh=use_degen,
-                    ptd_seg_angle_deg=ptd_seg_angle
+                    ptd_seg_angle_deg=ptd_seg_angle,
+                    abort_event=abort_event
                 )
 
                 if isinstance(rcs_result_raw, dict):
@@ -166,7 +169,8 @@ class SolverBridge:
                     enable_ptd=enable_ptd, ptd_edge_identifiers=ptd_edges,
                     cached_mesh_data=cached_mesh, polarization=ptd_pol,
                     gpu=use_gpu, use_degenerate_mesh=use_degen,
-                    ptd_seg_angle_deg=ptd_seg_angle
+                    ptd_seg_angle_deg=ptd_seg_angle,
+                    abort_event=abort_event
                 )
 
                 if isinstance(rcs_result_raw, dict):
@@ -194,7 +198,8 @@ class SolverBridge:
                 'freq': freq,
                 'elapsed_time': elapsed_time,
                 'params': params, # 回传输入参数以便记录
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'ptd_enabled': enable_ptd,
             })
             
             return result_data
@@ -241,7 +246,7 @@ class SolverBridge:
         self.cached_mesh_data = mesh_data
         self.cached_mesh_params = params
 
-    def run_freq_sweep(self, geo, params, freq_sweep_params, progress_callback=None):
+    def run_freq_sweep(self, geo, params, freq_sweep_params, progress_callback=None, abort_event=None):
         """
         频率扫描（相位旋转法）：固定角度扫频率，计算各频率的 PO/PTD 积分和距离像。
 
@@ -250,6 +255,7 @@ class SolverBridge:
             params:            solver 参数字典（与 run_simulation 相同结构）
             freq_sweep_params: 频扫专用参数 {'f_start','f_end','f_step'(MHz), 'window','zero_pad','polarization'}
             progress_callback: (current, total, msg) 回调
+            abort_event:       threading.Event，设置后终止计算
 
         Returns:
             dict: 包含 freq_sweep 结果的字典
@@ -357,6 +363,9 @@ class SolverBridge:
 
             # --- 7. 角度循环 ---
             for i, (th_deg, ph_deg) in enumerate(angle_list):
+                if abort_event and abort_event.is_set():
+                    from ui.workers import SimulationAborted
+                    raise SimulationAborted("用户终止频扫")
                 if progress_callback:
                     progress_callback(
                         int(i * 95 / N_angles), 100,

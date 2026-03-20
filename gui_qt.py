@@ -7,12 +7,12 @@ import json
 import csv
 import pandas as pd
 
-from PySide6.QtWidgets import (QApplication, QMainWindow, QDockWidget, QWidget,
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget,
                                QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QComboBox,
                                QCheckBox, QPushButton, QTextEdit, QLabel, QProgressBar,
                                QSplitter, QFrame, QGroupBox, QScrollArea, QFileDialog, QTabWidget,
                                QListWidget, QAbstractItemView, QListWidgetItem,
-                               QDoubleSpinBox, QSizePolicy)
+                               QDoubleSpinBox, QSizePolicy, QTabBar)
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize
 from PySide6.QtGui import QAction, QIcon, QFont, QColor, QPalette
 
@@ -92,28 +92,67 @@ class CEMPoQtWindow(QMainWindow):
         super().closeEvent(event)
 
     def setup_ui(self):
-        # Layout: Main Splitter
-        self.main_splitter = QSplitter(Qt.Horizontal)
-        self.setCentralWidget(self.main_splitter)
+        # ── Central widget: top tab bars + content area ──
+        central = QWidget()
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        # --- Right Side (Tabs + Log) ---
+        # ── Row 1: Config tab bar (Model / Solver / Post-processing / Imaging) ──
+        self.config_tab_bar = QTabBar()
+        self.config_tab_bar.setObjectName("ConfigTabBar")
+        self.config_tab_bar.addTab("Model")
+        self.config_tab_bar.addTab("Solver")
+        self.config_tab_bar.addTab("Post-processing")
+        self.config_tab_bar.addTab("Imaging")
+        self.config_tab_bar.setExpanding(False)
+        self.config_tab_bar.setDrawBase(False)
+        main_layout.addWidget(self.config_tab_bar)
+
+        # View tab bar will be placed above the view content area (not here)
+
+        # ── Row 3: Main content area ──
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        main_layout.addWidget(self.main_splitter, 1)  # stretch=1
+
+        # --- Left Side (Config panels, hidden tab bar) ---
+        self.param_tabs = QTabWidget()
+        self.param_tabs.tabBar().setVisible(False)
+        self.param_tabs.setFixedWidth(350)
+        self.main_splitter.addWidget(self.param_tabs)
+
+        # --- Right Side (View panels + Log) ---
         right_container = QWidget()
         right_layout = QVBoxLayout(right_container)
-        right_layout.setContentsMargins(0,0,0,0)
-        
-        self.view_splitter = QSplitter(Qt.Vertical)
-        right_layout.addWidget(self.view_splitter)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
 
-        # Tabs (3D View | RCS Plot)
+        # View tab bar at top of right panel
+        self.view_tab_bar = QTabBar()
+        self.view_tab_bar.setObjectName("ViewTabBar")
+        self.view_tab_bar.addTab("3D Model")
+        self.view_tab_bar.addTab("RCS Results")
+        self.view_tab_bar.addTab("RCS Patterns")
+        self.view_tab_bar.addTab("Statistics")
+        self.view_tab_bar.addTab("Radar Imaging")
+        self.view_tab_bar.setExpanding(False)
+        self.view_tab_bar.setDrawBase(False)
+        right_layout.addWidget(self.view_tab_bar)
+
+        self.view_splitter = QSplitter(Qt.Vertical)
+        right_layout.addWidget(self.view_splitter, 1)
+
+        # View panels (hidden tab bar)
         self.tabs = QTabWidget()
+        self.tabs.tabBar().setVisible(False)
         self.view_splitter.addWidget(self.tabs)
 
         # Tab 1: 3D Plotter
         self.plotter_frame = QFrame()
         plotter_layout = QVBoxLayout(self.plotter_frame)
-        plotter_layout.setContentsMargins(0,0,0,0)
+        plotter_layout.setContentsMargins(0, 0, 0, 0)
         self.plotter = QtInteractor(self.plotter_frame)
-        self.plotter.set_background("white") 
+        self.plotter.set_background("white")
         self.plotter.add_axes(color='black')
         plotter_layout.addWidget(self.plotter.interactor)
         self.tabs.addTab(self.plotter_frame, "3D Model")
@@ -126,7 +165,7 @@ class CEMPoQtWindow(QMainWindow):
         self.rcs_toolbar = NavigationToolbar(self.rcs_canvas, self.rcs_frame)
         rcs_layout.addWidget(self.rcs_toolbar)
         rcs_layout.addWidget(self.rcs_canvas)
-        
+
         # Export Bar
         export_layout = QHBoxLayout()
         self.chk_analytical = QCheckBox("Show Analytical Solution")
@@ -144,23 +183,68 @@ class CEMPoQtWindow(QMainWindow):
         self.btn_export.setStyleSheet("background-color: #4CAF50; color: white; border: 1px solid #388E3C;")
         export_layout.addWidget(self.btn_export)
         rcs_layout.addLayout(export_layout)
-        
+
         self.tabs.addTab(self.rcs_frame, "RCS Results")
 
         # Tab 3: Data Comparison
         self.comp_frame = QWidget()
         comp_layout = QVBoxLayout(self.comp_frame)
-        
-        # Plot Area (Controls moved to Left Dock)
+
         self.comp_figure = Figure(figsize=(5, 4), dpi=100)
         self.comp_canvas = FigureCanvas(self.comp_figure)
         self.comp_toolbar = NavigationToolbar(self.comp_canvas, self.comp_frame)
-        
+
         comp_layout.addWidget(self.comp_toolbar)
         comp_layout.addWidget(self.comp_canvas)
-        
+
         self.tabs.addTab(self.comp_frame, "RCS Patterns")
-        # Tab 4: Radar Imaging
+
+        # Tab 4: Statistics
+        self.stats_frame = QWidget()
+        stats_layout = QVBoxLayout(self.stats_frame)
+        stats_layout.setContentsMargins(4, 4, 4, 4)
+
+        # Upper: PDF plot
+        self.stats_figure = Figure(figsize=(5, 3), dpi=100)
+        self.stats_canvas = FigureCanvas(self.stats_figure)
+        self.stats_toolbar = NavigationToolbar(self.stats_canvas, self.stats_frame)
+        stats_layout.addWidget(self.stats_toolbar)
+        stats_layout.addWidget(self.stats_canvas, 3)
+
+        # Lower: statistics tables (single + comparison)
+        from PySide6.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
+        _table_style = ("QTableWidget { font-size: 12px; }"
+                        "QHeaderView::section { background: #E9ECEF; font-weight: bold; padding: 4px; }")
+
+        self.stats_table = QTableWidget()
+        self.stats_table.setAlternatingRowColors(True)
+        self.stats_table.setStyleSheet(_table_style)
+        self.stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.stats_table.horizontalHeader().setStretchLastSection(True)
+        self.stats_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        stats_layout.addWidget(self.stats_table, 2)
+
+        self.stats_comp_table = QTableWidget()
+        self.stats_comp_table.setAlternatingRowColors(True)
+        self.stats_comp_table.setStyleSheet(_table_style)
+        self.stats_comp_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.stats_comp_table.horizontalHeader().setStretchLastSection(True)
+        self.stats_comp_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.stats_comp_table.setVisible(False)
+        stats_layout.addWidget(self.stats_comp_table, 1)
+
+        # Export button
+        stats_btn_layout = QHBoxLayout()
+        stats_btn_layout.addStretch()
+        self.btn_export_stats = QPushButton("Export Statistics CSV")
+        self.btn_export_stats.clicked.connect(self._export_statistics_csv)
+        self.btn_export_stats.setStyleSheet("background-color: #4CAF50; color: white; border: 1px solid #388E3C;")
+        stats_btn_layout.addWidget(self.btn_export_stats)
+        stats_layout.addLayout(stats_btn_layout)
+
+        self.tabs.addTab(self.stats_frame, "Statistics")
+
+        # Tab 5: Radar Imaging
         self.imaging_frame = QWidget()
         imaging_layout = QVBoxLayout(self.imaging_frame)
         self.imaging_figure = Figure(figsize=(5, 4), dpi=100)
@@ -190,25 +274,25 @@ class CEMPoQtWindow(QMainWindow):
         self.log_text.setFont(QFont("Consolas", 10))
         log_layout.addWidget(QLabel("SYSTEM LOG"))
         log_layout.addWidget(self.log_text)
-        
+
         self.progress_bar = QProgressBar()
         log_layout.addWidget(self.progress_bar)
-        
+
         self.view_splitter.addWidget(log_widget)
-        self.view_splitter.setStretchFactor(0, 5) 
-        self.view_splitter.setStretchFactor(1, 1) 
+        self.view_splitter.setStretchFactor(0, 3)
+        self.view_splitter.setStretchFactor(1, 1)
 
         self.main_splitter.addWidget(right_container)
+        self.main_splitter.setSizes([350, 1250])
 
-        # --- Left Side (Params Tabs) ---
-        self.dock = QDockWidget("CONFIGURATION", self)
-        self.dock.setFeatures(QDockWidget.NoDockWidgetFeatures)
-        self.dock.setFixedWidth(350)
-        
-        # We use a QTabWidget as the main widget of the Dock
-        self.param_tabs = QTabWidget()
-        self.dock.setWidget(self.param_tabs)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.dock)
+        self.setCentralWidget(central)
+
+        # ── Connect tab bars to panels ──
+        self.config_tab_bar.currentChanged.connect(self.param_tabs.setCurrentIndex)
+        self.view_tab_bar.currentChanged.connect(self.tabs.setCurrentIndex)
+        # Sync back (when code calls setCurrentIndex directly)
+        self.param_tabs.currentChanged.connect(self.config_tab_bar.setCurrentIndex)
+        self.tabs.currentChanged.connect(self.view_tab_bar.setCurrentIndex)
 
         self.build_params()
 
@@ -509,14 +593,24 @@ class CEMPoQtWindow(QMainWindow):
         self.btn_run.setMinimumHeight(40)
         self.btn_run.clicked.connect(self.on_run)
         h_btns.addWidget(self.btn_run, 2)
-        
+
+        self.btn_stop = QPushButton("STOP")
+        self.btn_stop.setObjectName("StopBtn")
+        self.btn_stop.setMinimumHeight(40)
+        self.btn_stop.setStyleSheet("QPushButton#StopBtn { background-color: #d9534f; color: white; font-weight: bold; }"
+                                     "QPushButton#StopBtn:hover { background-color: #c9302c; }")
+        self.btn_stop.clicked.connect(self._on_stop_simulation)
+        self.btn_stop.setEnabled(False)
+        h_btns.addWidget(self.btn_stop, 1)
+
+        layout_solver.addLayout(h_btns)
+
         self.btn_export_json = QPushButton("EXPORT JSON")
-        self.btn_export_json.setMinimumHeight(40)
+        self.btn_export_json.setMinimumHeight(32)
         self.btn_export_json.clicked.connect(self.export_batch_json)
         self.btn_export_json.setToolTip("Export current settings to a JSON file for batch processing.")
-        h_btns.addWidget(self.btn_export_json, 1)
-        
-        layout_solver.addLayout(h_btns)
+        layout_solver.addWidget(self.btn_export_json)
+
         layout_solver.addStretch()
         
         self.param_tabs.addTab(self.tab_solver, "Solver")
@@ -644,6 +738,13 @@ class CEMPoQtWindow(QMainWindow):
         l_opts.addWidget(self.btn_refresh_comp)
         group_opts.setLayout(l_opts)
         layout_comp.addWidget(group_opts)
+
+        # --- Statistics ---
+        self.btn_calc_stats = QPushButton("Calc Statistics")
+        self.btn_calc_stats.setMinimumHeight(34)
+        self.btn_calc_stats.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; border: 1px solid #1565C0;")
+        self.btn_calc_stats.clicked.connect(self._calc_statistics)
+        layout_comp.addWidget(self.btn_calc_stats)
 
         layout_comp.addStretch()
         self.param_tabs.addTab(self.tab_comp, "Post-processing")
@@ -1667,14 +1768,33 @@ class CEMPoQtWindow(QMainWindow):
             return
 
         self.btn_run.setEnabled(False)
+        self.btn_stop.setEnabled(True)
         self.progress_bar.setValue(0)
-        
+
         self.worker = CalculationWorker(self.bridge, self.current_geo, params)
         self.worker.progress_signal.connect(self._on_progress)
         self.worker.result_signal.connect(self._on_finished)
         self.worker.error_signal.connect(lambda e: self.log(f"ERROR: {e}"))
-        self.worker.finished.connect(lambda: self.btn_run.setEnabled(True))
+        self.worker.finished.connect(self._on_simulation_ended)
         self.worker.start()
+
+    def _on_stop_simulation(self):
+        """立即终止当前仿真。"""
+        stopped = False
+        if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
+            self.worker.request_stop()
+            stopped = True
+        if hasattr(self, 'fsweep_worker') and self.fsweep_worker and self.fsweep_worker.isRunning():
+            self.fsweep_worker.request_stop()
+            stopped = True
+        if stopped:
+            self.log("正在终止仿真...")
+            self.btn_stop.setEnabled(False)
+
+    def _on_simulation_ended(self):
+        """仿真结束（正常完成或被终止）后恢复按钮状态。"""
+        self.btn_run.setEnabled(True)
+        self.btn_stop.setEnabled(False)
 
     def _on_progress(self, val, msg):
         self.progress_bar.setValue(int(val))
@@ -1704,33 +1824,49 @@ class CEMPoQtWindow(QMainWindow):
             return rcs_db_arr if use_db else 10.0 ** (rcs_db_arr / 10.0)
 
         if mode == '2d':
-            rcs_db = result['rcs_total']
             theta = result['theta_deg']
             phi = result['phi_deg']
             X, Y = np.meshgrid(phi, theta)
-            Z = _conv(np.nan_to_num(rcs_db, nan=-200))
-            c = ax.pcolormesh(X, Y, Z, cmap='jet', shading='auto')
-            self.rcs_figure.colorbar(c, ax=ax, label=f'RCS ({unit_label})')
-            ax.set_xlabel("Phi (deg)")
-            ax.set_ylabel("Theta (deg)")
-            phi_range = phi[-1] - phi[0] if len(phi) > 1 else 1
-            theta_range = theta[-1] - theta[0] if len(theta) > 1 else 1
-            ax.set_aspect(abs(phi_range / theta_range) if theta_range != 0 else 'equal', adjustable='box')
-            ax.invert_yaxis()
-            ax.set_title(f"RCS Pattern (2D Scan, f={freq_mhz:.1f} MHz)")
+            has_ptd = result.get('ptd_enabled', False)
+
+            if has_ptd and result.get('rcs_po') is not None:
+                # 三图：PO / PTD / Total — 需要重建子图布局
+                ax.remove()
+                axes = self.rcs_figure.subplots(1, 3)
+                plot_data = [
+                    (axes[0], result['rcs_po'],    'PO'),
+                    (axes[1], result['rcs_ptd'],   'PTD Fringe'),
+                    (axes[2], result['rcs_total'], 'Total (PO+PTD)'),
+                ]
+            else:
+                # 单图：仅 Total
+                plot_data = [(ax, result['rcs_total'], 'RCS (PO)')]
+
+            for ax_i, data, title_suffix in plot_data:
+                Z = _conv(np.nan_to_num(data, nan=-200))
+                c = ax_i.pcolormesh(X, Y, Z, cmap='jet', shading='auto')
+                self.rcs_figure.colorbar(c, ax=ax_i, label=f'RCS ({unit_label})')
+                ax_i.set_xlabel("Phi (deg)")
+                ax_i.set_ylabel("Theta (deg)")
+                phi_range = phi[-1] - phi[0] if len(phi) > 1 else 1
+                theta_range = theta[-1] - theta[0] if len(theta) > 1 else 1
+                ax_i.set_aspect(abs(phi_range / theta_range) if theta_range != 0 else 'equal', adjustable='box')
+                ax_i.invert_yaxis()
+                ax_i.set_title(f"{title_suffix}\n(f={freq_mhz:.1f} MHz)")
 
         elif mode == '1d_phi':
             angles = result['phi_deg']
-            ax.plot(angles, _conv(result['rcs_total']),
-                    label='Total RCS', linewidth=2, color='#007ACC')
+            has_ptd = result.get('ptd_enabled', False)
 
-            if result.get('rcs_po') is not None:
+            ax.plot(angles, _conv(result['rcs_total']),
+                    label='Total (PO+PTD)' if has_ptd else 'RCS (PO)',
+                    linewidth=2, color='#007ACC')
+
+            if has_ptd and result.get('rcs_po') is not None:
                 ax.plot(angles, _conv(result['rcs_po']),
                         '--', label='PO', alpha=0.7, color='orange')
-
-            if result.get('rcs_ptd') is not None:
                 ax.plot(angles, _conv(result['rcs_ptd']),
-                        ':', label='PTD Fringe (numerical)',
+                        ':', label='PTD Fringe',
                         alpha=0.85, color='green', linewidth=1.5)
 
             theta_fixed = result.get('theta_deg', 0)
@@ -1742,18 +1878,20 @@ class CEMPoQtWindow(QMainWindow):
 
         else:
             angles = result['theta_deg']
-            ax.plot(angles, _conv(result['rcs_total']),
-                    label='Total RCS', linewidth=2, color='#007ACC')
+            has_ptd = result.get('ptd_enabled', False)
 
-            if result.get('rcs_po') is not None:
+            ax.plot(angles, _conv(result['rcs_total']),
+                    label='Total (PO+PTD)' if has_ptd else 'RCS (PO)',
+                    linewidth=2, color='#007ACC')
+
+            if has_ptd and result.get('rcs_po') is not None:
                 ax.plot(angles, _conv(result['rcs_po']),
                         '--', label='PO', alpha=0.7, color='orange')
+                ax.plot(angles, _conv(result['rcs_ptd']),
+                        ':', label='PTD Fringe',
+                        alpha=0.85, color='green', linewidth=1.5)
 
             gtype = self.geo_type_combo.currentText()
-            if result.get('rcs_ptd') is not None and gtype == "Infinite Wedge":
-                ax.plot(angles, _conv(result['rcs_ptd']),
-                        ':', label='PTD Fringe (numerical)',
-                        alpha=0.85, color='green', linewidth=1.5)
 
             if self.chk_analytical.isChecked():
                 try:
@@ -2121,6 +2259,7 @@ class CEMPoQtWindow(QMainWindow):
             return
 
         self.btn_run.setEnabled(False)
+        self.btn_stop.setEnabled(True)
         self.progress_bar.setValue(0)
 
         self.fsweep_worker = FreqSweepWorker(
@@ -2129,9 +2268,9 @@ class CEMPoQtWindow(QMainWindow):
         self.fsweep_worker.progress_signal.connect(self._on_progress)
         self.fsweep_worker.result_signal.connect(self._on_freq_sweep_finished)
         self.fsweep_worker.error_signal.connect(
-            lambda e: (self.log(f"FreqSweep ERROR: {e}"), self.btn_run.setEnabled(True))
+            lambda e: (self.log(f"FreqSweep ERROR: {e}"), self._on_simulation_ended())
         )
-        self.fsweep_worker.finished.connect(lambda: self.btn_run.setEnabled(True))
+        self.fsweep_worker.finished.connect(self._on_simulation_ended)
         self.fsweep_worker.start()
 
     def _on_freq_sweep_finished(self, result):
@@ -2154,7 +2293,7 @@ class CEMPoQtWindow(QMainWindow):
         self.imaging_ds_list.setCurrentRow(0)
 
         self.plot_radar_imaging(result)
-        self.tabs.setCurrentIndex(3)   # 切到 Radar Imaging tab
+        self.tabs.setCurrentIndex(4)   # 切到 Radar Imaging tab
 
     def plot_radar_imaging(self, result):
         """绘制雷达成像结果（1D 距离像 或 2D 距离-角度图）。"""
@@ -2351,7 +2490,7 @@ class CEMPoQtWindow(QMainWindow):
         else:
             result = self.imaging_datasets[row - 1]['result']
         self.plot_radar_imaging(result)
-        self.tabs.setCurrentIndex(3)
+        self.tabs.setCurrentIndex(4)   # Radar Imaging tab
 
     def export_freq_sweep_rcs_csv(self):
         """导出频扫 RCS 为长格式 CSV（列名与角扫 CSV 兼容，末列为 Frequency (MHz)）。"""
@@ -2500,6 +2639,197 @@ class CEMPoQtWindow(QMainWindow):
                         writer.writerow(row)
 
             self.log(f"Range profile exported: {path}")
+        except Exception as e:
+            self.log(f"Export error: {e}")
+
+    # ─────────────────────────── Statistics ───────────────────────────
+
+    def _gather_stats_datasets(self):
+        """
+        收集所有可用于统计的数据集。
+        返回: list of (name, rcs_db_array)
+        """
+        datasets = []
+
+        # 1. Current simulation result (Total RCS only)
+        r = self.last_result
+        if r and r.get('rcs_total') is not None:
+            rcs = np.asarray(r['rcs_total']).ravel()
+            datasets.append(('Simulation', rcs))
+
+        # 2. Loaded CSV files
+        for item in self.comparison_data:
+            df = item['data']
+            name = item['name']
+            # Try to find RCS total column
+            for col in df.columns:
+                cl = col.lower()
+                if 'total' in cl or 'rcs' in cl or 'dbsm' in cl:
+                    datasets.append((name, np.asarray(df[col], dtype=float)))
+                    break
+
+        return datasets
+
+    def _calc_statistics(self):
+        """计算统计数据并更新 Statistics tab。"""
+        from PySide6.QtWidgets import QTableWidgetItem
+        from ui.statistics import (compute_statistics, compute_comparison_statistics,
+                                   SINGLE_STAT_ROWS, COMPARE_STAT_ROWS)
+
+        datasets = self._gather_stats_datasets()
+        if not datasets:
+            self.log("No data available for statistics.")
+            return
+
+        n_ds = len(datasets)
+        stat_rows_single = SINGLE_STAT_ROWS
+
+        # Compute single stats for each dataset
+        all_single = []
+        for name, rcs_db in datasets:
+            s = compute_statistics(rcs_db)
+            all_single.append((name, s))
+
+        # Compute comparisons (each vs ref = first dataset)
+        comparisons = []
+        has_compare = (n_ds >= 2)
+        if has_compare:
+            ref_name, ref_rcs = datasets[0]
+            for i in range(1, n_ds):
+                other_name, other_rcs = datasets[i]
+                min_len = min(len(ref_rcs), len(other_rcs))
+                cs = compute_comparison_statistics(ref_rcs[:min_len], other_rcs[:min_len])
+                comparisons.append((other_name, cs))
+
+        # ── Single stats table ──
+        def _fmt_val(val, fmt, key):
+            if val is None or (isinstance(val, float) and not np.isfinite(val)):
+                return 'N/A'
+            if isinstance(val, int) or key == 'N':
+                return str(int(val))
+            return fmt.format(val)
+
+        self.stats_table.setRowCount(len(stat_rows_single))
+        self.stats_table.setColumnCount(1 + n_ds)
+        headers = ['Statistic'] + [name for name, _ in all_single]
+        self.stats_table.setHorizontalHeaderLabels(headers)
+
+        for row_idx, (_, label, fmt, key) in enumerate(stat_rows_single):
+            self.stats_table.setItem(row_idx, 0, QTableWidgetItem(label))
+            for col_idx, (_, s) in enumerate(all_single):
+                val_str = 'N/A' if s is None else _fmt_val(s.get(key), fmt, key)
+                self.stats_table.setItem(row_idx, 1 + col_idx, QTableWidgetItem(val_str))
+
+        # ── Comparison table (vs ref) ──
+        if comparisons:
+            ref_label = all_single[0][0]
+            self.stats_comp_table.setVisible(True)
+            self.stats_comp_table.setRowCount(len(COMPARE_STAT_ROWS))
+            self.stats_comp_table.setColumnCount(1 + len(comparisons))
+            comp_headers = ['Statistic'] + [f"{name} vs Ref" for name, _ in comparisons]
+            self.stats_comp_table.setHorizontalHeaderLabels(comp_headers)
+
+            for row_idx, (_, label, fmt, key) in enumerate(COMPARE_STAT_ROWS):
+                self.stats_comp_table.setItem(row_idx, 0, QTableWidgetItem(label))
+                for col_idx, (_, cs) in enumerate(comparisons):
+                    val_str = 'N/A' if cs is None else _fmt_val(cs.get(key), fmt, key)
+                    self.stats_comp_table.setItem(row_idx, 1 + col_idx, QTableWidgetItem(val_str))
+        else:
+            self.stats_comp_table.setVisible(False)
+
+        # ── Plot PDF ──
+        self.stats_figure.clear()
+        ax = self.stats_figure.add_subplot(111)
+
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+        for i, (name, rcs_db) in enumerate(datasets):
+            valid = np.isfinite(rcs_db) & (rcs_db > -200)
+            if not valid.any():
+                continue
+            data = rcs_db[valid]
+            color = colors[i % len(colors)]
+
+            # Histogram as density
+            bins = min(max(int(np.sqrt(len(data))), 10), 80)
+            ax.hist(data, bins=bins, density=True, alpha=0.35, color=color, edgecolor=color, linewidth=0.5)
+
+            # KDE curve
+            from scipy.stats import gaussian_kde
+            try:
+                kde = gaussian_kde(data)
+                x_range = np.linspace(data.min() - 3, data.max() + 3, 300)
+                ax.plot(x_range, kde(x_range), color=color, linewidth=1.5, label=name)
+            except Exception:
+                pass
+
+        ax.set_xlabel('RCS (dBsm)')
+        ax.set_ylabel('Probability Density')
+        ax.set_title('RCS Distribution')
+        ax.legend(fontsize=8, loc='best')
+        ax.grid(True, alpha=0.3)
+        self.stats_figure.tight_layout()
+        self.stats_canvas.draw()
+
+        # Cache for export
+        self._stats_cache = {
+            'single': all_single,
+            'comparisons': comparisons,
+            'single_rows': stat_rows_single,
+            'compare_rows': COMPARE_STAT_ROWS,
+        }
+
+        # Switch to Statistics tab
+        self.tabs.setCurrentIndex(3)
+        self.log(f"Statistics calculated for {n_ds} dataset(s).")
+
+    def _export_statistics_csv(self):
+        """导出统计数据到 CSV 文件。"""
+        if not hasattr(self, '_stats_cache') or not self._stats_cache:
+            self.log("No statistics to export. Run Calc Statistics first.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(self, "Export Statistics CSV", "statistics.csv", "CSV Files (*.csv)")
+        if not path:
+            return
+
+        try:
+            cache = self._stats_cache
+            all_single = cache['single']
+            comparisons = cache['comparisons']
+            stat_rows = cache['single_rows']
+            comp_rows = cache['compare_rows']
+
+            def _fmt_csv(val, fmt, key):
+                if val is None or (isinstance(val, float) and not np.isfinite(val)):
+                    return ''
+                if isinstance(val, int) or key == 'N':
+                    return int(val)
+                return fmt.format(val)
+
+            with open(path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+
+                # Single stats
+                headers = ['Statistic'] + [name for name, _ in all_single]
+                writer.writerow(headers)
+                for _, label, fmt, key in stat_rows:
+                    row = [label]
+                    for _, s in all_single:
+                        row.append('' if s is None else _fmt_csv(s.get(key), fmt, key))
+                    writer.writerow(row)
+
+                # Comparison stats
+                if comparisons:
+                    writer.writerow([])
+                    comp_headers = ['Comparison vs Ref'] + [f"{name} vs Ref" for name, _ in comparisons]
+                    writer.writerow(comp_headers)
+                    for _, label, fmt, key in comp_rows:
+                        row = [label]
+                        for _, cs in comparisons:
+                            row.append('' if cs is None else _fmt_csv(cs.get(key), fmt, key))
+                        writer.writerow(row)
+
+            self.log(f"Statistics exported: {path}")
         except Exception as e:
             self.log(f"Export error: {e}")
 

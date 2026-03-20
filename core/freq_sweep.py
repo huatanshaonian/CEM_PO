@@ -212,10 +212,10 @@ def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use
             r_proj = float(np.dot(seg.midpoint, k_dir))  # r_mid · k_dir
 
             # ── 6. 向量化频率 ──
-            # pre_arr[i]   = 2π / (1j * k[i] * sin_gamma0)
+            # pre_arr[i]   = j / (k[i] * sin_gamma0)
             # sinc_arr[i]  = sinc(k[i] * L * k_dot_t / π)
             # phase_arr[i] = exp(2j * k[i] * r_proj)
-            pre_arr   = (2.0 * np.pi) / (1j * k_arr_xp * sin_gamma0)   # (Nf,)
+            pre_arr   = 1j / (k_arr_xp * sin_gamma0)   # (Nf,)
             sinc_arg  = k_arr_xp * L * k_dot_t / float(np.pi)          # (Nf,)
             sinc_arr  = xp.sinc(sinc_arg)                                # (Nf,)
             phase_arr = xp.exp(2j * k_arr_xp * r_proj)                  # (Nf,)

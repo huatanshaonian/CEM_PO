@@ -119,7 +119,12 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
         phase_mid = 2.0 * np.dot(seg.midpoint, k_vec)
 
         # 传播因子：含 1/sin(γ₀) 斜入射修正
-        pre_factor = (2.0 * np.pi) / (1j * k * sin_gamma0)
+        # 2D→3D SPA 反演：A = D/(2π)
+        # 3D 微元场: dE_s/E_i = [D/(2π sinγ₀)] · (e^{-jkR}/R) · e^{-j·phase} · dζ
+        # 匹配代码约定 E_s/E_i = (jk/2πR)e^{-jkR}·I → dI = (-j/k sinγ₀)·D·e^{-j·phase}·dζ
+        # 代码 PO 用 e^{+j·phase} (共轭), PTD 取共轭对齐 → pre_factor = j/(k sinγ₀)
+        # 验证: σ = (k²/π)|pre·D·L|² = |D|²L²/(π sin²γ₀) (Keller GTD) ✓
+        pre_factor = 1j / (k * sin_gamma0)
 
         seg_contrib = pre_factor * D * seg.length * sinc_val * np.exp(1j * phase_mid)
         total_contrib += seg_contrib

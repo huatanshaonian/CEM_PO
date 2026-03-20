@@ -157,28 +157,11 @@ def wedge_gtd_rcs(length, phi_deg_array, frequency, polarization='VV'):
         # Soft: D = f - g
         D = term_f - term_g
         
-    # GTD RCS Formula for finite length edge (Normal incidence)
-    # sigma = L^2 / pi * |D|^2 * (something?)
-    # Standard formula for finite cylinder: 2pi R L^2 / lambda.
-    # For edge:
-    # E_s = E_i * D * exp(-jkr)/sqrt(r)
-    # This D is 2D diffraction coeff (units 1/sqrt(k)? No, Ufimtsev D is dimensionless? No).
-    # Ufimtsev D as defined in code is Dimensionless?
-    # Let's check code: pre_factor = 2pi / (jk).
-    # So Total Field ~ (2pi/k) * D * L.
-    # Sigma = 4pi * |Total|^2 = 4pi * (4pi^2/k^2) * |D|^2 * L^2
-    #       = 16 pi^3 / k^2 * L^2 * |D|^2
-    #       = 4 pi * lambda^2 * L^2 * |D|^2 ?
-    # Let's re-verify unit.
-    # Code D is dimensionless (pure trig).
-    # Result is Area (Sigma).
-    # Code uses: sigma = k^2/pi * |I|^2.
-    # I = (2pi/k) * D * L.
-    # |I|^2 = 4pi^2/k^2 * |D|^2 * L^2.
-    # Sigma = (k^2/pi) * (4pi^2/k^2 * |D|^2 * L^2)
-    #       = 4 * pi * L^2 * |D|^2.
-    
-    sigma = 4 * np.pi * length**2 * np.abs(D)**2
+    # GTD RCS for finite edge, normal incidence (γ₀=π/2):
+    # D is Ufimtsev's dimensionless diffraction coefficient (cot terms).
+    # 3D 等效源 A = D/(2π), 远场 u_s/u_i = A·L·e^{-jkR}/R = D·L/(2π·R)·e^{-jkR}
+    # σ = 4πR²|u_s/u_i|² = 4π·D²L²/(4π²) = |D|²L²/π
+    sigma = length**2 * np.abs(D)**2 / np.pi
     
     return 10 * np.log10(np.maximum(sigma, 1e-20))
 
@@ -217,7 +200,8 @@ def infinite_wedge_rcs(exterior_angle_deg, edge_length, frequency, theta_rad, po
         f1, g1 = fun_fg(a0, a0, alfa)
         D_arr[i] = f1 if polarization == 'HH' else g1
 
-    sigma = 4.0 * np.pi * edge_length**2 * np.abs(D_arr)**2
+    # σ = |D|²·L²/π （Keller GTD，正入射棱边 γ₀=π/2）
+    sigma = edge_length**2 * np.abs(D_arr)**2 / np.pi
     return 10.0 * np.log10(np.maximum(sigma, 1e-20))
 
 
