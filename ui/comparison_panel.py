@@ -606,17 +606,37 @@ class ComparisonManager:
     # Drawing helpers (2D heatmap)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _linear_metrics(db_a, db_b):
+        """在线性域 (m²) 计算 RMSE 和 Mean Diff，结果转为 dBsm 显示。
+
+        Returns (rmse_db, mean_diff_db)
+        """
+        mask = np.isfinite(db_a) & np.isfinite(db_b)
+        if not mask.any():
+            return float('nan'), float('nan')
+        a_lin = 10.0 ** (db_a[mask] / 10.0)
+        b_lin = 10.0 ** (db_b[mask] / 10.0)
+        diff_lin = a_lin - b_lin
+        # RMSE: 线性域计算后转 dB
+        rmse_lin = float(np.sqrt(np.mean(diff_lin ** 2)))
+        rmse_db = 10.0 * np.log10(max(rmse_lin, 1e-30))
+        # Mean Diff: 线性域均值差转 dB（保留符号：A 比 B 高则为正）
+        mean_diff_lin = float(np.mean(diff_lin))
+        sign = 1.0 if mean_diff_lin >= 0 else -1.0
+        mean_diff_db = sign * 10.0 * np.log10(max(abs(mean_diff_lin), 1e-30))
+        return rmse_db, mean_diff_db
+
     def _draw_3panel_2d(self, data_a, name_a, data_b, name_b, theta, phi, freq_mhz):
-        """Draw 3-panel 2D comparison: A | B | Diff(A−B) with RMSE/mean metrics."""
+        """Draw 3-panel 2D comparison: A | B | Diff(A−B) with linear-domain metrics."""
         diff = data_a - data_b
-        mask = np.isfinite(data_a) & np.isfinite(data_b)
-        rmse     = float(np.sqrt(np.mean(diff[mask] ** 2))) if mask.any() else float('nan')
-        mean_err = float(np.mean(diff[mask]))               if mask.any() else float('nan')
+        rmse_db, mean_diff_db = self._linear_metrics(data_a, data_b)
 
         extent   = [phi.min(), phi.max(), theta.max(), theta.min()]
         vmin, vmax = self._cbar_range(
             min(np.nanmin(data_a), np.nanmin(data_b)),
             max(np.nanmax(data_a), np.nanmax(data_b)))
+        mask = np.isfinite(diff)
         diff_abs = np.nanmax(np.abs(diff[mask])) if mask.any() else 1.0
         if diff_abs < 1e-10:
             diff_abs = 1.0
@@ -646,12 +666,12 @@ class ComparisonManager:
 
         im3 = ax3.imshow(diff, extent=extent, aspect=data_aspect, origin='upper',
                          cmap='seismic', vmin=-diff_abs, vmax=diff_abs)
-        ax3.set_title(f'Diff (A−B)\nRMSE={rmse:.2f} dB  Mean={mean_err:.2f} dB', fontsize=9)
+        ax3.set_title(f'Diff (A−B)\nRMSE={rmse_db:.2f} dBsm  Mean={mean_diff_db:+.2f} dBsm', fontsize=9)
         ax3.set_xlabel('Phi (deg)')
-        self.w.comp_figure.colorbar(im3, cax=cax2, label='Error (dB)')
+        self.w.comp_figure.colorbar(im3, cax=cax2, label='Diff (dB)')
 
         title = f'2D RCS Comparison @ {freq_mhz:.1f} MHz — ' if freq_mhz else '2D RCS Comparison — '
-        self.w.comp_figure.suptitle(f'{title}RMSE={rmse:.2f} dB  Mean={mean_err:.2f} dB', fontsize=11)
+        self.w.comp_figure.suptitle(f'{title}RMSE={rmse_db:.2f} dBsm  Mean={mean_diff_db:+.2f} dBsm', fontsize=11)
 
     def _draw_6panel_2d(self, rcs_a, name_a, rcs_b, name_b, rcs_ref, name_ref, theta, phi):
         """6-panel dual comparison: top row [A, B, Ref], bottom row [A−Ref, B−Ref, A−B]."""
@@ -659,15 +679,9 @@ class ComparisonManager:
         diff_b  = rcs_b - rcs_ref
         diff_ab = rcs_a - rcs_b
 
-        def _stats(d):
-            m = np.isfinite(d)
-            if not m.any():
-                return float('nan'), float('nan')
-            return float(np.sqrt(np.mean(d[m] ** 2))), float(np.mean(d[m]))
-
-        rmse_a,  mean_a  = _stats(diff_a)
-        rmse_b,  mean_b  = _stats(diff_b)
-        rmse_ab, mean_ab = _stats(diff_ab)
+        rmse_a,  mean_a  = self._linear_metrics(rcs_a, rcs_ref)
+        rmse_b,  mean_b  = self._linear_metrics(rcs_b, rcs_ref)
+        rmse_ab, mean_ab = self._linear_metrics(rcs_a, rcs_b)
 
         extent   = [phi.min(), phi.max(), theta.max(), theta.min()]
         vmin, vmax = self._cbar_range(
@@ -698,9 +712,9 @@ class ComparisonManager:
 
         row1_axes = []
         diff_items = [
-            (diff_a,  f'A−Ref  RMSE={rmse_a:.2f} dB\nMean={mean_a:.2f} dB'),
-            (diff_b,  f'B−Ref  RMSE={rmse_b:.2f} dB\nMean={mean_b:.2f} dB'),
-            (diff_ab, f'A−B    RMSE={rmse_ab:.2f} dB\nMean={mean_ab:.2f} dB'),
+            (diff_a,  f'A−Ref  RMSE={rmse_a:.1f}  Mean={mean_a:+.1f} dBsm'),
+            (diff_b,  f'B−Ref  RMSE={rmse_b:.1f}  Mean={mean_b:+.1f} dBsm'),
+            (diff_ab, f'A−B    RMSE={rmse_ab:.1f}  Mean={mean_ab:+.1f} dBsm'),
         ]
         for col, (data, title) in enumerate(diff_items):
             ax = self.w.comp_figure.add_subplot(gs[1, col])
@@ -712,7 +726,7 @@ class ComparisonManager:
                 ax.set_ylabel('Theta (deg)')
             row1_axes.append(ax)
         cb1 = self.w.comp_figure.colorbar(im, ax=row1_axes, shrink=0.7, pad=0.02)
-        cb1.set_label('Error (dB)')
+        cb1.set_label('Diff (dB)')
 
         self.w.comp_figure.suptitle(f'Dual Model Comparison: {name_a} / {name_b} / {name_ref}', fontsize=11)
 

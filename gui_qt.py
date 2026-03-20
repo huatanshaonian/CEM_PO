@@ -211,27 +211,29 @@ class CEMPoQtWindow(QMainWindow):
         stats_layout.addWidget(self.stats_toolbar)
         stats_layout.addWidget(self.stats_canvas, 3)
 
-        # Lower: statistics tables (single + comparison)
+        # Lower: statistics tables (single + comparison, side by side)
         from PySide6.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
         _table_style = ("QTableWidget { font-size: 12px; }"
                         "QHeaderView::section { background: #E9ECEF; font-weight: bold; padding: 4px; }")
 
-        self.stats_table = QTableWidget()
-        self.stats_table.setAlternatingRowColors(True)
-        self.stats_table.setStyleSheet(_table_style)
-        self.stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.stats_table.horizontalHeader().setStretchLastSection(True)
-        self.stats_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        stats_layout.addWidget(self.stats_table, 2)
+        def _make_stats_table():
+            t = QTableWidget()
+            t.setAlternatingRowColors(True)
+            t.setStyleSheet(_table_style)
+            t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+            t.horizontalHeader().setStretchLastSection(False)
+            t.setEditTriggers(QTableWidget.NoEditTriggers)
+            t.setSizeAdjustPolicy(QTableWidget.AdjustToContents)
+            return t
 
-        self.stats_comp_table = QTableWidget()
-        self.stats_comp_table.setAlternatingRowColors(True)
-        self.stats_comp_table.setStyleSheet(_table_style)
-        self.stats_comp_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.stats_comp_table.horizontalHeader().setStretchLastSection(True)
-        self.stats_comp_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.stats_table = _make_stats_table()
+        self.stats_comp_table = _make_stats_table()
         self.stats_comp_table.setVisible(False)
-        stats_layout.addWidget(self.stats_comp_table, 1)
+
+        self.stats_table_splitter = QSplitter()
+        self.stats_table_splitter.addWidget(self.stats_table)
+        self.stats_table_splitter.addWidget(self.stats_comp_table)
+        stats_layout.addWidget(self.stats_table_splitter, 2)
 
         # Export button
         stats_btn_layout = QHBoxLayout()
@@ -2736,6 +2738,22 @@ class CEMPoQtWindow(QMainWindow):
                     self.stats_comp_table.setItem(row_idx, 1 + col_idx, QTableWidgetItem(val_str))
         else:
             self.stats_comp_table.setVisible(False)
+
+        # ── 根据表格内容宽度设置 splitter 初始比例 ──
+        def _table_content_width(table):
+            w = table.verticalHeader().width() + table.frameWidth() * 2 + 20
+            for c in range(table.columnCount()):
+                w += table.columnWidth(c)
+            return max(w, 200)
+
+        self.stats_table.resizeColumnsToContents()
+        w1 = _table_content_width(self.stats_table)
+        if self.stats_comp_table.isVisible():
+            self.stats_comp_table.resizeColumnsToContents()
+            w2 = _table_content_width(self.stats_comp_table)
+            self.stats_table_splitter.setSizes([w1, w2])
+        else:
+            self.stats_table_splitter.setSizes([w1, 0])
 
         # ── Plot PDF ──
         self.stats_figure.clear()

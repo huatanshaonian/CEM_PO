@@ -67,23 +67,23 @@ def compute_comparison_statistics(rcs_db_a, rcs_db_b):
     a_lin, b_lin = db_to_linear(a), db_to_linear(b)
 
     diff_lin = a_lin - b_lin
-    mean_lin = 0.5 * (np.mean(a_lin) + np.mean(b_lin))
     rmse_lin = float(np.sqrt(np.mean(diff_lin ** 2)))
+    mean_diff_lin = float(np.mean(diff_lin))
+    max_abs_diff_lin = float(np.max(np.abs(diff_lin)))
 
-    # 归一化 RMSE：相对于两组数据线性均值的百分比
-    nrmse = rmse_lin / mean_lin * 100.0 if mean_lin > 1e-30 else float('nan')
-
-    # dB 域差值（仅供参考，尾端敏感）
-    diff_db = a - b
+    # 线性域指标转 dB 显示（保留符号）
+    def _to_db_signed(val):
+        sign = 1.0 if val >= 0 else -1.0
+        return sign * 10.0 * np.log10(max(abs(val), 1e-30))
 
     stats = {
         'N':               len(a),
+        'rmse_db':         float(10.0 * np.log10(max(rmse_lin, 1e-30))),
         'rmse_lin':        rmse_lin,
-        'nrmse_pct':       float(nrmse),
-        'mean_diff_lin':   float(np.mean(diff_lin)),
-        'max_abs_diff_lin': float(np.max(np.abs(diff_lin))),
-        'mean_diff_db':    float(np.mean(diff_db)),
-        'max_abs_diff_db': float(np.max(np.abs(diff_db))),
+        'mean_diff_db':    float(_to_db_signed(mean_diff_lin)),
+        'mean_diff_lin':   mean_diff_lin,
+        'max_abs_diff_db': float(10.0 * np.log10(max(max_abs_diff_lin, 1e-30))),
+        'max_abs_diff_lin': max_abs_diff_lin,
         # 相关系数（线性域）
         'correlation':     float(np.corrcoef(a_lin, b_lin)[0, 1]) if len(a) > 1 else float('nan'),
     }
@@ -106,13 +106,13 @@ SINGLE_STAT_ROWS = [
 
 COMPARE_STAT_ROWS = [
     ('N',                'Sample Count',        '{:d}',      'N'),
+    ('rmse_db',          'RMSE (dBsm)',         '{:.2f}',    'rmse_db'),
+    ('mean_diff_db',     'Mean Diff (dBsm)',    '{:+.2f}',   'mean_diff_db'),
+    ('max_abs_diff_db',  'Max |Diff| (dBsm)',   '{:.2f}',    'max_abs_diff_db'),
+    ('correlation',      'Correlation',         '{:.6f}',    'correlation'),
     ('rmse_lin',         'RMSE (m²)',           '{:.4e}',    'rmse_lin'),
-    ('nrmse_pct',        'NRMSE (%)',           '{:.2f}',    'nrmse_pct'),
     ('mean_diff_lin',    'Mean Diff (m²)',      '{:+.4e}',   'mean_diff_lin'),
     ('max_abs_diff_lin', 'Max |Diff| (m²)',     '{:.4e}',    'max_abs_diff_lin'),
-    ('correlation',      'Correlation',         '{:.6f}',    'correlation'),
-    ('mean_diff_db',     'Mean Diff (dB)*',     '{:+.3f}',   'mean_diff_db'),
-    ('max_abs_diff_db',  'Max |Diff| (dB)*',    '{:.3f}',    'max_abs_diff_db'),
 ]
 
 
