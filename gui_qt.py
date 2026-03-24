@@ -230,10 +230,8 @@ class CEMPoQtWindow(QMainWindow):
         self.stats_comp_table = _make_stats_table()
         self.stats_comp_table.setVisible(False)
 
-        self.stats_table_splitter = QSplitter()
-        self.stats_table_splitter.addWidget(self.stats_table)
-        self.stats_table_splitter.addWidget(self.stats_comp_table)
-        stats_layout.addWidget(self.stats_table_splitter, 2)
+        stats_layout.addWidget(self.stats_table, 1)
+        stats_layout.addWidget(self.stats_comp_table, 1)
 
         # Export button
         stats_btn_layout = QHBoxLayout()
@@ -661,6 +659,7 @@ class CEMPoQtWindow(QMainWindow):
         self.comp_files_list = QListWidget()
         self.comp_files_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.comp_files_list.setStyleSheet("border: 1px solid #CCC; border-radius: 2px;")
+        self.comp_files_list.itemChanged.connect(lambda: self._comp_mgr.update_comparison_plot())
         l_comp.addWidget(self.comp_files_list)
         h_btn = QHBoxLayout()
         self.btn_add_csv = QPushButton("Import CSV")
@@ -716,6 +715,20 @@ class CEMPoQtWindow(QMainWindow):
         self.combo_rcs_unit.currentTextChanged.connect(self._comp_mgr.update_comparison_plot)
         h_unit.addWidget(self.combo_rcs_unit)
         l_opts.addLayout(h_unit)
+        # Statistics threshold
+        h_thresh = QHBoxLayout()
+        self.chk_stats_threshold = QCheckBox("Stats threshold:")
+        self.chk_stats_threshold.setToolTip("低于阈值的点不计入 RMSE / MeanDiff（任一数据集 ≥ 阈值即有效）")
+        self.chk_stats_threshold.stateChanged.connect(self._comp_mgr.update_comparison_plot)
+        h_thresh.addWidget(self.chk_stats_threshold)
+        self.stats_threshold_val = QLineEdit("-40")
+        self.stats_threshold_val.setFixedWidth(50)
+        self.stats_threshold_val.setPlaceholderText("dBsm")
+        self.stats_threshold_val.editingFinished.connect(self._comp_mgr.update_comparison_plot)
+        h_thresh.addWidget(self.stats_threshold_val)
+        h_thresh.addWidget(QLabel("dBsm"))
+        h_thresh.addStretch()
+        l_opts.addLayout(h_thresh)
         # Colorbar manual range (2D heatmap)
         h_cbar = QHBoxLayout()
         self.chk_cbar_manual = QCheckBox("Colorbar:")
@@ -1061,8 +1074,8 @@ class CEMPoQtWindow(QMainWindow):
             return
         try:
             from solvers.ptd_edge_finder import find_shared_edge
-            edge_pts, normals_a, normals_b, ext_angle = find_shared_edge(
-                self.current_geo[a], self.current_geo[b], n_samples=120)
+            edge_pts, normals_a, normals_b, ext_angle, _warn = find_shared_edge(
+                self.current_geo[a], self.current_geo[b])
             self._ptd_highlighted_pair = text
             self._highlight_surfaces_3d({a, b})
             line = pv.MultipleLines(points=edge_pts)
@@ -1467,8 +1480,8 @@ class CEMPoQtWindow(QMainWindow):
                             a, b = int(a_str), int(b_str)
                             if a < len(geo_list) and b < len(geo_list):
                                 try:
-                                    edge_pts, normals_a, normals_b, ext_angle = find_shared_edge(
-                                        geo_list[a], geo_list[b], n_samples=120)
+                                    edge_pts, normals_a, normals_b, ext_angle, _warn = find_shared_edge(
+                                        geo_list[a], geo_list[b])
                                     lit_normal = np.mean(normals_a, axis=0)
                                     edge = PTDEdge(
                                         f"({a},{b})", edge_pts, lit_normal,
@@ -2648,7 +2661,7 @@ class CEMPoQtWindow(QMainWindow):
 
     def _gather_stats_datasets(self):
         """
-        收集所有可用于统计的数据集。
+        收集统计数据集：当前仿真 + loaded data 中被勾选的项。
         返回: list of (name, rcs_db_array)
         """
         datasets = []
@@ -2659,16 +2672,25 @@ class CEMPoQtWindow(QMainWindow):
             rcs = np.asarray(r['rcs_total']).ravel()
             datasets.append(('Simulation', rcs))
 
-        # 2. Loaded CSV files
-        for item in self.comparison_data:
-            df = item['data']
-            name = item['name']
-            # Try to find RCS total column
-            for col in df.columns:
-                cl = col.lower()
-                if 'total' in cl or 'rcs' in cl or 'dbsm' in cl:
-                    datasets.append((name, np.asarray(df[col], dtype=float)))
-                    break
+        # 2. Loaded CSV files — 仅勾选项
+        for idx, item in enumerate(self.comparison_data):
+            list_item = self.comp_files_list.item(idx)
+            if list_item and list_item.checkState() != Qt.Checked:
+                continue
+            filtered = self._comp_mgr._apply_freq_filter(item)
+            res = self._comp_mgr._parse_csv_1d(filtered)
+            if res:
+                angle, rcs_total, name, rcs_po, rcs_ptd = res
+                datasets.append((name, rcs_total))
+            else:
+                # fallback: 尝试找 RCS 列
+                df = filtered['data']
+                name = item['name']
+                for col in df.columns:
+                    cl = col.lower()
+                    if 'total' in cl or 'rcs' in cl or 'dbsm' in cl:
+                        datasets.append((name, np.asarray(df[col], dtype=float)))
+                        break
 
         return datasets
 
@@ -2739,21 +2761,9 @@ class CEMPoQtWindow(QMainWindow):
         else:
             self.stats_comp_table.setVisible(False)
 
-        # ── 根据表格内容宽度设置 splitter 初始比例 ──
-        def _table_content_width(table):
-            w = table.verticalHeader().width() + table.frameWidth() * 2 + 20
-            for c in range(table.columnCount()):
-                w += table.columnWidth(c)
-            return max(w, 200)
-
         self.stats_table.resizeColumnsToContents()
-        w1 = _table_content_width(self.stats_table)
         if self.stats_comp_table.isVisible():
             self.stats_comp_table.resizeColumnsToContents()
-            w2 = _table_content_width(self.stats_comp_table)
-            self.stats_table_splitter.setSizes([w1, w2])
-        else:
-            self.stats_table_splitter.setSizes([w1, 0])
 
         # ── Plot PDF ──
         self.stats_figure.clear()
