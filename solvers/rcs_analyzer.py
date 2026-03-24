@@ -179,43 +179,52 @@ class RCSAnalyzer:
                     is_cached=is_cached, abort_event=abort_event
                 )
 
-        # GPU 模式下，若同时勾选 Parallel 且有 PTD 边，则并行预计算 PTD
+        # GPU 模式下预计算所有角度的 PTD（与 GPU PO 解耦）
+        # parallel 勾选 → 多进程；未勾选 → 单线程串行预算
         ptd_workers = n_workers if (gpu and parallel and ptd_edges) else None
+        ptd_precompute = gpu and ptd_edges  # 只要 GPU+PTD 就预算
 
         return self._compute_serial(
             geometry_data, wave_params, angles, samples_per_lambda,
             k_mag, show_progress, progress_callback, ptd_edges, polarization,
-            is_cached=is_cached, ptd_workers=ptd_workers, abort_event=abort_event
+            is_cached=is_cached, ptd_workers=ptd_workers,
+            ptd_precompute=ptd_precompute, abort_event=abort_event
         )
 
     def _compute_serial(self, geometry_data, wave_params, angles,
                         samples_per_lambda, k_mag, show_progress, progress_callback=None,
                         ptd_edges=None, polarization='VV', is_cached=False, ptd_workers=None,
-                        abort_event=None):
+                        ptd_precompute=False, abort_event=None):
         rcs_list = {'total': [], 'po': [], 'ptd': [],
                     'total_c': [], 'po_c': [], 'ptd_c': []}
         n_angles = len(angles)
 
         is_merged = isinstance(geometry_data, MergedMeshData)
 
-        # 若指定了 ptd_workers，提前并行计算所有角度的 PTD 复振幅
+        # PTD 预计算：在 GPU PO 之前把所有角度的 PTD 算完
         ptd_precomputed = None
-        if ptd_edges and ptd_workers and ptd_workers > 1:
-            msg = f"PTD 并行预计算: {ptd_workers} 个进程, {n_angles} 个角度..."
-            if show_progress: logger.info(msg)
-            if progress_callback: progress_callback(0, n_angles, msg)
+        if ptd_edges and ptd_precompute:
             freq = wave_params['frequency']
             phi  = wave_params['phi']
             args_list = [
                 (theta, ptd_edges, freq, phi, polarization)
                 for theta in angles
             ]
-            ptd_precomputed = [None] * n_angles
-            with ProcessPoolExecutor(max_workers=ptd_workers) as ex:
-                future_to_idx = {ex.submit(_ptd_angle_task, a): i
-                                 for i, a in enumerate(args_list)}
-                for f in as_completed(future_to_idx):
-                    ptd_precomputed[future_to_idx[f]] = f.result()
+            if ptd_workers and ptd_workers > 1:
+                msg = f"PTD 并行预计算: {ptd_workers} 个进程, {n_angles} 个角度..."
+                if show_progress: logger.info(msg)
+                if progress_callback: progress_callback(0, n_angles, msg)
+                ptd_precomputed = [None] * n_angles
+                with ProcessPoolExecutor(max_workers=ptd_workers) as ex:
+                    future_to_idx = {ex.submit(_ptd_angle_task, a): i
+                                     for i, a in enumerate(args_list)}
+                    for f in as_completed(future_to_idx):
+                        ptd_precomputed[future_to_idx[f]] = f.result()
+            else:
+                msg = f"PTD 串行预计算: {n_angles} 个角度..."
+                if show_progress: logger.info(msg)
+                if progress_callback: progress_callback(0, n_angles, msg)
+                ptd_precomputed = [_ptd_angle_task(a) for a in args_list]
 
         for i, theta in enumerate(angles):
             if abort_event and abort_event.is_set():
@@ -374,6 +383,32 @@ class RCSAnalyzer:
                     is_cached=is_cached, abort_event=abort_event
                 )
 
+        # ── PTD 预计算（GPU 模式下先用 CPU 算完所有角度的 PTD） ──
+        ptd_precomputed = None
+        if gpu and ptd_edges:
+            angle_pairs = [(theta, phi)
+                           for theta in theta_array for phi in phi_array]
+            args_list = [
+                (theta, ptd_edges, frequency, phi, polarization)
+                for theta, phi in angle_pairs
+            ]
+            if parallel and n_workers and n_workers > 1:
+                msg = f"PTD 并行预计算: {n_workers} 个进程, {total_points} 个角度..."
+                if show_progress: logger.info(msg)
+                if progress_callback: progress_callback(0, total_points, msg)
+                ptd_precomputed = [None] * total_points
+                with ProcessPoolExecutor(max_workers=n_workers) as ex:
+                    future_to_idx = {ex.submit(_ptd_angle_task, a): i
+                                     for i, a in enumerate(args_list)}
+                    for f in as_completed(future_to_idx):
+                        ptd_precomputed[future_to_idx[f]] = f.result()
+            else:
+                msg = f"PTD 串行预计算: {total_points} 个角度..."
+                if show_progress: logger.info(msg)
+                if progress_callback: progress_callback(0, total_points, msg)
+                ptd_precomputed = [_ptd_angle_task(a) for a in args_list]
+
+        # ── 主循环（PO 在 GPU 上，PTD 已预算或在循环内串行计算） ──
         rcs_2d = {
             'total': np.zeros((n_theta, n_phi)),
             'po':    np.zeros((n_theta, n_phi)),
@@ -394,7 +429,6 @@ class RCSAnalyzer:
                 wave = self._make_wave(frequency, theta, phi)
 
                 total_I_po = 0j
-
                 if is_merged:
                     total_I_po = self.solver.integrate_cached(geometry_data, wave)
                 else:
@@ -406,8 +440,11 @@ class RCSAnalyzer:
 
                 total_I_ptd = 0j
                 if ptd_edges:
-                    for edge in ptd_edges:
-                        total_I_ptd += PTDProcessor.compute_contribution(edge, wave, polarization=polarization)
+                    if ptd_precomputed is not None:
+                        total_I_ptd = ptd_precomputed[i * n_phi + j]
+                    else:
+                        for edge in ptd_edges:
+                            total_I_ptd += PTDProcessor.compute_contribution(edge, wave, polarization=polarization)
 
                 total_I = total_I_po + total_I_ptd
 
