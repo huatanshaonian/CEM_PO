@@ -3,7 +3,8 @@ import os
 import matplotlib.ticker
 import numpy as np
 import pandas as pd
-from PySide6.QtWidgets import QFileDialog
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QFileDialog, QListWidgetItem
 
 from physics.analytical_rcs import get_analytical_solution
 
@@ -74,7 +75,10 @@ class ComparisonManager:
                     'is_freq_sweep': is_freq_sweep,
                     'meta': meta,
                 })
-                self.w.comp_files_list.addItem(name)
+                item = QListWidgetItem(name)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked)
+                self.w.comp_files_list.addItem(item)
             except Exception as e:
                 self.w.log(f"Error loading {path}: {e}")
 
@@ -245,6 +249,15 @@ class ComparisonManager:
     def _use_db(self):
         return self.w.combo_rcs_unit.currentText() == "dBsm"
 
+    def _get_stats_threshold(self):
+        """返回统计阈值 (dBsm)，未启用时返回 None。"""
+        if not self.w.chk_stats_threshold.isChecked():
+            return None
+        try:
+            return float(self.w.stats_threshold_val.text())
+        except ValueError:
+            return None
+
     def _cbar_range(self, auto_vmin, auto_vmax):
         """返回 (vmin, vmax)：勾选手动时读取输入框，否则返回自动值。"""
         if not self.w.chk_cbar_manual.isChecked():
@@ -296,7 +309,10 @@ class ComparisonManager:
                 if res and show_total:
                     datasets.append((res[0], res[1], res[2], '-', None))
 
-        for item in self.w.comparison_data:
+        for idx, item in enumerate(self.w.comparison_data):
+            list_item = self.w.comp_files_list.item(idx)
+            if list_item and list_item.checkState() != Qt.Checked:
+                continue
             res = self._parse_csv_1d(self._apply_freq_filter(item))
             if not res:
                 continue
@@ -319,6 +335,26 @@ class ComparisonManager:
     # 1D line plot mode
     # ------------------------------------------------------------------
 
+    def _sim_vs_analytical_metrics(self, datasets):
+        """If both sim total and analytical exist in datasets, return metrics string."""
+        sim_rcs = anal_rcs = None
+        for angle_deg, rcs_db, name, ls, color in datasets:
+            if ls == '-' and color is None:
+                sim_rcs = rcs_db
+            if color == 'red':
+                anal_rcs = rcs_db
+        if sim_rcs is None or anal_rcs is None:
+            return ''
+        if len(sim_rcs) != len(anal_rcs):
+            return ''
+        rmse_lin, mean_diff_db = self._linear_metrics(
+            np.asarray(sim_rcs, dtype=float),
+            np.asarray(anal_rcs, dtype=float),
+            self._get_stats_threshold())
+        if np.isnan(rmse_lin):
+            return ''
+        return f'  |  Sim vs Analytical: RMSE={rmse_lin:.4e} m²  MeanDiff={mean_diff_db:+.2f} dB'
+
     def _draw_1d_lines(self):
         ax = self.w.comp_figure.add_subplot(111)
         colors = ['#007ACC', '#E06C00', '#009900', '#CC0000', '#8800CC', '#009999']
@@ -340,7 +376,8 @@ class ComparisonManager:
 
         ax.set_xlabel("Angle (deg)")
         ax.set_ylabel(f"RCS ({self._unit_label()})")
-        ax.set_title("RCS Comparison")
+        metrics = self._sim_vs_analytical_metrics(datasets)
+        ax.set_title(f"RCS Comparison{metrics}")
         ax.grid(True, linestyle='--', alpha=0.5)
         handles, labels = ax.get_legend_handles_labels()
         if handles:
@@ -383,7 +420,8 @@ class ComparisonManager:
             ax.set_yticklabels([f'{v + db_floor:.0f}' for v in yticks], fontsize=7)
         else:
             ax.set_yticklabels([f'{v:.2g}' for v in yticks], fontsize=7)
-        ax.set_title(f"Polar RCS Pattern ({self._unit_label()})", pad=15)
+        metrics = self._sim_vs_analytical_metrics(datasets)
+        ax.set_title(f"Polar RCS Pattern ({self._unit_label()}){metrics}", pad=15)
         handles, labels = ax.get_legend_handles_labels()
         if handles:
             ax.legend(loc='upper right', bbox_to_anchor=(1.35, 1.15), fontsize=8)
@@ -607,25 +645,31 @@ class ComparisonManager:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _linear_metrics(db_a, db_b):
-        """在线性域 (m²) 计算 RMSE 和 Mean Diff。
+    def _linear_metrics(db_a, db_b, threshold_db=None):
+        """计算 RMSE (线性域 m²) 和 Mean Diff (线性域均值转dB后相减)。
 
-        Returns (rmse_lin, mean_diff_lin)  单位 m²
+        Args:
+            threshold_db: 若非 None，任一数据集中该点 >= 阈值才纳入计算
+        Returns (rmse_lin, mean_diff_db)
         """
         mask = np.isfinite(db_a) & np.isfinite(db_b)
+        if threshold_db is not None:
+            mask &= (db_a >= threshold_db) | (db_b >= threshold_db)
         if not mask.any():
             return float('nan'), float('nan')
         a_lin = 10.0 ** (db_a[mask] / 10.0)
         b_lin = 10.0 ** (db_b[mask] / 10.0)
         diff_lin = a_lin - b_lin
         rmse_lin = float(np.sqrt(np.mean(diff_lin ** 2)))
-        mean_diff_lin = float(np.mean(diff_lin))
-        return rmse_lin, mean_diff_lin
+        mean_a_db = 10.0 * np.log10(max(np.mean(a_lin), 1e-30))
+        mean_b_db = 10.0 * np.log10(max(np.mean(b_lin), 1e-30))
+        mean_diff_db = float(mean_a_db - mean_b_db)
+        return rmse_lin, mean_diff_db
 
     def _draw_3panel_2d(self, data_a, name_a, data_b, name_b, theta, phi, freq_mhz):
         """Draw 3-panel 2D comparison: A | B | Diff(A−B) with linear-domain metrics."""
         diff = data_a - data_b
-        rmse_lin, mean_lin = self._linear_metrics(data_a, data_b)
+        rmse_lin, mean_diff_db = self._linear_metrics(data_a, data_b, self._get_stats_threshold())
 
         extent   = [phi.min(), phi.max(), theta.max(), theta.min()]
         vmin, vmax = self._cbar_range(
@@ -661,12 +705,12 @@ class ComparisonManager:
 
         im3 = ax3.imshow(diff, extent=extent, aspect=data_aspect, origin='upper',
                          cmap='seismic', vmin=-diff_abs, vmax=diff_abs)
-        ax3.set_title(f'Diff (A−B)\nRMSE={rmse_lin:.4e} m²  Mean={mean_lin:+.4e} m²', fontsize=9)
+        ax3.set_title(f'Diff (A−B)\nRMSE={rmse_lin:.4e} m²  MeanDiff={mean_diff_db:+.2f} dB', fontsize=9)
         ax3.set_xlabel('Phi (deg)')
         self.w.comp_figure.colorbar(im3, cax=cax2, label='Diff (dB)')
 
         title = f'2D RCS Comparison @ {freq_mhz:.1f} MHz — ' if freq_mhz else '2D RCS Comparison — '
-        self.w.comp_figure.suptitle(f'{title}RMSE={rmse_lin:.4e} m²  Mean={mean_lin:+.4e} m²', fontsize=11)
+        self.w.comp_figure.suptitle(f'{title}RMSE={rmse_lin:.4e} m²  MeanDiff={mean_diff_db:+.2f} dB', fontsize=11)
 
     def _draw_6panel_2d(self, rcs_a, name_a, rcs_b, name_b, rcs_ref, name_ref, theta, phi):
         """6-panel dual comparison: top row [A, B, Ref], bottom row [A−Ref, B−Ref, A−B]."""
@@ -674,9 +718,10 @@ class ComparisonManager:
         diff_b  = rcs_b - rcs_ref
         diff_ab = rcs_a - rcs_b
 
-        rmse_a,  mean_a  = self._linear_metrics(rcs_a, rcs_ref)
-        rmse_b,  mean_b  = self._linear_metrics(rcs_b, rcs_ref)
-        rmse_ab, mean_ab = self._linear_metrics(rcs_a, rcs_b)
+        thresh = self._get_stats_threshold()
+        rmse_a,  mean_a  = self._linear_metrics(rcs_a, rcs_ref, thresh)
+        rmse_b,  mean_b  = self._linear_metrics(rcs_b, rcs_ref, thresh)
+        rmse_ab, mean_ab = self._linear_metrics(rcs_a, rcs_b, thresh)
 
         extent   = [phi.min(), phi.max(), theta.max(), theta.min()]
         vmin, vmax = self._cbar_range(
@@ -707,9 +752,9 @@ class ComparisonManager:
 
         row1_axes = []
         diff_items = [
-            (diff_a,  f'A−Ref  RMSE={rmse_a:.2e}  Mean={mean_a:+.2e} m²'),
-            (diff_b,  f'B−Ref  RMSE={rmse_b:.2e}  Mean={mean_b:+.2e} m²'),
-            (diff_ab, f'A−B    RMSE={rmse_ab:.2e}  Mean={mean_ab:+.2e} m²'),
+            (diff_a,  f'A−Ref  RMSE={rmse_a:.2e} m²  MeanDiff={mean_a:+.1f} dB'),
+            (diff_b,  f'B−Ref  RMSE={rmse_b:.2e} m²  MeanDiff={mean_b:+.1f} dB'),
+            (diff_ab, f'A−B    RMSE={rmse_ab:.2e} m²  MeanDiff={mean_ab:+.1f} dB'),
         ]
         for col, (data, title) in enumerate(diff_items):
             ax = self.w.comp_figure.add_subplot(gs[1, col])

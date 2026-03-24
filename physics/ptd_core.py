@@ -1,13 +1,15 @@
 """
-PTD 边缘积分核心
+PTD 边缘积分核心（Ufimtsev EEW, Eq. 7.137）
 
 将边缘分段，每段：
   1. 提取楔形截面内的入射角 angle0 和观察角 angle
-  2. 调用 fun_fg 得到 Ufimtsev 修正系数 (f1, g1)
-  3. 按极化选取系数，乘以传播因子，累加到总贡献
+  2. 调用 FG_monostatic 得到 (F1_Vt, G1_Vt, G1_phi)
+  3. 计算 Keller 锥局部基向量 (β̂, α̂)，将全局极化向量投影得到 (cosχ, sinχ)
+  4. 按 D = F1_Vt·cos²χ + G1_phi·sin²χ + G1_Vt·sinχ·cosχ 加权组合
+  5. 乘以传播因子 (pre_factor = j·sinγ₀/k) 和相位，累加到总贡献
 """
 import numpy as np
-from .ptd_coefficients import fun_fg, FG_monostatic
+from .ptd_coefficients import FG_monostatic
 
 _SING_THRESH = 1e-3   # 奇点邻域阈值（弧度，约 0.057°）
 _SING_OFFSET = 3e-4   # 奇点两侧偏移量（弧度）
@@ -19,8 +21,8 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
 
     参数:
         edge:         PTDEdge 对象
-        wave:         IncidentWave 对象
-        polarization: 'VV'（Hard/TM，使用 g1）或 'HH'（Soft/TE，使用 f1）
+        wave:         IncidentWave 对象（需有 theta_hat, phi_hat 属性）
+        polarization: 'VV' 或 'HH'
     返回:
         complex: 该边缘对散射场积分 I 的贡献量
     """
@@ -30,6 +32,9 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
     k_vec = wave.k_vector   # k·k_dir
     k = wave.k
     s_dir = -k_dir          # 单站模式：散射方向 = 入射反向
+
+    # 全局极化向量
+    e_pol = wave.theta_hat if polarization == 'VV' else wave.phi_hat
 
     for seg in edge.segments:
         alfa = seg.alpha        # 楔形外角 α = n·π（每段独立）
@@ -44,48 +49,44 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
             # 入射方向近乎平行棱边，PTD 无贡献
             continue
 
-        # ── 2. 建立楔形截面局部坐标系 ──
-        # 基向量 e1：Face A 的外法向（n_lit），对应楔形坐标 φ = π/2
-        # 基向量 e2：沿 Face A 表面、从棱边向外（φ = 0 方向）
-        e1 = n_lit
-        e2_raw = np.cross(t, n_lit)
+        # ── 2. 建立楔形截面局部坐标系（⊥ t 平面内）──
+        # 曲面棱边上 n_lit 可能有沿 t 的分量，必须投影到截面平面
+        n_dot_t = np.dot(n_lit, t)
+        e1_raw = n_lit - n_dot_t * t
+        e1_len = np.linalg.norm(e1_raw)
+        if e1_len < 1e-10:
+            continue
+        e1 = e1_raw / e1_len
+
+        e2_raw = np.cross(t, e1)
         e2_len = np.linalg.norm(e2_raw)
         if e2_len < 1e-10:
             continue
         e2 = e2_raw / e2_len
 
-        # 消除 e2 符号歧义：e2 应沿 Face A 表面远离 Face B
-        # 正确的 e2 满足 dot(e2, n_b) ≤ 0（对 α ∈ (π, 2π) 恒成立）
+        # 消除 e2 符号歧义（e2 应指向 Face A 表面、远离 Face B）
         n_b = seg.normal_b if hasattr(seg, 'normal_b') else None
         if n_b is not None and np.dot(e2, n_b) > 0:
             e2 = -e2
 
-        # ── 3. 计算入射方向和散射方向在截面内的投影 ──
-        # 入射方向在截面平面（垂直于 t）的分量
+        # ── 3. 计算入射方向在截面内的投影 → angle0 ──
         k_perp = k_dir - k_dot_t * t
         k_perp_len = np.linalg.norm(k_perp)
         if k_perp_len < 1e-10:
             continue
         k_perp_unit = k_perp / k_perp_len
 
-        # angle0: 入射来源方向在截面内相对于 Face A 表面（e2 方向）的角度
-        # 使用来源方向 -k_dir（从目标指向源），使 φ=0 对应沿 Face A 掠射
-        inc_unit = -k_perp_unit            # 入射来源方向（从目标指向源）
-        i_e1 = np.dot(inc_unit, e1)        # n_lit 分量
-        i_e2 = np.dot(inc_unit, e2)        # Face A 切向分量
-        angle0_raw = np.arctan2(i_e1, i_e2)  # atan2 → [−π, π]
-        # atan2 对 α > π 的楔形，合法角 (π, α] 映射为负值，需展开到 [0, 2π)
+        inc_unit = -k_perp_unit
+        i_e1 = np.dot(inc_unit, e1)
+        i_e2 = np.dot(inc_unit, e2)
+        angle0_raw = np.arctan2(i_e1, i_e2)
         if angle0_raw < -1e-6:
             angle0_raw += 2.0 * np.pi
         if angle0_raw < -1e-6 or angle0_raw > alfa + 1e-6:
-            continue   # 入射方向来自楔形内部（材料侧），跳过该段
+            continue
         angle0 = np.clip(angle0_raw, 0.0, alfa)
 
-        # ── 3b. 散射方向投影到截面局部坐标，求观察角 angle_obs ──
-        # 散射方向 s_dir 先去除沿棱边的分量，得到截面内分量，
-        # 再投影到 (e2, e1) 坐标系，方式与 angle0 完全对称。
-        # 单站：s_dir = -k_dir，截面投影等同 inc_unit，angle_obs = angle0。
-        # 双站：s_dir 为独立的散射观察方向，需由调用方传入（当前未实现）。
+        # ── 3b. 散射方向投影 → angle_obs ──
         s_dot_t = np.dot(s_dir, t)
         s_perp = s_dir - s_dot_t * t
         s_perp_len = np.linalg.norm(s_perp)
@@ -96,76 +97,64 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
         s_e1 = np.dot(s_perp_unit, e1)
         s_e2 = np.dot(s_perp_unit, e2)
         angle_raw = np.arctan2(s_e1, s_e2)
-
-        # 双站观察角阴影处理（暂未使用，开发双站时参考）：
-        #
-        # angle_raw ∈ [0, α]：观察点在楔形亮区，当前 PTD fringe 公式适用。
-        #
-        # angle_raw 在 [0, α] 之外：观察点在某个面的几何阴影区（仍是自由空间）。
-        # 此时衍射场是"阴影形成波"，与入射场等幅反相，使总场连续过渡到零。
-        # PTD fringe 在阴影边界（angle_raw ≈ 0 或 ≈ α）处发散，需要 UTD Fresnel
-        # 过渡函数正则化；深阴影区（远离边界）fringe 贡献趋于零，主要由 PO=0
-        # 和完整衍射系数 D_total 提供场值。
-        # 因此双站实现必须升级为 UTD（含 Fresnel 函数），不能直接 skip。
-        #
-        # if angle_raw < -1e-6 or angle_raw > alfa + 1e-6:
-        #     # TODO: 双站阴影区处理（UTD Fresnel 过渡）
-        #     pass
-        # angle_obs = np.clip(angle_raw, 0.0, alfa)
-
-        # 与 angle0 同样的展开处理
         if angle_raw < -1e-6:
             angle_raw += 2.0 * np.pi
         angle_obs = np.clip(angle_raw, 0.0, alfa)
 
-        # ── 4. 计算衍射系数 D ──
+        # ── 4. Keller 锥局部基向量 ──
+        # β̂ = ϑ̂_local: t̂ 在垂直于观测方向 ŝ 的平面上的投影（归一化）
+        beta_raw = t - np.dot(t, s_dir) * s_dir
+        beta_len = np.linalg.norm(beta_raw)
+        if beta_len < 1e-10:
+            continue
+        beta_hat = beta_raw / beta_len
+        # α̂ = φ̂_local: ŝ × β̂
+        alpha_hat = np.cross(s_dir, beta_hat)
+
+        # 极化投影角 χ
+        cos_chi = np.dot(e_pol, beta_hat)
+        sin_chi = np.dot(e_pol, alpha_hat)
+
+        # ── 5. 计算 FG 衍射系数（含奇点处理）──
         gamma0 = np.arcsin(sin_gamma0)
-        D = _compute_D(angle_obs, angle0, gamma0, alfa, polarization)
 
-        # ── 5. 边缘段积分 ──
-        # sinc 项：考虑棱边延伸方向造成的干涉
+        psi1 = angle_obs - angle0
+        psi2 = angle_obs + angle0
+        near_sing = (abs(psi1 % (2 * np.pi) - np.pi) < _SING_THRESH or
+                     abs(psi2 % (2 * np.pi) - np.pi) < _SING_THRESH or
+                     abs(2 * alfa - psi2 - np.pi) < _SING_THRESH)
+
+        if near_sing:
+            F1a, G1Va, G1pa = FG_monostatic(
+                angle_obs - _SING_OFFSET, angle0, gamma0, alfa)
+            F1b, G1Vb, G1pb = FG_monostatic(
+                angle_obs + _SING_OFFSET, angle0, gamma0, alfa)
+            F1_Vt  = 0.5 * (F1a + F1b)
+            G1_Vt  = 0.5 * (G1Va + G1Vb)
+            G1_phi = 0.5 * (G1pa + G1pb)
+        else:
+            F1_Vt, G1_Vt, G1_phi = FG_monostatic(
+                angle_obs, angle0, gamma0, alfa)
+
+        # ── 6. 加权组合衍射系数 D ──
+        # Eq. 7.137: D = F1_Vt·cos²χ + G1_phi·sin²χ + G1_Vt·sinχ·cosχ
+        D = (F1_Vt * cos_chi**2
+             + G1_phi * sin_chi**2
+             + G1_Vt * sin_chi * cos_chi)
+
+        # ── 7. 边缘段积分 ──
         sinc_arg = k * seg.length * k_dot_t / np.pi
-        sinc_val = np.sinc(sinc_arg)   # numpy.sinc 已含 π 归一化
+        sinc_val = np.sinc(sinc_arg)
 
-        # 单站相位：exp(i·2k·r_mid)
+        # 单站相位
         phase_mid = 2.0 * np.dot(seg.midpoint, k_vec)
 
-        # 传播因子：含 1/sin(γ₀) 斜入射修正
-        # 2D→3D SPA 反演：A = D/(2π)
-        # 3D 微元场: dE_s/E_i = [D/(2π sinγ₀)] · (e^{-jkR}/R) · e^{-j·phase} · dζ
-        # 匹配代码约定 E_s/E_i = (jk/2πR)e^{-jkR}·I → dI = (-j/k sinγ₀)·D·e^{-j·phase}·dζ
-        # 代码 PO 用 e^{+j·phase} (共轭), PTD 取共轭对齐 → pre_factor = j/(k sinγ₀)
-        # 验证: σ = (k²/π)|pre·D·L|² = |D|²L²/(π sin²γ₀) (Keller GTD) ✓
-        pre_factor = 1j / (k * sin_gamma0)
+        # 传播因子：Ufimtsev EEW (Eq. 7.137)
+        # E^s = (jk/2πR)e^{jkR}·I → dI = sinγ₀/(jk)·D·dζ
+        # 1/(jk) = -j/k → pre_factor = -j·sinγ₀/k
+        pre_factor = -1j * sin_gamma0 / k
 
         seg_contrib = pre_factor * D * seg.length * sinc_val * np.exp(1j * phase_mid)
         total_contrib += seg_contrib
 
     return total_contrib
-
-
-def _compute_D(angle, angle0, gamma0, alfa, polarization):
-    """
-    用 FG_monostatic 计算衍射系数 D，含斜入射耦合项。
-
-    奇点处（ψ₁≈π 或 ψ₂≈π）用两侧偏移平均处理数值稳定性。
-    """
-    psi1 = angle - angle0
-    psi2 = angle + angle0
-    near_sing = (abs(psi1 % (2 * np.pi) - np.pi) < _SING_THRESH or
-                 abs(psi2 % (2 * np.pi) - np.pi) < _SING_THRESH or
-                 abs(2 * alfa - psi2 - np.pi) < _SING_THRESH)
-
-    if near_sing:
-        F1a, G1Va, G1pa = FG_monostatic(angle - _SING_OFFSET, angle0, gamma0, alfa)
-        F1b, G1Vb, G1pb = FG_monostatic(angle + _SING_OFFSET, angle0, gamma0, alfa)
-        F1_Vt  = 0.5 * (F1a + F1b)
-        G1_Vt  = 0.5 * (G1Va + G1Vb)
-        G1_phi = 0.5 * (G1pa + G1pb)
-    else:
-        F1_Vt, G1_Vt, G1_phi = FG_monostatic(angle, angle0, gamma0, alfa)
-
-    if polarization == 'HH':
-        return -F1_Vt           # = f1 (soft / TE)
-    else:
-        return -G1_phi + G1_Vt  # = g1 + 斜入射耦合项 (hard / TM, default 'VV')

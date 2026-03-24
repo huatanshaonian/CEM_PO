@@ -121,12 +121,28 @@ class PTDEdge:
                 na_len  = np.linalg.norm(na_mean)
                 na_seg  = na_mean / na_len if na_len > 1e-12 else self.n_lit
 
+                # 段切线（用于投影法向到截面平面 ⊥ t）
+                seg_vec = pts[i + 1] - pts[i]
+                seg_len = np.linalg.norm(seg_vec)
+                seg_t   = seg_vec / seg_len if seg_len > 1e-12 else np.array([0, 0, 0])
+
                 if point_normals_b is not None:
                     nb_mean = (point_normals_b[i] + point_normals_b[i + 1]) / 2.0
                     nb_len  = np.linalg.norm(nb_mean)
                     nb_seg  = nb_mean / nb_len if nb_len > 1e-12 else self.n_lit
-                    seg_alpha = np.pi + np.arccos(
-                        np.clip(np.dot(na_seg, nb_seg), -1.0, 1.0))
+
+                    # 曲面棱边：法向可能有沿 t 的分量，必须投影到 ⊥t 截面
+                    na_perp = na_seg - np.dot(na_seg, seg_t) * seg_t
+                    nb_perp = nb_seg - np.dot(nb_seg, seg_t) * seg_t
+                    na_plen = np.linalg.norm(na_perp)
+                    nb_plen = np.linalg.norm(nb_perp)
+                    if na_plen > 1e-12 and nb_plen > 1e-12:
+                        na_perp = na_perp / na_plen
+                        nb_perp = nb_perp / nb_plen
+                        seg_alpha = np.pi + np.arccos(
+                            np.clip(np.dot(na_perp, nb_perp), -1.0, 1.0))
+                    else:
+                        seg_alpha = self.alpha
                 else:
                     seg_alpha = self.alpha
 

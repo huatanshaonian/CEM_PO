@@ -137,6 +137,7 @@ def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use
     PTD 相位旋转法频率扫描（固定入射方向，扫频率）。
 
     衍射系数 D 完全频率无关，向量化处理所有频率。
+    使用 Ufimtsev EEW (Eq. 7.137) 的 Keller 锥极化投影。
 
     参数:
         ptd_edges:   list[PTDEdge]，已提取的边缘列表
@@ -148,7 +149,10 @@ def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use
     返回:
         I_ptd: ndarray complex128 (Nf,)（始终 CPU 数组）
     """
-    from physics.ptd_core import _compute_D
+    from physics.ptd_coefficients import FG_monostatic
+
+    _SING_THRESH = 1e-3
+    _SING_OFFSET = 3e-4
 
     xp = cp if (use_gpu and HAS_GPU) else np
     k_values_cpu = 2.0 * np.pi * np.asarray(frequencies) / C0  # (Nf,)
@@ -156,6 +160,20 @@ def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use
     I_ptd = np.zeros(Nf, dtype=np.complex128)
 
     k_arr_xp = xp.asarray(k_values_cpu)  # (Nf,)
+
+    # 从 k_dir 反推全局极化基向量 θ̂, φ̂
+    # k_dir 指向目标，径向 r̂ = -k_dir（从目标指向源）
+    r_hat = -k_dir
+    theta_inc = float(np.arccos(np.clip(r_hat[2], -1.0, 1.0)))
+    phi_inc = float(np.arctan2(r_hat[1], r_hat[0]))
+    sin_th = np.sin(theta_inc)
+    cos_th = np.cos(theta_inc)
+    sin_ph = np.sin(phi_inc)
+    cos_ph = np.cos(phi_inc)
+    theta_hat = np.array([cos_th * cos_ph, cos_th * sin_ph, -sin_th])
+    phi_hat   = np.array([-sin_ph, cos_ph, 0.0])
+    e_pol = theta_hat if polarization == 'VV' else phi_hat
+    s_dir = -k_dir
 
     for edge in ptd_edges:
         for seg in edge.segments:
@@ -169,15 +187,21 @@ def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use
             if sin_gamma0 < 1e-3:
                 continue
 
-            # ── 2. 局部坐标系 ──
-            e1 = n_lit
-            e2_raw = np.cross(t, n_lit)
+            # ── 2. 局部坐标系（⊥ t 截面平面内）──
+            # 曲面棱边上 n_lit 可能有沿 t 的分量，必须投影到截面平面
+            n_dot_t = float(np.dot(n_lit, t))
+            e1_raw = n_lit - n_dot_t * t
+            e1_len = float(np.linalg.norm(e1_raw))
+            if e1_len < 1e-10:
+                continue
+            e1 = e1_raw / e1_len
+
+            e2_raw = np.cross(t, e1)
             e2_len = float(np.linalg.norm(e2_raw))
             if e2_len < 1e-10:
                 continue
             e2 = e2_raw / e2_len
 
-            # 消除 e2 符号歧义：e2 应沿 Face A 表面远离 Face B
             n_b = seg.normal_b if hasattr(seg, 'normal_b') else None
             if n_b is not None and np.dot(e2, n_b) > 0:
                 e2 = -e2
@@ -198,8 +222,7 @@ def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use
                 continue
             angle0 = float(np.clip(angle0_raw, 0.0, alfa))
 
-            # ── 3b. 散射角 angle_obs（单站：= angle0）──
-            s_dir = -k_dir
+            # ── 3b. 散射角 angle_obs ──
             s_dot_t = float(np.dot(s_dir, t))
             s_perp = s_dir - s_dot_t * t
             s_perp_len = float(np.linalg.norm(s_perp))
@@ -213,24 +236,56 @@ def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use
                 angle_obs_raw += 2.0 * np.pi
             angle_obs = float(np.clip(angle_obs_raw, 0.0, alfa))
 
-            # ── 4. 衍射系数 D（频率无关）──
+            # ── 4. Keller 锥局部基向量 ──
+            beta_raw = t - np.dot(t, s_dir) * s_dir
+            beta_len = float(np.linalg.norm(beta_raw))
+            if beta_len < 1e-10:
+                continue
+            beta_hat = beta_raw / beta_len
+            alpha_hat = np.cross(s_dir, beta_hat)
+
+            # 极化投影角 χ
+            cos_chi = float(np.dot(e_pol, beta_hat))
+            sin_chi = float(np.dot(e_pol, alpha_hat))
+
+            # ── 5. 衍射系数（频率无关，含奇点处理）──
             gamma0 = float(np.arcsin(sin_gamma0))
-            D = _compute_D(angle_obs, angle0, gamma0, alfa, polarization)
 
-            # ── 5. 频率无关几何量 ──
+            psi1 = angle_obs - angle0
+            psi2 = angle_obs + angle0
+            near_sing = (abs(psi1 % (2 * np.pi) - np.pi) < _SING_THRESH or
+                         abs(psi2 % (2 * np.pi) - np.pi) < _SING_THRESH or
+                         abs(2 * alfa - psi2 - np.pi) < _SING_THRESH)
+
+            if near_sing:
+                F1a, G1Va, G1pa = FG_monostatic(
+                    angle_obs - _SING_OFFSET, angle0, gamma0, alfa)
+                F1b, G1Vb, G1pb = FG_monostatic(
+                    angle_obs + _SING_OFFSET, angle0, gamma0, alfa)
+                F1_Vt  = 0.5 * (F1a + F1b)
+                G1_Vt  = 0.5 * (G1Va + G1Vb)
+                G1_phi = 0.5 * (G1pa + G1pb)
+            else:
+                F1_Vt, G1_Vt, G1_phi = FG_monostatic(
+                    angle_obs, angle0, gamma0, alfa)
+
+            # 加权组合 D (Eq. 7.137)
+            D = (F1_Vt * cos_chi**2
+                 + G1_phi * sin_chi**2
+                 + G1_Vt * sin_chi * cos_chi)
+
+            # ── 6. 频率无关几何量 ──
             L      = float(seg.length)
-            r_proj = float(np.dot(seg.midpoint, k_dir))  # r_mid · k_dir
+            r_proj = float(np.dot(seg.midpoint, k_dir))
 
-            # ── 6. 向量化频率 ──
-            # pre_arr[i]   = j / (k[i] * sin_gamma0)
-            # sinc_arr[i]  = sinc(k[i] * L * k_dot_t / π)
-            # phase_arr[i] = exp(2j * k[i] * r_proj)
-            pre_arr   = 1j / (k_arr_xp * sin_gamma0)   # (Nf,)
-            sinc_arg  = k_arr_xp * L * k_dot_t / float(np.pi)          # (Nf,)
-            sinc_arr  = xp.sinc(sinc_arg)                                # (Nf,)
-            phase_arr = xp.exp(2j * k_arr_xp * r_proj)                  # (Nf,)
+            # ── 7. 向量化频率 ──
+            # pre_factor = -j·sinγ₀/k (Ufimtsev EEW: 1/(jk) = -j/k)
+            pre_arr   = -1j * sin_gamma0 / k_arr_xp             # (Nf,)
+            sinc_arg  = k_arr_xp * L * k_dot_t / float(np.pi)   # (Nf,)
+            sinc_arr  = xp.sinc(sinc_arg)                        # (Nf,)
+            phase_arr = xp.exp(2j * k_arr_xp * r_proj)           # (Nf,)
 
-            seg_contrib = pre_arr * complex(D) * L * sinc_arr * phase_arr   # (Nf,)
+            seg_contrib = pre_arr * complex(D) * L * sinc_arr * phase_arr  # (Nf,)
 
             if HAS_GPU and use_gpu and hasattr(seg_contrib, 'get'):
                 I_ptd += seg_contrib.get()

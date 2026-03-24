@@ -61,6 +61,14 @@ class IncidentWave:
         # 传播向量 k = k * k_dir
         self.k_vector = self.k * self.k_dir
 
+        # 极化基向量（远场球坐标系）
+        sin_th = np.sin(self.theta)
+        cos_th = np.cos(self.theta)
+        sin_ph = np.sin(self.phi)
+        cos_ph = np.cos(self.phi)
+        self.theta_hat = np.array([cos_th * cos_ph, cos_th * sin_ph, -sin_th])
+        self.phi_hat   = np.array([-sin_ph, cos_ph, 0.0])
+
     def __repr__(self):
         return (f"IncidentWave(f={self.frequency/1e9:.3f}GHz, "
                 f"θ={np.degrees(self.theta):.1f}°, "
