@@ -114,8 +114,10 @@ def build_sim_params(task_cfg, global_overrides):
         },
         'ptd': {
             'enabled': ptd_cfg.get('enabled', False),
-            'edges': ptd_cfg.get('edges', []),
-            'polarization': polarization # Sync with solver level
+            'edges': ptd_cfg.get('edges', ''),
+            'polarization': polarization, # Sync with solver level
+            'seg_angle_deg': ptd_cfg.get('seg_angle_deg', 2.0),
+            'use_parallel_ptd': ptd_cfg.get('use_parallel_ptd', False)
         },
         'compute': {
             'gpu': use_gpu,
@@ -294,7 +296,12 @@ def main():
                                                      f"Task {current_task_idx+1}/{total_tasks} - Progress: {sub_percent*100:.0f}% - {msg}", None, None)
                             handler.handle(record)
 
-            result = bridge.run_simulation(geo_obj, sim_params, progress_callback=progress)
+            freq_sweep_cfg = task.get('freq_sweep', {})
+            if freq_sweep_cfg.get('enabled', False):
+                logger.info(f"Task '{task_name}' is configured for Frequency Sweep.")
+                result = bridge.run_freq_sweep(geo_obj, sim_params, freq_sweep_cfg, progress_callback=progress)
+            else:
+                result = bridge.run_simulation(geo_obj, sim_params, progress_callback=progress)
             print("") # 每个任务结束后换行
             logger.info(f"Simulation completed in {result['elapsed_time']:.2f}s")
             

@@ -876,6 +876,8 @@ class CEMPoQtWindow(QMainWindow):
                     "ptd": {
                         "enabled": self.chk_ptd_enabled.isChecked(),
                         "edges": self._get_ptd_pairs_str(),
+                        "seg_angle_deg": float(self.ptd_seg_angle.text() or '2.0'),
+                        "use_parallel_ptd": self.ptd_parallel.isChecked() if hasattr(self, 'ptd_parallel') else False
                     }
                 },
                 "scan": {
@@ -883,6 +885,20 @@ class CEMPoQtWindow(QMainWindow):
                     "phi": [float(self.phi_start.text()), float(self.phi_end.text()), int(self.phi_n.text())]
                 }
             }
+
+            if self.chk_freq_sweep_enabled.isChecked():
+                task["freq_sweep"] = {
+                    "enabled": True,
+                    "f_start": float(self.fsweep_start.text()),
+                    "f_end": float(self.fsweep_end.text()),
+                    "f_step": float(self.fsweep_step.text()),
+                    "window": self.img_window.currentText(),
+                    "zero_pad": int(self.img_zeropad.text() or "4"),
+                    "cheby_at": float(self.img_cheby_at.text() or "40.0"),
+                    "taylor_nbar": int(self.img_taylor_nbar.text() or "4"),
+                    "taylor_sll": float(self.img_taylor_sll.text() or "30.0") if hasattr(self, 'img_taylor_sll') else 30.0,
+                    "polarization": self.ptd_pol.currentText()
+                }
 
             # Wrap in a full batch config
             config = {
