@@ -90,41 +90,41 @@ def find_shared_edge(face_a, face_b, max_angle_deg=2.0, n_initial=100,
     normals_a = _eval_boundary_normals_at_t(edge_face,  edge_idx,      t_vals)
     normals_b = _eval_boundary_normals_at_t(other_face, other_best_idx, t_vals)
 
-    # ── Step 4: 合并 + 最多 3 轮插入 ──
+    # ── Step 4: 合并 + 按需插入 ──
+    # _adaptive_breakpoints 保证每段内部累积转角 ≤ 阈值。
+    # 插入仅针对"单区间段"：合并后某段只跨 1 个初始采样区间（bp[k+1]-bp[k]==1），
+    # 说明该处初始 100 点不够密。在这些段中点插入新采样点后重新合并，最多 3 轮。
     warning_msg = None
-    for round_idx in range(4):   # round 0 = 纯合并；round 1-3 = 插入后再合并
-        # 用 _adaptive_breakpoints 合并
+    for round_idx in range(4):  # round 0 = 纯合并；round 1-3 = 插入后再合并
         bp = _adaptive_breakpoints(edge_pts, max_angle_rad)
-        t_sel   = t_vals[bp]
-        pts_sel = edge_pts[bp]
-        na_sel  = normals_a[bp]
-        nb_sel  = normals_b[bp]
+        bp_arr = np.array(bp)
 
-        # 检查合并后各段是否仍超标（仅当 bp 相邻点间距 > 1 个初始段时才可能）
-        bad_segs = _find_bad_segments(pts_sel, max_angle_rad)
+        # 找单区间段：bp[k+1] - bp[k] == 1 意味着初始采样不够密
+        spans = bp_arr[1:] - bp_arr[:-1]
+        single_span_mask = spans == 1
+        n_single = int(np.sum(single_span_mask))
 
-        if len(bad_segs) == 0:
-            break  # 全部合格
+        if n_single == 0:
+            break  # 所有段都跨多个初始区间，合并充分
 
         if round_idx == 3:
-            # 3 轮插入后仍超标
             warning_msg = (
-                f"3 轮细化后仍有 {len(bad_segs)} 段切线转角超过 {max_angle_deg:.1f}°，"
+                f"3 轮细化后仍有 {n_single} 段仅跨单区间（初始采样不足），"
                 f"请增大 PTD Seg. Angle 或检查边缘几何"
             )
             break
 
-        # 在超标段中点处插入新 t 值（在原始密集 t_vals 中插值）
+        # 对每个单区间段插入中点
         new_t_set = set(t_vals.tolist())
-        for seg_i in bad_segs:
-            t_mid = (t_sel[seg_i] + t_sel[seg_i + 1]) / 2.0
+        for k in np.where(single_span_mask)[0]:
+            i0, i1 = bp[k], bp[k + 1]
+            t_mid = (t_vals[i0] + t_vals[i1]) / 2.0
             new_t_set.add(float(t_mid))
 
         new_t = np.array(sorted(new_t_set))
         if len(new_t) >= max_pts:
             warning_msg = (
-                f"达到最大采样点数 {max_pts}，仍有 {len(bad_segs)} 段切线转角超过 "
-                f"{max_angle_deg:.1f}°"
+                f"达到最大采样点数 {max_pts}，仍有 {n_single} 段初始采样不足"
             )
             break
 
@@ -132,13 +132,13 @@ def find_shared_edge(face_a, face_b, max_angle_deg=2.0, n_initial=100,
         edge_pts  = _eval_boundary_edge_at_t(edge_face,  edge_idx,      t_vals)
         normals_a = _eval_boundary_normals_at_t(edge_face,  edge_idx,      t_vals)
         normals_b = _eval_boundary_normals_at_t(other_face, other_best_idx, t_vals)
-    else:
-        # for 循环正常结束（不应发生，因为 round 0 就会 break 或在内部 break）
-        bp = _adaptive_breakpoints(edge_pts, max_angle_rad)
-        t_sel   = t_vals[bp]
-        pts_sel = edge_pts[bp]
-        na_sel  = normals_a[bp]
-        nb_sel  = normals_b[bp]
+
+    # 最终合并结果
+    bp = _adaptive_breakpoints(edge_pts, max_angle_rad)
+    t_sel   = t_vals[bp]
+    pts_sel = edge_pts[bp]
+    na_sel  = normals_a[bp]
+    nb_sel  = normals_b[bp]
 
     # ── Step 5: 外部二面角 ──
     cos_vals = np.einsum('ij,ij->i', na_sel, nb_sel)
@@ -203,30 +203,6 @@ def _adaptive_breakpoints(pts, max_angle_rad):
         breakpoints.append(N - 1)
 
     return breakpoints
-
-
-def _find_bad_segments(pts, max_angle_rad):
-    """
-    检查点集 pts 中哪些段（相邻两节点间）的切线转角（在中间节点处）超过阈值。
-    返回超标的段索引列表（段 i = pts[i]→pts[i+1]，在节点 i+1 处检查）。
-    """
-    if len(pts) < 3:
-        return []
-
-    tangents = pts[1:] - pts[:-1]
-    lengths  = np.linalg.norm(tangents, axis=1, keepdims=True)
-    lengths  = np.where(lengths < 1e-12, 1.0, lengths)
-    tangents = tangents / lengths
-
-    cos_a  = np.clip(np.einsum('ij,ij->i', tangents[:-1], tangents[1:]), -1.0, 1.0)
-    angles = np.arccos(cos_a)   # (N-2,)：节点 1..N-2 处的转角
-
-    # 节点 k+1 超标 → 段 k 和段 k+1 需要细分（返回较小的段索引）
-    bad = set()
-    for k in np.where(angles > max_angle_rad)[0]:
-        bad.add(int(k))
-        bad.add(int(k + 1))
-    return sorted(bad)
 
 
 # ──────────────────────── 参数域评估辅助函数 ────────────────────────
