@@ -6,13 +6,13 @@ PTD 边缘积分核心（Ufimtsev EEW, Eq. 7.137）
   2. 调用 FG_monostatic 得到 (F1_Vt, G1_Vt, G1_phi)
   3. 计算 Keller 锥局部基向量 (β̂, α̂)，将全局极化向量投影得到 (cosχ, sinχ)
   4. 按 D = F1_Vt·cos²χ + G1_phi·sin²χ + G1_Vt·sinχ·cosχ 加权组合
-  5. 乘以传播因子 (pre_factor = j·sinγ₀/k) 和相位，累加到总贡献
+  5. 乘以传播因子 (pre_factor = -j·sinγ₀/k) 和相位，累加到总贡献
 """
 import numpy as np
 from .ptd_coefficients import FG_monostatic
 
-_SING_THRESH = 1e-3   # 奇点邻域阈值（弧度，约 0.057°）
-_SING_OFFSET = 3e-4   # 奇点两侧偏移量（弧度）
+_SING_THRESH = 1e-4   # 奇点邻域阈值（弧度），与 fun_fg 内部 eps=1e-5 量级匹配
+_SING_OFFSET = 3e-5   # 奇点两侧偏移量（弧度）
 
 
 def compute_ptd_contribution(edge, wave, polarization='VV'):
@@ -150,8 +150,9 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
         phase_mid = 2.0 * np.dot(seg.midpoint, k_vec)
 
         # 传播因子：Ufimtsev EEW (Eq. 7.137)
-        # E^s = (jk/2πR)e^{jkR}·I → dI = sinγ₀/(jk)·D·dζ
-        # 1/(jk) = -j/k → pre_factor = -j·sinγ₀/k
+        # σ = (k²/π)|I_PO + I_edge|²
+        # J_PO=2n̂×H 的因子2 已吸收进 k²/π 系数，
+        # EEW 边缘积分与 PO 共享相同归一化，无需额外 /2
         pre_factor = -1j * sin_gamma0 / k
 
         seg_contrib = pre_factor * D * seg.length * sinc_val * np.exp(1j * phase_mid)
