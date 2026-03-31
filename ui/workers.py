@@ -15,11 +15,12 @@ class CalculationWorker(QThread):
     result_signal = Signal(dict)
     error_signal = Signal(str)
 
-    def __init__(self, bridge, geo, params):
+    def __init__(self, bridge, geo, params, prev_result=None):
         super().__init__()
         self.bridge = bridge
         self.geo = geo
         self.params = params
+        self.prev_result = prev_result
         self._abort_event = threading.Event()
 
     def request_stop(self):
@@ -37,7 +38,8 @@ class CalculationWorker(QThread):
             result = self.bridge.run_simulation(
                 self.geo, self.params,
                 progress_callback=callback,
-                abort_event=self._abort_event
+                abort_event=self._abort_event,
+                prev_result=self.prev_result
             )
             self.result_signal.emit(result)
         except SimulationAborted:

@@ -17,7 +17,8 @@ class SolverBridge:
         self.cached_mesh_data = None
         self.cached_mesh_params = {}
 
-    def run_simulation(self, geo, params, progress_callback=None, abort_event=None):
+    def run_simulation(self, geo, params, progress_callback=None, abort_event=None,
+                       prev_result=None):
         """
         运行仿真计算 (同步阻塞调用，建议在独立线程中运行)
 
@@ -26,6 +27,7 @@ class SolverBridge:
             params: 参数字典，包含所有计算配置
             progress_callback: 接受 (current, total, message) 的回调函数
             abort_event: threading.Event，设置后终止计算
+            prev_result: 上次计算结果，用于 ptd_only 模式叠加已有 PO
 
         Returns:
             dict: 包含计算结果和元数据的字典
@@ -50,6 +52,7 @@ class SolverBridge:
             n_workers = compute_params.get('workers', 4)
             
             enable_ptd = ptd_params.get('enabled', False)
+            ptd_only = ptd_params.get('ptd_only', False) and enable_ptd
             ptd_edges = ptd_params.get('edges', '')
             ptd_pol = ptd_params.get('polarization', 'VV')
             ptd_seg_angle = ptd_params.get('seg_angle_deg', 2.0)
@@ -70,8 +73,10 @@ class SolverBridge:
             is_2d = n_phi > 1 and n_theta > 1
             is_phi_scan = n_phi > 1 and n_theta == 1  # 仅 phi 变化的 1D 扫描
 
-            # --- 3. 网格缓存处理 ---
-            cached_mesh = self._resolve_mesh_cache(geo, freq, samples, use_degen, algo_id, use_gpu, progress_callback)
+            # --- 3. 网格缓存处理（ptd_only 时跳过，不需要 PO 网格） ---
+            cached_mesh = None
+            if not ptd_only:
+                cached_mesh = self._resolve_mesh_cache(geo, freq, samples, use_degen, algo_id, use_gpu, progress_callback)
 
             # --- 4. 初始化求解器 ---
             # Only pass min_points to discrete_po algorithms
@@ -98,7 +103,7 @@ class SolverBridge:
                     cached_mesh_data=cached_mesh, polarization=ptd_pol,
                     gpu=use_gpu, use_degenerate_mesh=use_degen,
                     ptd_seg_angle_deg=ptd_seg_angle,
-                    abort_event=abort_event
+                    abort_event=abort_event, ptd_only=ptd_only
                 )
 
                 # 结果标准化
@@ -134,7 +139,7 @@ class SolverBridge:
                     cached_mesh_data=cached_mesh, polarization=ptd_pol,
                     gpu=use_gpu, use_degenerate_mesh=use_degen,
                     ptd_seg_angle_deg=ptd_seg_angle,
-                    abort_event=abort_event
+                    abort_event=abort_event, ptd_only=ptd_only
                 )
 
                 if isinstance(rcs_result_raw, dict):
@@ -170,7 +175,7 @@ class SolverBridge:
                     cached_mesh_data=cached_mesh, polarization=ptd_pol,
                     gpu=use_gpu, use_degenerate_mesh=use_degen,
                     ptd_seg_angle_deg=ptd_seg_angle,
-                    abort_event=abort_event
+                    abort_event=abort_event, ptd_only=ptd_only
                 )
 
                 if isinstance(rcs_result_raw, dict):
@@ -192,14 +197,32 @@ class SolverBridge:
                     'I_total': I_total, 'I_po': I_po, 'I_ptd': I_ptd,
                 }
 
-            # --- 6. 结果打包 ---
+            # --- 6. PTD Only 模式：叠加已有 PO 结果 ---
+            if ptd_only and prev_result is not None:
+                prev_I_po = prev_result.get('I_po')
+                if prev_I_po is not None:
+                    k_mag = 2 * np.pi * freq / C0
+                    result_data['rcs_po'] = prev_result.get('rcs_po')
+                    result_data['I_po'] = prev_I_po
+                    I_ptd = result_data.get('I_ptd')
+                    if I_ptd is not None:
+                        I_combined = np.asarray(prev_I_po) + np.asarray(I_ptd)
+                        result_data['I_total'] = I_combined
+                        sigma = (k_mag**2 / np.pi) * np.abs(I_combined)**2
+                        result_data['rcs_total'] = 10.0 * np.log10(
+                            np.maximum(sigma, 1e-20))
+                    if progress_callback:
+                        progress_callback(100, 100, "PTD Only: 已与上次 PO 结果叠加")
+
+            # --- 7. 结果打包 ---
             elapsed_time = time.time() - start_time
             result_data.update({
                 'freq': freq,
                 'elapsed_time': elapsed_time,
-                'params': params, # 回传输入参数以便记录
+                'params': params,
                 'timestamp': time.time(),
                 'ptd_enabled': enable_ptd,
+                'ptd_only': ptd_only,
             })
             
             return result_data
@@ -381,7 +404,7 @@ class SolverBridge:
                 I_po_matrix[i] = I_po
 
                 if enable_ptd and ptd_edges:
-                    I_ptd = compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization, use_gpu)
+                    I_ptd = compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization, use_gpu, abort_event=abort_event)
                     I_ptd_matrix[i] = I_ptd
                     I_total = I_po + I_ptd
                 else:

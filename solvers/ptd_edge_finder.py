@@ -9,17 +9,60 @@ import numpy as np
 _NORMAL_OFFSET = 1e-5  # 法向量采样的参数域内偏量
 
 
+def _num_edges(face):
+    """获取面的边数。OCC 面用 n_edges 属性，其余默认 4（参数域边界）。"""
+    return getattr(face, 'n_edges', 4)
+
+
+def _arc_length(pts):
+    """采样点折线的总弧长。退化边弧长趋近 0。"""
+    return float(np.sum(np.linalg.norm(pts[1:] - pts[:-1], axis=1)))
+
+
+def _find_shared_edge_pair(face_a, face_b, n_samples=20, tol=1e-3,
+                           min_edge_len=1e-6):
+    """
+    在 face_a 和 face_b 的边界边中找到共享边对。
+
+    判定条件（全部满足才算共享边）：
+    - 边弧长 >= min_edge_len（排除退化边）
+    - ea 的两端点和中点到 eb 的最近距离都 <= tol（排除仅共顶点）
+
+    返回:
+        (idx_a, idx_b):  共享边在各自面上的索引
+        None:            找不到共享边
+    """
+    edges_a = [_get_boundary_edge(face_a, idx, n_samples)
+               for idx in range(_num_edges(face_a))]
+    edges_b = [_get_boundary_edge(face_b, idx, n_samples)
+               for idx in range(_num_edges(face_b))]
+
+    best_dist = np.inf
+    best_pair = None
+    for ia, ea in enumerate(edges_a):
+        if _arc_length(ea) < min_edge_len:
+            continue
+        for ib, eb in enumerate(edges_b):
+            if _arc_length(eb) < min_edge_len:
+                continue
+            # 两端点 + 中点都要匹配
+            d0 = np.min(np.linalg.norm(eb - ea[0], axis=1))
+            d1 = np.min(np.linalg.norm(eb - ea[-1], axis=1))
+            dm = np.min(np.linalg.norm(eb - ea[len(ea) // 2], axis=1))
+            if d0 > tol or d1 > tol or dm > tol:
+                continue
+            d = _avg_min_dist(ea, eb)
+            if d < best_dist:
+                best_dist = d
+                best_pair = (ia, ib)
+
+    return best_pair
+
+
 def find_shared_edge(face_a, face_b, max_angle_deg=2.0, n_initial=100,
-                     n_search=15, max_pts=500):
+                     max_pts=500):
     """
     自动寻找 face_a 与 face_b 的共享边，返回自适应采样的边缘点及法向量。
-
-    采样策略：
-    1. 粗搜索（n_search 点）找哪条边界最近
-    2. 均匀采 n_initial 点
-    3. _adaptive_breakpoints 合并：删去冗余点，使每段累积切线转角 ≤ max_angle_deg
-    4. 检查：若仍有段超标（n_initial 不够密时），插入中点并重新合并，最多 3 轮
-    5. 3 轮后仍超标则返回警告字符串（由调用方打印到 log）
 
     返回:
         edge_points (N,3):     共享边采样点
@@ -31,81 +74,28 @@ def find_shared_edge(face_a, face_b, max_angle_deg=2.0, n_initial=100,
     异常:
         ValueError: 两面没有共享边
     """
+    pair = _find_shared_edge_pair(face_a, face_b)
+    if pair is None:
+        raise ValueError("找不到共享边")
+    best_idx_a, best_idx_b = pair
+
     max_angle_rad = np.deg2rad(max_angle_deg)
-    scale = _estimate_face_scale(face_a)
-    tol = 0.05 * scale
-
-    # ── Step 1: 粗搜索找最近边 ──
-    ref_b = _sample_surface_grid(face_b, n_search)
-    best_dist = np.inf
-    best_edge_idx = None
-    best_from_a = True
-
-    for idx in range(4):
-        pts = _get_boundary_edge(face_a, idx, n_search)
-        d = _avg_min_dist(pts, ref_b)
-        if d < best_dist:
-            best_dist = d
-            best_edge_idx = idx
-
-    if best_dist > tol:
-        ref_a = _sample_surface_grid(face_a, n_search)
-        for idx in range(4):
-            pts = _get_boundary_edge(face_b, idx, n_search)
-            d = _avg_min_dist(pts, ref_a)
-            if d < best_dist:
-                best_dist = d
-                best_edge_idx = idx
-                best_from_a = False
-
-    if best_dist > tol:
-        raise ValueError(
-            f"找不到共享边（最小平均距离 {best_dist:.4f} > 容差 {tol:.4f}）"
-        )
-
-    # ── Step 2: 确定所在面和边界索引 ──
-    if best_from_a:
-        edge_face   = face_a
-        edge_idx    = best_edge_idx
-        other_face  = face_b
-    else:
-        edge_face   = face_b
-        edge_idx    = best_edge_idx
-        other_face  = face_a
-
-    # 找 other_face 最近边界（粗搜索阶段，t 均匀）
-    coarse_pts = _get_boundary_edge(edge_face, edge_idx, n_search)
-    other_best_dist = np.inf
-    other_best_idx  = 0
-    for idx in range(4):
-        bnd = _get_boundary_edge(other_face, idx, n_search)
-        d = _avg_min_dist(coarse_pts, bnd)
-        if d < other_best_dist:
-            other_best_dist = d
-            other_best_idx  = idx
-
-    # ── Step 3: 均匀采 n_initial 点 ──
-    t_vals = np.linspace(0.0, 1.0, n_initial)
-    edge_pts  = _eval_boundary_edge_at_t(edge_face,  edge_idx,      t_vals)
-    normals_a = _eval_boundary_normals_at_t(edge_face,  edge_idx,      t_vals)
-    normals_b = _eval_boundary_normals_at_t(other_face, other_best_idx, t_vals)
-
-    # ── Step 4: 合并 + 按需插入 ──
-    # _adaptive_breakpoints 保证每段内部累积转角 ≤ 阈值。
-    # 插入仅针对"单区间段"：合并后某段只跨 1 个初始采样区间（bp[k+1]-bp[k]==1），
-    # 说明该处初始 100 点不够密。在这些段中点插入新采样点后重新合并，最多 3 轮。
+    n_pts = n_initial
     warning_msg = None
-    for round_idx in range(4):  # round 0 = 纯合并；round 1-3 = 插入后再合并
+
+    for round_idx in range(4):
+        edge_pts, normals_a = _get_edge_points_and_normals(
+            face_a, best_idx_a, n_pts)
+        _, normals_b = _get_edge_points_and_normals(
+            face_b, best_idx_b, n_pts)
+
         bp = _adaptive_breakpoints(edge_pts, max_angle_rad)
         bp_arr = np.array(bp)
-
-        # 找单区间段：bp[k+1] - bp[k] == 1 意味着初始采样不够密
         spans = bp_arr[1:] - bp_arr[:-1]
-        single_span_mask = spans == 1
-        n_single = int(np.sum(single_span_mask))
+        n_single = int(np.sum(spans == 1))
 
         if n_single == 0:
-            break  # 所有段都跨多个初始区间，合并充分
+            break
 
         if round_idx == 3:
             warning_msg = (
@@ -114,62 +104,24 @@ def find_shared_edge(face_a, face_b, max_angle_deg=2.0, n_initial=100,
             )
             break
 
-        # 对每个单区间段插入中点
-        new_t_set = set(t_vals.tolist())
-        for k in np.where(single_span_mask)[0]:
-            i0, i1 = bp[k], bp[k + 1]
-            t_mid = (t_vals[i0] + t_vals[i1]) / 2.0
-            new_t_set.add(float(t_mid))
-
-        new_t = np.array(sorted(new_t_set))
-        if len(new_t) >= max_pts:
+        n_pts = min(n_pts * 2, max_pts)
+        if n_pts >= max_pts:
             warning_msg = (
                 f"达到最大采样点数 {max_pts}，仍有 {n_single} 段初始采样不足"
             )
             break
 
-        t_vals    = new_t
-        edge_pts  = _eval_boundary_edge_at_t(edge_face,  edge_idx,      t_vals)
-        normals_a = _eval_boundary_normals_at_t(edge_face,  edge_idx,      t_vals)
-        normals_b = _eval_boundary_normals_at_t(other_face, other_best_idx, t_vals)
-
-    # 最终合并结果
     bp = _adaptive_breakpoints(edge_pts, max_angle_rad)
-    t_sel   = t_vals[bp]
     pts_sel = edge_pts[bp]
     na_sel  = normals_a[bp]
     nb_sel  = normals_b[bp]
 
-    # ── Step 5: 外部二面角 ──
     cos_vals = np.einsum('ij,ij->i', na_sel, nb_sel)
     cos_mean = float(np.clip(np.mean(cos_vals), -1.0, 1.0))
     exterior_angle = np.pi + np.arccos(cos_mean)
 
     return pts_sel, na_sel, nb_sel, exterior_angle, warning_msg
 
-
-def faces_share_edge(face_a, face_b, n_samples=15, n_grid=15):
-    """
-    快速判断两个面是否共享边（不计算法向量，仅做距离检查）。
-    用于 GUI 添加 PTD 面对前的预过滤。
-    """
-    scale = _estimate_face_scale(face_a)
-    tol = 0.05 * scale
-
-    ref_b = _sample_surface_grid(face_b, n_grid)
-    best_dist = min(
-        _avg_min_dist(_get_boundary_edge(face_a, idx, n_samples), ref_b)
-        for idx in range(4)
-    )
-    if best_dist <= tol:
-        return True
-
-    ref_a = _sample_surface_grid(face_a, n_grid)
-    best_dist = min(
-        _avg_min_dist(_get_boundary_edge(face_b, idx, n_samples), ref_a)
-        for idx in range(4)
-    )
-    return best_dist <= tol
 
 
 # ──────────────────────── 自适应合并 ────────────────────────
@@ -246,24 +198,35 @@ def _eval_boundary_normals_at_t(face, idx, t_vals):
     return normals / norms
 
 
-# ──────────────────────── 粗搜索辅助函数 ────────────────────────
+# ──────────────────────── 统一采样函数 ────────────────────────
 
 def _get_boundary_edge(face, idx, n_samples):
-    """获取 face 的第 idx 条边界边均匀采样点（用于粗搜索）。"""
+    """获取 face 的第 idx 条边界边均匀采样点。"""
     if hasattr(face, 'get_edge_by_index'):
         return face.get_edge_by_index(idx, n_samples=n_samples)
     t = np.linspace(0.0, 1.0, n_samples)
     return _eval_boundary_edge_at_t(face, idx, t)
 
 
-def _sample_surface_grid(face, n_grid):
-    """在面上均匀采样 n_grid×n_grid 点，返回 (n_grid²,3)。仅用于寻边距离比较。"""
-    u0, u1 = face.u_domain
-    v0, v1 = face.v_domain
-    u = np.linspace(u0, u1, n_grid)
-    v = np.linspace(v0, v1, n_grid)
-    ug, vg = np.meshgrid(u, v)
-    return face.evaluate(ug, vg).reshape(-1, 3)
+def _get_edge_points_and_normals(face, idx, n_samples):
+    """
+    获取 face 第 idx 条边的采样点和法向量，统一走 get_edge_by_index 路径。
+    返回 (points (N,3), normals (N,3))。
+    """
+    if hasattr(face, 'get_edge_by_index_with_normals'):
+        return face.get_edge_by_index_with_normals(idx, n_samples=n_samples)
+
+    if hasattr(face, 'get_edge_by_index'):
+        pts = face.get_edge_by_index(idx, n_samples=n_samples)
+        normals = _eval_boundary_normals_at_t(face, idx,
+                                              np.linspace(0.0, 1.0, n_samples))
+        return pts, normals
+
+    t = np.linspace(0.0, 1.0, n_samples)
+    pts = _eval_boundary_edge_at_t(face, idx, t)
+    normals = _eval_boundary_normals_at_t(face, idx, t)
+    return pts, normals
+
 
 
 def _avg_min_dist(query, ref):
@@ -273,13 +236,3 @@ def _avg_min_dist(query, ref):
     return float(np.mean(np.min(dists, axis=1)))
 
 
-def _estimate_face_scale(face):
-    """估算面的特征尺寸（四角连线对角线长度的均值）。"""
-    u0, u1 = face.u_domain
-    v0, v1 = face.v_domain
-    corners = [face.evaluate(u0, v0), face.evaluate(u0, v1),
-               face.evaluate(u1, v0), face.evaluate(u1, v1)]
-    corners = [c.flatten() for c in corners]
-    d1 = np.linalg.norm(corners[3] - corners[0])
-    d2 = np.linalg.norm(corners[2] - corners[1])
-    return max((d1 + d2) / 2.0, 1e-6)

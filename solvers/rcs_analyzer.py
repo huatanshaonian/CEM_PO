@@ -39,7 +39,7 @@ class RCSAnalyzer:
                           enable_ptd, ptd_edge_identifiers,
                           cached_mesh_data, gpu, use_degenerate_mesh,
                           show_progress, progress_callback, total_points,
-                          ptd_seg_angle_deg=2.0):
+                          ptd_seg_angle_deg=2.0, ptd_only=False):
         """共同前置逻辑：GPU检查、曲面归一化、PTD提取、网格预计算、GPU迁移。
 
         Returns (geometry_data, is_cached, ptd_edges, k_mag, gpu)
@@ -63,6 +63,11 @@ class RCSAnalyzer:
                 print(f"  [PTD] 边缘提取失败: {e}")
 
         k_mag = 2 * np.pi * frequency / C0
+
+        # ptd_only 模式：跳过网格预计算和 GPU 迁移，只需要 PTD 边和 k_mag
+        if ptd_only:
+            return surfaces, False, ptd_edges, k_mag, False
+
         can_cache = hasattr(self.solver, 'precompute_mesh') and hasattr(self.solver, 'integrate_cached')
         geometry_data = surfaces
         is_cached = False
@@ -101,25 +106,29 @@ class RCSAnalyzer:
     def _compute_single_angle_cached(self, args):
         """
         并行计算任务函数 (使用 CachedMeshData)
+        args: (theta, cached_surfaces, wave_params, k_mag[, ptd_edges[, polarization[, ptd_only]]])
         """
-        # 兼容性处理：支持 4, 5, 6 参数
         ptd_edges = None
         polarization = 'VV'
+        ptd_only = False
 
-        if len(args) == 6:
+        if len(args) == 7:
+            theta, cached_surfaces, wave_params, k_mag, ptd_edges, polarization, ptd_only = args
+        elif len(args) == 6:
             theta, cached_surfaces, wave_params, k_mag, ptd_edges, polarization = args
         elif len(args) == 5:
             theta, cached_surfaces, wave_params, k_mag, ptd_edges = args
         elif len(args) == 4:
             theta, cached_surfaces, wave_params, k_mag = args
         else:
-            raise ValueError(f"Invalid args length: {len(args)}, expected 4, 5 or 6")
+            raise ValueError(f"Invalid args length: {len(args)}, expected 4-7")
 
         wave = IncidentWave(wave_params['frequency'], theta, wave_params['phi'])
 
         total_I_po = 0j
-        for mesh_data in cached_surfaces:
-            total_I_po += self.solver.integrate_cached(mesh_data, wave)
+        if not ptd_only:
+            for mesh_data in cached_surfaces:
+                total_I_po += self.solver.integrate_cached(mesh_data, wave)
 
         total_I_ptd = 0j
         if ptd_edges:
@@ -146,7 +155,7 @@ class RCSAnalyzer:
                                cached_mesh_data=None, polarization='VV',
                                gpu=False, use_degenerate_mesh=False,
                                ptd_seg_angle_deg=2.0,
-                               abort_event=None):
+                               abort_event=None, ptd_only=False):
 
         frequency = wave_params['frequency']
         n_angles = len(angles)
@@ -156,7 +165,7 @@ class RCSAnalyzer:
             enable_ptd, ptd_edge_identifiers,
             cached_mesh_data, gpu, use_degenerate_mesh,
             show_progress, progress_callback, n_angles,
-            ptd_seg_angle_deg=ptd_seg_angle_deg
+            ptd_seg_angle_deg=ptd_seg_angle_deg, ptd_only=ptd_only
         )
 
         info_msg = (f"计算参数: {len(geometry_data) if isinstance(geometry_data, list) else 1} 个曲面, "
@@ -170,31 +179,32 @@ class RCSAnalyzer:
         if progress_callback: progress_callback(0, n_angles, info_msg)
 
         if parallel and not gpu:
-            if not is_cached:
+            if not is_cached and not ptd_only:
                 if show_progress: print("  并行模式仅支持可缓存的求解器 (DiscretePO)，回退到串行模式。")
             else:
                 return self._compute_parallel(
                     geometry_data, wave_params, angles, k_mag,
                     n_workers, show_progress, progress_callback, ptd_edges, polarization,
-                    is_cached=is_cached, abort_event=abort_event
+                    is_cached=is_cached, abort_event=abort_event, ptd_only=ptd_only
                 )
 
         # GPU 模式下预计算所有角度的 PTD（与 GPU PO 解耦）
         # parallel 勾选 → 多进程；未勾选 → 单线程串行预算
-        ptd_workers = n_workers if (gpu and parallel and ptd_edges) else None
-        ptd_precompute = gpu and ptd_edges  # 只要 GPU+PTD 就预算
+        ptd_workers = n_workers if (gpu and parallel and ptd_edges and not ptd_only) else None
+        ptd_precompute = gpu and ptd_edges and not ptd_only
 
         return self._compute_serial(
             geometry_data, wave_params, angles, samples_per_lambda,
             k_mag, show_progress, progress_callback, ptd_edges, polarization,
             is_cached=is_cached, ptd_workers=ptd_workers,
-            ptd_precompute=ptd_precompute, abort_event=abort_event
+            ptd_precompute=ptd_precompute, abort_event=abort_event,
+            ptd_only=ptd_only
         )
 
     def _compute_serial(self, geometry_data, wave_params, angles,
                         samples_per_lambda, k_mag, show_progress, progress_callback=None,
                         ptd_edges=None, polarization='VV', is_cached=False, ptd_workers=None,
-                        ptd_precompute=False, abort_event=None):
+                        ptd_precompute=False, abort_event=None, ptd_only=False):
         rcs_list = {'total': [], 'po': [], 'ptd': [],
                     'total_c': [], 'po_c': [], 'ptd_c': []}
         n_angles = len(angles)
@@ -219,12 +229,21 @@ class RCSAnalyzer:
                     future_to_idx = {ex.submit(_ptd_angle_task, a): i
                                      for i, a in enumerate(args_list)}
                     for f in as_completed(future_to_idx):
+                        if abort_event and abort_event.is_set():
+                            ex.shutdown(wait=False, cancel_futures=True)
+                            from ui.workers import SimulationAborted
+                            raise SimulationAborted("用户终止仿真")
                         ptd_precomputed[future_to_idx[f]] = f.result()
             else:
                 msg = f"PTD 串行预计算: {n_angles} 个角度..."
                 if show_progress: logger.info(msg)
                 if progress_callback: progress_callback(0, n_angles, msg)
-                ptd_precomputed = [_ptd_angle_task(a) for a in args_list]
+                ptd_precomputed = []
+                for a in args_list:
+                    if abort_event and abort_event.is_set():
+                        from ui.workers import SimulationAborted
+                        raise SimulationAborted("用户终止仿真")
+                    ptd_precomputed.append(_ptd_angle_task(a))
 
         for i, theta in enumerate(angles):
             if abort_event and abort_event.is_set():
@@ -234,15 +253,15 @@ class RCSAnalyzer:
             wave = self._make_wave(wave_params['frequency'], theta, wave_params['phi'])
 
             total_I_po = 0j
-
-            if is_merged:
-                total_I_po = self.solver.integrate_cached(geometry_data, wave)
-            else:
-                for obj in geometry_data:
-                    if is_cached:
-                        total_I_po += self.solver.integrate_cached(obj, wave)
-                    else:
-                        total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
+            if not ptd_only:
+                if is_merged:
+                    total_I_po = self.solver.integrate_cached(geometry_data, wave)
+                else:
+                    for obj in geometry_data:
+                        if is_cached:
+                            total_I_po += self.solver.integrate_cached(obj, wave)
+                        else:
+                            total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
 
             total_I_ptd = 0j
             if ptd_edges:
@@ -276,7 +295,7 @@ class RCSAnalyzer:
     def _compute_parallel(self, cached_surfaces, wave_params, angles,
                           k_mag, n_workers, show_progress,
                           progress_callback=None, ptd_edges=None, polarization='VV',
-                          is_cached=True, abort_event=None):
+                          is_cached=True, abort_event=None, ptd_only=False):
 
         if n_workers is None: n_workers = os.cpu_count() or 4
 
@@ -285,7 +304,7 @@ class RCSAnalyzer:
         if progress_callback: progress_callback(0, len(angles), parallel_msg)
 
         args_list = [
-            (theta, cached_surfaces, wave_params, k_mag, ptd_edges, polarization)
+            (theta, cached_surfaces, wave_params, k_mag, ptd_edges, polarization, ptd_only)
             for theta in angles
         ]
 
@@ -350,7 +369,7 @@ class RCSAnalyzer:
                                    cached_mesh_data=None, polarization='VV',
                                    gpu=False, use_degenerate_mesh=False,
                                    ptd_seg_angle_deg=2.0,
-                                   abort_event=None):
+                                   abort_event=None, ptd_only=False):
 
         n_theta = len(theta_array)
         n_phi = len(phi_array)
@@ -361,7 +380,7 @@ class RCSAnalyzer:
             enable_ptd, ptd_edge_identifiers,
             cached_mesh_data, gpu, use_degenerate_mesh,
             show_progress, progress_callback, total_points,
-            ptd_seg_angle_deg=ptd_seg_angle_deg
+            ptd_seg_angle_deg=ptd_seg_angle_deg, ptd_only=ptd_only
         )
 
         info_msg = (f"2D扫描: {len(geometry_data) if isinstance(geometry_data, list) else 1} 个曲面, "
@@ -374,18 +393,18 @@ class RCSAnalyzer:
         if progress_callback: progress_callback(0, total_points, info_msg)
 
         if parallel and not gpu:
-            if not is_cached:
+            if not is_cached and not ptd_only:
                 if show_progress: print("  并行模式仅支持可缓存的求解器 (DiscretePO)，回退到串行模式。")
             else:
                 return self._compute_parallel_2d(
                     geometry_data, frequency, theta_array, phi_array,
                     k_mag, n_workers, show_progress, progress_callback, ptd_edges, polarization,
-                    is_cached=is_cached, abort_event=abort_event
+                    is_cached=is_cached, abort_event=abort_event, ptd_only=ptd_only
                 )
 
         # ── PTD 预计算（GPU 模式下先用 CPU 算完所有角度的 PTD） ──
         ptd_precomputed = None
-        if gpu and ptd_edges:
+        if gpu and ptd_edges and not ptd_only:
             angle_pairs = [(theta, phi)
                            for theta in theta_array for phi in phi_array]
             args_list = [
@@ -401,12 +420,21 @@ class RCSAnalyzer:
                     future_to_idx = {ex.submit(_ptd_angle_task, a): i
                                      for i, a in enumerate(args_list)}
                     for f in as_completed(future_to_idx):
+                        if abort_event and abort_event.is_set():
+                            ex.shutdown(wait=False, cancel_futures=True)
+                            from ui.workers import SimulationAborted
+                            raise SimulationAborted("用户终止仿真")
                         ptd_precomputed[future_to_idx[f]] = f.result()
             else:
                 msg = f"PTD 串行预计算: {total_points} 个角度..."
                 if show_progress: logger.info(msg)
                 if progress_callback: progress_callback(0, total_points, msg)
-                ptd_precomputed = [_ptd_angle_task(a) for a in args_list]
+                ptd_precomputed = []
+                for a in args_list:
+                    if abort_event and abort_event.is_set():
+                        from ui.workers import SimulationAborted
+                        raise SimulationAborted("用户终止仿真")
+                    ptd_precomputed.append(_ptd_angle_task(a))
 
         # ── 主循环（PO 在 GPU 上，PTD 已预算或在循环内串行计算） ──
         rcs_2d = {
@@ -429,14 +457,15 @@ class RCSAnalyzer:
                 wave = self._make_wave(frequency, theta, phi)
 
                 total_I_po = 0j
-                if is_merged:
-                    total_I_po = self.solver.integrate_cached(geometry_data, wave)
-                else:
-                    for obj in geometry_data:
-                        if is_cached:
-                            total_I_po += self.solver.integrate_cached(obj, wave)
-                        else:
-                            total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
+                if not ptd_only:
+                    if is_merged:
+                        total_I_po = self.solver.integrate_cached(geometry_data, wave)
+                    else:
+                        for obj in geometry_data:
+                            if is_cached:
+                                total_I_po += self.solver.integrate_cached(obj, wave)
+                            else:
+                                total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
 
                 total_I_ptd = 0j
                 if ptd_edges:
@@ -470,7 +499,8 @@ class RCSAnalyzer:
     def _compute_parallel_2d(self, cached_surfaces, frequency, theta_array, phi_array,
                              k_mag, n_workers,
                              show_progress, progress_callback=None, ptd_edges=None,
-                             polarization='VV', is_cached=True, abort_event=None):
+                             polarization='VV', is_cached=True, abort_event=None,
+                             ptd_only=False):
 
         if n_workers is None: n_workers = os.cpu_count() or 4
 
@@ -486,7 +516,7 @@ class RCSAnalyzer:
         for i, theta in enumerate(theta_array):
             for j, phi in enumerate(phi_array):
                 wave_params = {'frequency': frequency, 'phi': phi}
-                args = (theta, cached_surfaces, wave_params, k_mag, ptd_edges, polarization)
+                args = (theta, cached_surfaces, wave_params, k_mag, ptd_edges, polarization, ptd_only)
                 args_list.append(((i, j), args))
 
         rcs_2d = {

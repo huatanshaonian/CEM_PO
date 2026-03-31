@@ -466,6 +466,13 @@ class CEMPoQtWindow(QMainWindow):
         self.chk_ptd_enabled = QCheckBox("Enable PTD")
         self.chk_ptd_enabled.setChecked(False)
         h_ptd_top.addWidget(self.chk_ptd_enabled)
+        self.chk_ptd_only = QCheckBox("PTD Only")
+        self.chk_ptd_only.setChecked(False)
+        self.chk_ptd_only.setToolTip(
+            "仅计算 PTD，跳过 PO。\n"
+            "需要先有一次完整计算的结果，PTD 将与已有 PO 叠加得到 Total。"
+        )
+        h_ptd_top.addWidget(self.chk_ptd_only)
         h_ptd_top.addStretch()
         lbl_pol = QLabel("Pol:")
         self.ptd_pol = QComboBox()
@@ -963,7 +970,7 @@ class CEMPoQtWindow(QMainWindow):
             return
 
         from itertools import combinations
-        from solvers.ptd_edge_finder import faces_share_edge
+        from solvers.ptd_edge_finder import find_shared_edge
 
         sharing, no_edge, duplicate = [], [], []
         for a, b in combinations(selected_rows, 2):
@@ -973,9 +980,10 @@ class CEMPoQtWindow(QMainWindow):
             if key in self._ptd_existing_pairs():
                 duplicate.append(key)
                 continue
-            if faces_share_edge(self.current_geo[a], self.current_geo[b]):
+            try:
+                find_shared_edge(self.current_geo[a], self.current_geo[b])
                 sharing.append(key)
-            else:
+            except ValueError:
                 no_edge.append(key)
 
         added = self._ptd_add_pairs(sharing)
@@ -1015,7 +1023,7 @@ class CEMPoQtWindow(QMainWindow):
         if not self.current_geo:
             return
         from itertools import combinations
-        from solvers.ptd_edge_finder import faces_share_edge
+        from solvers.ptd_edge_finder import find_shared_edge
         sharing, no_edge, duplicate = [], [], []
         for a, b in combinations(selected, 2):
             if a >= len(self.current_geo) or b >= len(self.current_geo):
@@ -1024,9 +1032,10 @@ class CEMPoQtWindow(QMainWindow):
             if key in self._ptd_existing_pairs():
                 duplicate.append(key)
                 continue
-            if faces_share_edge(self.current_geo[a], self.current_geo[b]):
+            try:
+                find_shared_edge(self.current_geo[a], self.current_geo[b])
                 sharing.append(key)
-            else:
+            except ValueError:
                 no_edge.append(key)
         added = self._ptd_add_pairs(sharing)
         parts = [f"已添加 {added} 个面对"]
@@ -1784,6 +1793,7 @@ class CEMPoQtWindow(QMainWindow):
                 },
                 'ptd': {
                     'enabled': self.chk_ptd_enabled.isChecked(),
+                    'ptd_only': self.chk_ptd_only.isChecked(),
                     'edges': ptd_edges_str,
                     'polarization': self.ptd_pol.currentText(),
                     'seg_angle_deg': float(self.ptd_seg_angle.text() or '2.0'),
@@ -1798,11 +1808,21 @@ class CEMPoQtWindow(QMainWindow):
             self.log(f"Param Error: {e}")
             return
 
+        # PTD Only 模式校验
+        ptd_only = params.get('ptd', {}).get('ptd_only', False)
+        prev_result = None
+        if ptd_only:
+            if self.last_result is None or self.last_result.get('I_po') is None:
+                self.log("<font color='red'>PTD Only 模式需要先有一次包含 PO 的计算结果</font>")
+                return
+            prev_result = self.last_result
+
         self.btn_run.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.progress_bar.setValue(0)
 
-        self.worker = CalculationWorker(self.bridge, self.current_geo, params)
+        self.worker = CalculationWorker(self.bridge, self.current_geo, params,
+                                        prev_result=prev_result)
         self.worker.progress_signal.connect(self._on_progress)
         self.worker.result_signal.connect(self._on_finished)
         self.worker.error_signal.connect(lambda e: self.log(f"ERROR: {e}"))
@@ -2264,6 +2284,7 @@ class CEMPoQtWindow(QMainWindow):
                 },
                 'ptd': {
                     'enabled':       self.chk_ptd_enabled.isChecked(),
+                    'ptd_only':      self.chk_ptd_only.isChecked(),
                     'edges':         ptd_edges_str,
                     'polarization':  self.ptd_pol.currentText(),
                     'seg_angle_deg': float(self.ptd_seg_angle.text() or '2.0'),

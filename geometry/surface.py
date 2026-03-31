@@ -62,6 +62,8 @@ class TransformedSurface(Surface):
         self.base = base_surface
         self.R = rotation_matrix if rotation_matrix is not None else np.eye(3)
         self.T = np.array(translation) if translation is not None else np.zeros(3)
+        if hasattr(base_surface, 'n_edges'):
+            self.n_edges = base_surface.n_edges
 
     @property
     def u_domain(self):
@@ -89,3 +91,9 @@ class TransformedSurface(Surface):
             pts_local = self.base.get_edge_by_index(index, n_samples)
             return np.dot(pts_local, self.R.T) + self.T
         raise NotImplementedError("Base surface does not support edge extraction")
+
+    def get_edge_by_index_with_normals(self, index, n_samples=40):
+        if hasattr(self.base, 'get_edge_by_index_with_normals'):
+            pts_local, normals_local = self.base.get_edge_by_index_with_normals(index, n_samples)
+            return np.dot(pts_local, self.R.T) + self.T, np.dot(normals_local, self.R.T)
+        raise NotImplementedError("Base surface does not support edge extraction with normals")
