@@ -64,13 +64,30 @@ python main.py batch_tasks.json
 | `algorithm` | `discrete_po_sinc_dual` | 核心算法（见下方算法列表） |
 | `polarization` | "VV" | 极化方式 ("VV", "HH", "VH", "HV") |
 | `mesh_density` | 10.0 | 网格密度 (每波长采样点数) |
+| `min_points` | - | 最小网格点数（可选） |
+| `use_degenerate`| false | 是否使用退化处理（如去除退化面） |
 | `use_gpu` | false | 是否使用 GPU 加速 |
+| `workers` | - | CPU 并行计算的进程数（覆盖全局设置） |
 | `ptd.enabled` | false | 是否开启 PTD 修正 |
-| `ptd.edges` | [] | 手动指定的 PTD 边索引列表 |
+| `ptd.edges` | `""` | 手动指定的 PTD 边索引（字符串，如 `"0,1,2,3"` 或 `"(0,4);(5,9)"`） |
+| `ptd.seg_angle_deg` | 2.0 | PTD 边缘分段角度 (度) |
+| `ptd.use_parallel_ptd`| false | 是否开启 PTD 并行计算 |
 
 #### Scan (扫描角度)
 - `theta`: `[起始角度, 终止角度, 点数]`
 - `phi`: `[起始角度, 终止角度, 点数]`
+
+#### Freq Sweep (频率扫描设置，可选)
+如果在任务配置中包含此模块，将会进行宽带频率扫描，而不是单频点计算。
+| 参数 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `enabled` | false | 是否开启频率扫描 |
+| `f_start` | - | 起始频率 (MHz) |
+| `f_end` | - | 终止频率 (MHz) |
+| `f_step` | - | 频率步长 (MHz) |
+| `window` | `"none"` | 窗函数类型，如 `"none"`, `"hamming"`, `"hanning"`, `"blackman"` |
+| `zero_pad`| 1 | 补零倍数，用于提高时域/距离域插值分辨率 |
+| `polarization` | `"VV"` | 频率扫描使用的极化方式 |
 
 ---
 

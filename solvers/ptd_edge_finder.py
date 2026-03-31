@@ -214,7 +214,10 @@ def _get_edge_points_and_normals(face, idx, n_samples):
     返回 (points (N,3), normals (N,3))。
     """
     if hasattr(face, 'get_edge_by_index_with_normals'):
-        return face.get_edge_by_index_with_normals(idx, n_samples=n_samples)
+        try:
+            return face.get_edge_by_index_with_normals(idx, n_samples=n_samples)
+        except NotImplementedError:
+            pass
 
     if hasattr(face, 'get_edge_by_index'):
         pts = face.get_edge_by_index(idx, n_samples=n_samples)

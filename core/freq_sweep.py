@@ -132,7 +132,7 @@ def compute_po_freq_sweep(mesh_list, k_dir, frequencies, sinc_mode='dual', use_g
     return I_total
 
 
-def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use_gpu=False):
+def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use_gpu=False, abort_event=None):
     """
     PTD 相位旋转法频率扫描（固定入射方向，扫频率）。
 
@@ -176,6 +176,9 @@ def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use
     s_dir = -k_dir
 
     for edge in ptd_edges:
+        if abort_event and abort_event.is_set():
+            from ui.workers import SimulationAborted
+            raise SimulationAborted("用户终止仿真")
         for seg in edge.segments:
             alfa  = seg.alpha
             t     = seg.tangent
@@ -279,8 +282,10 @@ def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use
             r_proj = float(np.dot(seg.midpoint, k_dir))
 
             # ── 7. 向量化频率 ──
-            # pre_factor = -j·sinγ₀/k (Ufimtsev EEW: 1/(jk) = -j/k)
-            pre_arr   = -1j * sin_gamma0 / k_arr_xp             # (Nf,)
+            # pre_factor = -j·sinγ₀/k  (Ufimtsev EEW Eq. 7.137)
+            # J_PO=2n̂×H 的因子2 已吸收进 σ=k²/π 系数，
+            # EEW 与 PO 共享归一化，无需 /2
+            pre_arr   = -1j * sin_gamma0 / k_arr_xp              # (Nf,)
             sinc_arg  = k_arr_xp * L * k_dot_t / float(np.pi)   # (Nf,)
             sinc_arr  = xp.sinc(sinc_arg)                        # (Nf,)
             phase_arr = xp.exp(2j * k_arr_xp * r_proj)           # (Nf,)

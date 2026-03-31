@@ -4,8 +4,9 @@ PTD 衍射系数核心函数
 直接对应乌菲姆采夫教材 MATLAB 代码：
   eps_x          ← eps_x.m   (Eq. 7.48)
   sigma12        ← sigma12.m (Eq. 7.76-7.77)
-  fun_fg         ← fun_fg.m  (Eq. 4.20-4.21)
-  FG_monostatic  ← FG.m      (Eq. 7.137, 单站路径)
+  fun_fg         ← fun_fg.m  (Eq. 4.20-4.21, 标准 PTD)
+  fun_fg_improved            (Eq. 7.194-7.197, 改进 PTD, Section 7.9)
+  FG_monostatic  ← FG.m      (Eq. 7.137/7.221-7.224, 单站路径)
 """
 import numpy as np
 
@@ -135,28 +136,84 @@ def fun_fg(angle, angle0, alfa):
     return float(np.real(f1)), float(np.real(g1))
 
 
-def FG_monostatic(angle, angle0, gamma0, alfa):
+def fun_fg_improved(angle, angle0, alfa):
     """
-    Ufimtsev 完整 3D 衍射系数，单站情况 (Vtheta = pi - gamma0)。
-    对应 FG.m Eq.(7.137) 的 Vtheta == pi-gamma0 分支。
+    改进版 PTD 衍射系数 (Ufimtsev Section 7.9, Eq. 7.194-7.197)。
+
+    用半平面 (half-plane) 减去项替代标准 PO 减去项，消除掠入射奇异性。
+    无需 SSI/DSI 分支判断，所有入射角度统一公式。
 
     参数:
-        angle:  观察角 φ（弧度），∈ (0, α)
-        angle0: 入射角 φ₀（弧度），∈ (0, α)
-        gamma0: 斜入射角（弧度），入射方向与棱边的夹角，∈ (0, π)
-        alfa:   楔形外角 α（弧度）
+        angle:  观察角 φ（弧度）
+        angle0: 入射角 φ₀（弧度）
+        alfa:   楔形外角 α = n·π（弧度）
+    返回:
+        (f1, g1): 改进版衍射修正系数
+    """
+    n = alfa / np.pi
+    psi1 = angle - angle0
+    psi2 = angle + angle0
+
+    # ── GTD (Sommerfeld) 系数：Eq. 2.128-2.129，与标准 PTD 完全相同 ──
+    a1 = (np.pi - psi2) / (2.0 * n)
+    a2 = (np.pi - psi1) / (2.0 * n)
+    a3 = (np.pi + psi2) / (2.0 * n)
+    a4 = (np.pi + psi1) / (2.0 * n)
+
+    f_gtd = (1.0 / (2.0 * n)) * (_cot(a1) - _cot(a2) + _cot(a3) - _cot(a4))
+    g_gtd = -(1.0 / (2.0 * n)) * (_cot(a1) + _cot(a2) + _cot(a3) + _cot(a4))
+
+    # ── 半平面减去项：Eq. 7.196-7.197 ──
+    # 切向半平面（α = 2π, n_hp = 2）的散射函数
+    b1 = (np.pi - psi2) / 4.0
+    b2 = (np.pi - psi1) / 4.0
+    b3 = (np.pi + psi1) / 4.0
+    b4 = (np.pi + psi2 - 2.0 * alfa) / 4.0
+
+    f_hp = 0.25 * (_cot(b1) - _cot(b2) - _cot(b3) + _cot(b4))
+    g_hp = -0.25 * (_cot(b1) + _cot(b2) + _cot(b3) + _cot(b4))
+
+    # ── 改进版衍射修正系数 ──
+    f1 = f_gtd - f_hp
+    g1 = g_gtd - g_hp
+
+    return float(np.real(f1)), float(np.real(g1))
+
+
+def FG_monostatic(angle, angle0, gamma0, alfa, improved=False):
+    """
+    Ufimtsev 完整 3D 衍射系数，单站情况 (Vtheta = pi - gamma0)。
+
+    improved=True  → 改进版 PTD (Section 7.9, Eq. 7.221-7.224)，无掠入射奇异性
+    improved=False → 标准 PTD (Eq. 7.137-7.153)
+
+    参数:
+        angle:    观察角 φ（弧度），∈ (0, α)
+        angle0:   入射角 φ₀（弧度），∈ (0, α)
+        gamma0:   斜入射角（弧度），入射方向与棱边的夹角，∈ (0, π)
+        alfa:     楔形外角 α（弧度）
+        improved: 是否使用改进版 PTD（默认 True）
 
     返回:
-        F1_Vt:  soft (f1) 的 θ 分量 = -f1
-        G1_Vt:  hard (g1) 的 θ 分量（极化耦合项，正入射时为零）
-        G1_phi: hard (g1) 的 φ 分量 = -g1
+        F1_Vt:  θ 分量
+        G1_Vt:  θ 极化耦合项（改进版为 0）
+        G1_phi: φ 分量
     """
-    f1, g1 = fun_fg(angle, angle0, alfa)
     sin_g = np.sin(gamma0)
-    # 单站 Keller 锥：Vtheta = pi - gamma0
-    F1_Vt  = -f1 / sin_g                   # Eq.(7.148)
-    G1_Vt  = (eps_x(angle0) - eps_x(alfa - angle0)) * (np.cos(gamma0) / sin_g)  # Eq.(7.153)
-    G1_phi = g1 / sin_g                    # Eq.(7.151)，注意正号
+
+    if improved:
+        # 改进版 PTD (Section 7.9)
+        f1, g1 = fun_fg_improved(angle, angle0, alfa)
+        F1_Vt  = -f1 / sin_g                # Eq.(7.221)
+        G1_Vt  = 0.0                         # Eq.(7.224): 极化耦合项为零
+        G1_phi = g1 / sin_g                  # Eq.(7.223)
+    else:
+        # 标准 PTD
+        f1, g1 = fun_fg(angle, angle0, alfa)
+        F1_Vt  = -f1 / sin_g                # Eq.(7.148)
+        G1_Vt  = (eps_x(angle0) - eps_x(alfa - angle0)) * (np.cos(gamma0) / sin_g)  # Eq.(7.153)
+        G1_phi = g1 / sin_g                 # Eq.(7.151)
+
     return F1_Vt, G1_Vt, G1_phi
 
 
