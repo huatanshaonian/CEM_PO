@@ -2,7 +2,7 @@ import re
 import numpy as np
 from .ptd_structures import PTDEdge
 from .ptd_edge_finder import find_shared_edge
-from physics.ptd_core import compute_ptd_contribution
+from physics.ptd_algorithms import get_ptd_function, DEFAULT_PTD_ALGORITHM
 
 
 class PTDProcessor:
@@ -59,8 +59,22 @@ class PTDProcessor:
         return ptd_edges
 
     @staticmethod
-    def compute_contribution(edge, wave, polarization='VV'):
+    def compute_contribution(edge, wave, polarization='VV',
+                             algorithm=DEFAULT_PTD_ALGORITHM):
         """
-        计算单条边缘的 PTD 贡献
+        计算单条边缘的 PTD 贡献。
+
+        参数:
+            edge:         PTDEdge 对象
+            wave:         IncidentWave 对象
+            polarization: 'VV' | 'HH' | 'VH' | 'HV'
+                          ('VH'/'HV' 仅 michaeli_mec 支持)
+            algorithm:    PTD 算法 ID, 见 physics/ptd_algorithms.py
         """
-        return compute_ptd_contribution(edge, wave, polarization)
+        if algorithm == 'ufimtsev_eew' and polarization not in ('VV', 'HH'):
+            raise NotImplementedError(
+                f"Ufimtsev EEW 暂不支持极化模式 '{polarization}'。"
+                f"请改用 algorithm='michaeli_mec', 或将 polarization 设为 'VV'/'HH'。"
+            )
+        func = get_ptd_function(algorithm)
+        return func(edge, wave, polarization)

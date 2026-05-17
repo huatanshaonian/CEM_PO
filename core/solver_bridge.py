@@ -56,6 +56,7 @@ class SolverBridge:
             ptd_edges = ptd_params.get('edges', '')
             ptd_pol = ptd_params.get('polarization', 'VV')
             ptd_seg_angle = ptd_params.get('seg_angle_deg', 2.0)
+            ptd_algorithm = ptd_params.get('algorithm', 'ufimtsev_eew')
 
             theta_start = angle_params.get('theta_start', -90)
             theta_end = angle_params.get('theta_end', 90)
@@ -103,7 +104,8 @@ class SolverBridge:
                     cached_mesh_data=cached_mesh, polarization=ptd_pol,
                     gpu=use_gpu, use_degenerate_mesh=use_degen,
                     ptd_seg_angle_deg=ptd_seg_angle,
-                    abort_event=abort_event, ptd_only=ptd_only
+                    abort_event=abort_event, ptd_only=ptd_only,
+                    ptd_algorithm=ptd_algorithm
                 )
 
                 # 结果标准化
@@ -139,7 +141,8 @@ class SolverBridge:
                     cached_mesh_data=cached_mesh, polarization=ptd_pol,
                     gpu=use_gpu, use_degenerate_mesh=use_degen,
                     ptd_seg_angle_deg=ptd_seg_angle,
-                    abort_event=abort_event, ptd_only=ptd_only
+                    abort_event=abort_event, ptd_only=ptd_only,
+                    ptd_algorithm=ptd_algorithm
                 )
 
                 if isinstance(rcs_result_raw, dict):
@@ -175,7 +178,8 @@ class SolverBridge:
                     cached_mesh_data=cached_mesh, polarization=ptd_pol,
                     gpu=use_gpu, use_degenerate_mesh=use_degen,
                     ptd_seg_angle_deg=ptd_seg_angle,
-                    abort_event=abort_event, ptd_only=ptd_only
+                    abort_event=abort_event, ptd_only=ptd_only,
+                    ptd_algorithm=ptd_algorithm
                 )
 
                 if isinstance(rcs_result_raw, dict):
@@ -319,6 +323,7 @@ class SolverBridge:
             enable_ptd    = ptd_params.get('enabled', False)
             ptd_edges_str = ptd_params.get('edges', '')
             ptd_seg_angle = ptd_params.get('seg_angle_deg', 2.0)
+            ptd_algorithm = ptd_params.get('algorithm', 'ufimtsev_eew')
 
             # sinc 模式从算法注册表读取
             sinc_mode = AVAILABLE_ALGORITHMS.get(algo_id, {}).get('kwargs', {}).get('sinc_mode', 'none')
@@ -404,7 +409,9 @@ class SolverBridge:
                 I_po_matrix[i] = I_po
 
                 if enable_ptd and ptd_edges:
-                    I_ptd = compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization, use_gpu, abort_event=abort_event)
+                    I_ptd = compute_ptd_freq_sweep(
+                        ptd_edges, k_dir, frequencies, polarization, use_gpu,
+                        abort_event=abort_event, algorithm=ptd_algorithm)
                     I_ptd_matrix[i] = I_ptd
                     I_total = I_po + I_ptd
                 else:

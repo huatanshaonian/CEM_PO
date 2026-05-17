@@ -132,23 +132,65 @@ def compute_po_freq_sweep(mesh_list, k_dir, frequencies, sinc_mode='dual', use_g
     return I_total
 
 
-def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV', use_gpu=False, abort_event=None):
+def _compute_ptd_freq_sweep_mec(ptd_edges, k_dir, frequencies, polarization, abort_event):
+    """
+    MEC (Michaeli) 路径的频率扫描慢路径：逐频构造 IncidentWave，调用 compute_mec_contribution。
+
+    TODO: MEC 衍射系数本身只依赖角度（与频率无关），后续可向量化（与现有 EEW 路径同样思路）。
+    """
+    from physics.wave import IncidentWave
+    from physics.mec_core import compute_mec_contribution
+
+    # 从 k_dir 反推 (theta, phi) — 与 IncidentWave 内部约定对齐
+    r_hat = -k_dir
+    theta_inc = float(np.arccos(np.clip(r_hat[2], -1.0, 1.0)))
+    phi_inc   = float(np.arctan2(r_hat[1], r_hat[0]))
+
+    Nf = len(frequencies)
+    I_ptd = np.zeros(Nf, dtype=np.complex128)
+    for fi, freq in enumerate(frequencies):
+        if abort_event and abort_event.is_set():
+            from ui.workers import SimulationAborted
+            raise SimulationAborted("用户终止仿真")
+        wave = IncidentWave(freq, theta_inc, phi_inc)
+        total = 0.0 + 0.0j
+        for edge in ptd_edges:
+            total += compute_mec_contribution(edge, wave, polarization)
+        I_ptd[fi] = total
+    return I_ptd
+
+
+def compute_ptd_freq_sweep(ptd_edges, k_dir, frequencies, polarization='VV',
+                           use_gpu=False, abort_event=None,
+                           algorithm='ufimtsev_eew'):
     """
     PTD 相位旋转法频率扫描（固定入射方向，扫频率）。
 
-    衍射系数 D 完全频率无关，向量化处理所有频率。
-    使用 Ufimtsev EEW (Eq. 7.137) 的 Keller 锥极化投影。
+    衍射系数 D 完全频率无关，向量化处理所有频率（仅 EEW 路径）。
+    MEC 路径走逐频慢路径（compute_mec_contribution 内部含完整极化矩阵）。
 
     参数:
         ptd_edges:   list[PTDEdge]，已提取的边缘列表
         k_dir:       ndarray (3,)，入射方向单位向量
         frequencies: ndarray (Nf,)，频率数组 (Hz)
-        polarization: 'VV' 或 'HH'
-        use_gpu:     是否使用 GPU
+        polarization: 'VV'/'HH'/'VH'/'HV' （'VH'/'HV' 仅 michaeli_mec 支持）
+        use_gpu:     是否使用 GPU（仅 EEW 路径）
+        algorithm:   'ufimtsev_eew' | 'michaeli_mec'
 
     返回:
         I_ptd: ndarray complex128 (Nf,)（始终 CPU 数组）
     """
+    if algorithm == 'michaeli_mec':
+        return _compute_ptd_freq_sweep_mec(
+            ptd_edges, k_dir, frequencies, polarization, abort_event)
+
+    if algorithm != 'ufimtsev_eew':
+        raise ValueError(f"未知 PTD 算法: '{algorithm}'")
+
+    if polarization not in ('VV', 'HH'):
+        raise NotImplementedError(
+            f"Ufimtsev EEW 频扫暂不支持极化 '{polarization}'，请改用 algorithm='michaeli_mec'")
+
     from physics.ptd_coefficients import FG_monostatic
 
     _SING_THRESH = 1e-3

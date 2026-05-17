@@ -13,12 +13,20 @@ logger = logging.getLogger("CEM-PO.Analyzer")
 
 
 def _ptd_angle_task(args):
-    """模块级 PTD 单角度计算任务，供 ProcessPoolExecutor 使用（返回复振幅）。"""
-    theta, ptd_edges, frequency, phi, polarization = args
+    """模块级 PTD 单角度计算任务，供 ProcessPoolExecutor 使用（返回复振幅）。
+
+    args: (theta, ptd_edges, frequency, phi, polarization[, ptd_algorithm])
+    """
+    if len(args) == 6:
+        theta, ptd_edges, frequency, phi, polarization, ptd_algorithm = args
+    else:
+        theta, ptd_edges, frequency, phi, polarization = args
+        ptd_algorithm = 'ufimtsev_eew'
     wave = IncidentWave(frequency, theta, phi)
     total = 0j
     for edge in ptd_edges:
-        total += PTDProcessor.compute_contribution(edge, wave, polarization)
+        total += PTDProcessor.compute_contribution(
+            edge, wave, polarization, algorithm=ptd_algorithm)
     return total
 
 
@@ -106,13 +114,18 @@ class RCSAnalyzer:
     def _compute_single_angle_cached(self, args):
         """
         并行计算任务函数 (使用 CachedMeshData)
-        args: (theta, cached_surfaces, wave_params, k_mag[, ptd_edges[, polarization[, ptd_only]]])
+        args: (theta, cached_surfaces, wave_params, k_mag
+               [, ptd_edges[, polarization[, ptd_only[, ptd_algorithm]]]])
         """
         ptd_edges = None
         polarization = 'VV'
         ptd_only = False
+        ptd_algorithm = 'ufimtsev_eew'
 
-        if len(args) == 7:
+        if len(args) == 8:
+            (theta, cached_surfaces, wave_params, k_mag,
+             ptd_edges, polarization, ptd_only, ptd_algorithm) = args
+        elif len(args) == 7:
             theta, cached_surfaces, wave_params, k_mag, ptd_edges, polarization, ptd_only = args
         elif len(args) == 6:
             theta, cached_surfaces, wave_params, k_mag, ptd_edges, polarization = args
@@ -121,7 +134,7 @@ class RCSAnalyzer:
         elif len(args) == 4:
             theta, cached_surfaces, wave_params, k_mag = args
         else:
-            raise ValueError(f"Invalid args length: {len(args)}, expected 4-7")
+            raise ValueError(f"Invalid args length: {len(args)}, expected 4-8")
 
         wave = IncidentWave(wave_params['frequency'], theta, wave_params['phi'])
 
@@ -133,7 +146,8 @@ class RCSAnalyzer:
         total_I_ptd = 0j
         if ptd_edges:
             for edge in ptd_edges:
-                total_I_ptd += PTDProcessor.compute_contribution(edge, wave, polarization=polarization)
+                total_I_ptd += PTDProcessor.compute_contribution(
+                    edge, wave, polarization=polarization, algorithm=ptd_algorithm)
 
         total_I = total_I_po + total_I_ptd
 
@@ -155,7 +169,8 @@ class RCSAnalyzer:
                                cached_mesh_data=None, polarization='VV',
                                gpu=False, use_degenerate_mesh=False,
                                ptd_seg_angle_deg=2.0,
-                               abort_event=None, ptd_only=False):
+                               abort_event=None, ptd_only=False,
+                               ptd_algorithm='ufimtsev_eew'):
 
         frequency = wave_params['frequency']
         n_angles = len(angles)
@@ -185,7 +200,8 @@ class RCSAnalyzer:
                 return self._compute_parallel(
                     geometry_data, wave_params, angles, k_mag,
                     n_workers, show_progress, progress_callback, ptd_edges, polarization,
-                    is_cached=is_cached, abort_event=abort_event, ptd_only=ptd_only
+                    is_cached=is_cached, abort_event=abort_event, ptd_only=ptd_only,
+                    ptd_algorithm=ptd_algorithm
                 )
 
         # GPU 模式下预计算所有角度的 PTD（与 GPU PO 解耦）
@@ -198,13 +214,14 @@ class RCSAnalyzer:
             k_mag, show_progress, progress_callback, ptd_edges, polarization,
             is_cached=is_cached, ptd_workers=ptd_workers,
             ptd_precompute=ptd_precompute, abort_event=abort_event,
-            ptd_only=ptd_only
+            ptd_only=ptd_only, ptd_algorithm=ptd_algorithm
         )
 
     def _compute_serial(self, geometry_data, wave_params, angles,
                         samples_per_lambda, k_mag, show_progress, progress_callback=None,
                         ptd_edges=None, polarization='VV', is_cached=False, ptd_workers=None,
-                        ptd_precompute=False, abort_event=None, ptd_only=False):
+                        ptd_precompute=False, abort_event=None, ptd_only=False,
+                        ptd_algorithm='ufimtsev_eew'):
         rcs_list = {'total': [], 'po': [], 'ptd': [],
                     'total_c': [], 'po_c': [], 'ptd_c': []}
         n_angles = len(angles)
@@ -217,7 +234,7 @@ class RCSAnalyzer:
             freq = wave_params['frequency']
             phi  = wave_params['phi']
             args_list = [
-                (theta, ptd_edges, freq, phi, polarization)
+                (theta, ptd_edges, freq, phi, polarization, ptd_algorithm)
                 for theta in angles
             ]
             if ptd_workers and ptd_workers > 1:
@@ -269,7 +286,8 @@ class RCSAnalyzer:
                     total_I_ptd = ptd_precomputed[i]
                 else:
                     for edge in ptd_edges:
-                        total_I_ptd += PTDProcessor.compute_contribution(edge, wave, polarization=polarization)
+                        total_I_ptd += PTDProcessor.compute_contribution(
+                            edge, wave, polarization=polarization, algorithm=ptd_algorithm)
 
             total_I = total_I_po + total_I_ptd
 
@@ -295,7 +313,8 @@ class RCSAnalyzer:
     def _compute_parallel(self, cached_surfaces, wave_params, angles,
                           k_mag, n_workers, show_progress,
                           progress_callback=None, ptd_edges=None, polarization='VV',
-                          is_cached=True, abort_event=None, ptd_only=False):
+                          is_cached=True, abort_event=None, ptd_only=False,
+                          ptd_algorithm='ufimtsev_eew'):
 
         if n_workers is None: n_workers = os.cpu_count() or 4
 
@@ -304,7 +323,8 @@ class RCSAnalyzer:
         if progress_callback: progress_callback(0, len(angles), parallel_msg)
 
         args_list = [
-            (theta, cached_surfaces, wave_params, k_mag, ptd_edges, polarization, ptd_only)
+            (theta, cached_surfaces, wave_params, k_mag,
+             ptd_edges, polarization, ptd_only, ptd_algorithm)
             for theta in angles
         ]
 
@@ -369,7 +389,8 @@ class RCSAnalyzer:
                                    cached_mesh_data=None, polarization='VV',
                                    gpu=False, use_degenerate_mesh=False,
                                    ptd_seg_angle_deg=2.0,
-                                   abort_event=None, ptd_only=False):
+                                   abort_event=None, ptd_only=False,
+                                   ptd_algorithm='ufimtsev_eew'):
 
         n_theta = len(theta_array)
         n_phi = len(phi_array)
@@ -399,7 +420,8 @@ class RCSAnalyzer:
                 return self._compute_parallel_2d(
                     geometry_data, frequency, theta_array, phi_array,
                     k_mag, n_workers, show_progress, progress_callback, ptd_edges, polarization,
-                    is_cached=is_cached, abort_event=abort_event, ptd_only=ptd_only
+                    is_cached=is_cached, abort_event=abort_event, ptd_only=ptd_only,
+                    ptd_algorithm=ptd_algorithm
                 )
 
         # ── PTD 预计算（GPU 模式下先用 CPU 算完所有角度的 PTD） ──
@@ -408,7 +430,7 @@ class RCSAnalyzer:
             angle_pairs = [(theta, phi)
                            for theta in theta_array for phi in phi_array]
             args_list = [
-                (theta, ptd_edges, frequency, phi, polarization)
+                (theta, ptd_edges, frequency, phi, polarization, ptd_algorithm)
                 for theta, phi in angle_pairs
             ]
             if parallel and n_workers and n_workers > 1:
@@ -473,7 +495,8 @@ class RCSAnalyzer:
                         total_I_ptd = ptd_precomputed[i * n_phi + j]
                     else:
                         for edge in ptd_edges:
-                            total_I_ptd += PTDProcessor.compute_contribution(edge, wave, polarization=polarization)
+                            total_I_ptd += PTDProcessor.compute_contribution(
+                                edge, wave, polarization=polarization, algorithm=ptd_algorithm)
 
                 total_I = total_I_po + total_I_ptd
 
@@ -500,7 +523,7 @@ class RCSAnalyzer:
                              k_mag, n_workers,
                              show_progress, progress_callback=None, ptd_edges=None,
                              polarization='VV', is_cached=True, abort_event=None,
-                             ptd_only=False):
+                             ptd_only=False, ptd_algorithm='ufimtsev_eew'):
 
         if n_workers is None: n_workers = os.cpu_count() or 4
 
@@ -516,7 +539,8 @@ class RCSAnalyzer:
         for i, theta in enumerate(theta_array):
             for j, phi in enumerate(phi_array):
                 wave_params = {'frequency': frequency, 'phi': phi}
-                args = (theta, cached_surfaces, wave_params, k_mag, ptd_edges, polarization, ptd_only)
+                args = (theta, cached_surfaces, wave_params, k_mag,
+                        ptd_edges, polarization, ptd_only, ptd_algorithm)
                 args_list.append(((i, j), args))
 
         rcs_2d = {
