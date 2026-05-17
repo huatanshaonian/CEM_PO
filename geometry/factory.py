@@ -1,6 +1,6 @@
 import os
 import numpy as np
-from geometry.plate import AnalyticPlate
+from geometry.plate import AnalyticPlate, create_double_sided_plate
 from geometry.sphere import AnalyticSphere
 from geometry.cylinder import AnalyticCylinder
 from geometry.occ_surface import OCCSurface
@@ -32,7 +32,8 @@ class GeometryFactory:
         elif geo_type == "Plate":
             w = float(params.get('width', 5.0))
             l = float(params.get('length', 10.0))
-            return [AnalyticPlate(w, l)]
+            surfaces, ptd_id = create_double_sided_plate(w, l)
+            return surfaces, ptd_id
         
         elif geo_type == "Sphere":
             r = float(params.get('radius', 1.0))

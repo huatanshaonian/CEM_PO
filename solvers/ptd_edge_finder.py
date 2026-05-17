@@ -19,30 +19,34 @@ def _arc_length(pts):
     return float(np.sum(np.linalg.norm(pts[1:] - pts[:-1], axis=1)))
 
 
-def _find_shared_edge_pair(face_a, face_b, n_samples=20, tol=1e-3,
-                           min_edge_len=1e-6):
+def _find_shared_edge_pairs(face_a, face_b, n_samples=20, tol=1e-3,
+                            min_edge_len=1e-6):
     """
-    在 face_a 和 face_b 的边界边中找到共享边对。
+    在 face_a 和 face_b 的边界边中找到所有共享边对。
 
     判定条件（全部满足才算共享边）：
     - 边弧长 >= min_edge_len（排除退化边）
     - ea 的两端点和中点到 eb 的最近距离都 <= tol（排除仅共顶点）
 
     返回:
-        (idx_a, idx_b):  共享边在各自面上的索引
-        None:            找不到共享边
+        List[(idx_a, idx_b)]:  通过共享判定的所有边对（顺序与 face_a 边序对齐）
+                               空列表表示找不到共享边
     """
     edges_a = [_get_boundary_edge(face_a, idx, n_samples)
                for idx in range(_num_edges(face_a))]
     edges_b = [_get_boundary_edge(face_b, idx, n_samples)
                for idx in range(_num_edges(face_b))]
 
-    best_dist = np.inf
-    best_pair = None
+    pairs = []
+    used_b = set()  # 避免 face_b 的同一条边被多次匹配（共面镜像板 4 边一一对应）
     for ia, ea in enumerate(edges_a):
         if _arc_length(ea) < min_edge_len:
             continue
+        best_d = np.inf
+        best_ib = None
         for ib, eb in enumerate(edges_b):
+            if ib in used_b:
+                continue
             if _arc_length(eb) < min_edge_len:
                 continue
             # 两端点 + 中点都要匹配
@@ -52,75 +56,96 @@ def _find_shared_edge_pair(face_a, face_b, n_samples=20, tol=1e-3,
             if d0 > tol or d1 > tol or dm > tol:
                 continue
             d = _avg_min_dist(ea, eb)
-            if d < best_dist:
-                best_dist = d
-                best_pair = (ia, ib)
+            if d < best_d:
+                best_d = d
+                best_ib = ib
+        if best_ib is not None:
+            pairs.append((ia, best_ib))
+            used_b.add(best_ib)
 
-    return best_pair
+    return pairs
+
+
+def find_shared_edges(face_a, face_b, max_angle_deg=2.0, n_initial=100,
+                      max_pts=500):
+    """
+    自动寻找 face_a 与 face_b 的所有共享边，返回每条边的自适应采样数据。
+
+    用于覆盖：
+    - 一般情况下两面只共享 1 条边（Brick / Wedge 相邻面）
+    - 共面镜像情况下两面共享多条边（双面薄板的 4 条边界）
+
+    返回:
+        List[Tuple]:  每条共享边一个元组
+            (edge_points (N,3), normals_a (N,3), normals_b (N,3),
+             exterior_angle_rad, warning_msg)
+
+    异常:
+        ValueError: 两面没有共享边
+    """
+    pairs = _find_shared_edge_pairs(face_a, face_b)
+    if not pairs:
+        raise ValueError("找不到共享边")
+
+    max_angle_rad = np.deg2rad(max_angle_deg)
+    results = []
+
+    for idx_a, idx_b in pairs:
+        n_pts = n_initial
+        warning_msg = None
+
+        for round_idx in range(4):
+            edge_pts, normals_a = _get_edge_points_and_normals(
+                face_a, idx_a, n_pts)
+            _, normals_b = _get_edge_points_and_normals(
+                face_b, idx_b, n_pts)
+
+            bp = _adaptive_breakpoints(edge_pts, max_angle_rad)
+            bp_arr = np.array(bp)
+            spans = bp_arr[1:] - bp_arr[:-1]
+            n_single = int(np.sum(spans == 1))
+
+            if n_single == 0:
+                break
+
+            if round_idx == 3:
+                warning_msg = (
+                    f"3 轮细化后仍有 {n_single} 段仅跨单区间（初始采样不足），"
+                    f"请增大 PTD Seg. Angle 或检查边缘几何"
+                )
+                break
+
+            n_pts = min(n_pts * 2, max_pts)
+            if n_pts >= max_pts:
+                warning_msg = (
+                    f"达到最大采样点数 {max_pts}，仍有 {n_single} 段初始采样不足"
+                )
+                break
+
+        bp = _adaptive_breakpoints(edge_pts, max_angle_rad)
+        pts_sel = edge_pts[bp]
+        na_sel  = normals_a[bp]
+        nb_sel  = normals_b[bp]
+
+        cos_vals = np.einsum('ij,ij->i', na_sel, nb_sel)
+        cos_mean = float(np.clip(np.mean(cos_vals), -1.0, 1.0))
+        exterior_angle = np.pi + np.arccos(cos_mean)
+
+        results.append((pts_sel, na_sel, nb_sel, exterior_angle, warning_msg))
+
+    return results
 
 
 def find_shared_edge(face_a, face_b, max_angle_deg=2.0, n_initial=100,
                      max_pts=500):
     """
-    自动寻找 face_a 与 face_b 的共享边，返回自适应采样的边缘点及法向量。
+    向后兼容包装：返回 face_a / face_b 的第一条共享边。
 
-    返回:
-        edge_points (N,3):     共享边采样点
-        normals_a (N,3):       face_a 在该边略内侧的法向量
-        normals_b (N,3):       face_b 在该边略内侧的法向量
-        exterior_angle_rad:    外部二面角（弧度）
-        warning_msg:           str 或 None，超标警告信息
-
-    异常:
-        ValueError: 两面没有共享边
+    新代码请使用 find_shared_edges（复数）以获取全部共享边。
     """
-    pair = _find_shared_edge_pair(face_a, face_b)
-    if pair is None:
-        raise ValueError("找不到共享边")
-    best_idx_a, best_idx_b = pair
-
-    max_angle_rad = np.deg2rad(max_angle_deg)
-    n_pts = n_initial
-    warning_msg = None
-
-    for round_idx in range(4):
-        edge_pts, normals_a = _get_edge_points_and_normals(
-            face_a, best_idx_a, n_pts)
-        _, normals_b = _get_edge_points_and_normals(
-            face_b, best_idx_b, n_pts)
-
-        bp = _adaptive_breakpoints(edge_pts, max_angle_rad)
-        bp_arr = np.array(bp)
-        spans = bp_arr[1:] - bp_arr[:-1]
-        n_single = int(np.sum(spans == 1))
-
-        if n_single == 0:
-            break
-
-        if round_idx == 3:
-            warning_msg = (
-                f"3 轮细化后仍有 {n_single} 段仅跨单区间（初始采样不足），"
-                f"请增大 PTD Seg. Angle 或检查边缘几何"
-            )
-            break
-
-        n_pts = min(n_pts * 2, max_pts)
-        if n_pts >= max_pts:
-            warning_msg = (
-                f"达到最大采样点数 {max_pts}，仍有 {n_single} 段初始采样不足"
-            )
-            break
-
-    bp = _adaptive_breakpoints(edge_pts, max_angle_rad)
-    pts_sel = edge_pts[bp]
-    na_sel  = normals_a[bp]
-    nb_sel  = normals_b[bp]
-
-    cos_vals = np.einsum('ij,ij->i', na_sel, nb_sel)
-    cos_mean = float(np.clip(np.mean(cos_vals), -1.0, 1.0))
-    exterior_angle = np.pi + np.arccos(cos_mean)
-
-    return pts_sel, na_sel, nb_sel, exterior_angle, warning_msg
+    edges = find_shared_edges(face_a, face_b, max_angle_deg=max_angle_deg,
+                              n_initial=n_initial, max_pts=max_pts)
+    return edges[0]
 
 
 
