@@ -142,9 +142,11 @@ def compute_mec_contribution(edge, wave, polarization='VV'):
         sinc_val = np.sinc(sinc_arg)
         phase = 2.0 * float(np.dot(seg.midpoint, k_vec))
 
-        # MEC 公式中的 jk·ΔL 因子: ΔE ∝ jk·ΔL·G(r)·[...]
-        # 与现有 EEW 归一化对齐 (避免重复 4πR Green 因子, 由远场公式吸收)
-        seg_contrib = 1j * k * seg.length * sinc_val * np.exp(1j * phase) * amp
+        # MEC 远场 E 场 → Ufimtsev I 量换算:
+        #   σ = (k²/π)|I|², |E^s| = k|I|/(2πr) ⇒ I = 2πr·E^s/k
+        # 代入 Knott 标准 MEC 远场表达式 E^s = -jk/(4πr) ∫ [...] dl, 化简得
+        # 单段贡献前置因子 = -j/2 (替代原先错误的 +jk, 差 K = -1/(2k))
+        seg_contrib = (-0.5j) * seg.length * sinc_val * np.exp(1j * phase) * amp
         total += seg_contrib
 
     return total
