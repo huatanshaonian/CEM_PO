@@ -66,6 +66,13 @@ def fun_fg(angle, angle0, alfa):
         (f1, g1): 软边界(TE)和硬边界(TM)修正系数（实数或浮点数）
     """
     eps = _EPS_ANGLE
+
+    # 若入射来自 "Face 2 这一侧"（φ_0 > π），按楔形对称性把 Face 2 重新命名为
+    # Face 1：φ_0' = α - φ_0，φ' = α - φ。教材公式（Eq. 7.2/4.20-4.21）仅给出
+    # φ_0 ∈ [0, π] 的形式，由楔形两面物理上等价的对称性扩展到 (π, α) 区。
+    if angle0 > np.pi + eps:
+        return fun_fg(alfa - angle, alfa - angle0, alfa)
+
     n = alfa / np.pi
     psi1 = angle - angle0
     psi2 = angle + angle0

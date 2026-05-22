@@ -884,7 +884,8 @@ class CEMPoQtWindow(QMainWindow):
                         "enabled": self.chk_ptd_enabled.isChecked(),
                         "edges": self._get_ptd_pairs_str(),
                         "seg_angle_deg": float(self.ptd_seg_angle.text() or '2.0'),
-                        "use_parallel_ptd": self.ptd_parallel.isChecked() if hasattr(self, 'ptd_parallel') else False
+                        "use_parallel_ptd": self.ptd_parallel.isChecked() if hasattr(self, 'ptd_parallel') else False,
+                        "algorithm": "ufimtsev_eew",  # GUI 默认走 EEW
                     }
                 },
                 "scan": {
@@ -1787,6 +1788,7 @@ class CEMPoQtWindow(QMainWindow):
                     'edges': ptd_edges_str,
                     'polarization': self.ptd_pol.currentText(),
                     'seg_angle_deg': float(self.ptd_seg_angle.text() or '2.0'),
+                    'algorithm': 'ufimtsev_eew',  # GUI 默认走 EEW
                 },
                 'compute': {
                     'gpu': self.use_gpu.isChecked(),
@@ -2278,6 +2280,7 @@ class CEMPoQtWindow(QMainWindow):
                     'edges':         ptd_edges_str,
                     'polarization':  self.ptd_pol.currentText(),
                     'seg_angle_deg': float(self.ptd_seg_angle.text() or '2.0'),
+                    'algorithm':     'ufimtsev_eew',  # GUI 默认走 EEW
                 },
                 'compute': {
                     'gpu':      self.use_gpu.isChecked(),
