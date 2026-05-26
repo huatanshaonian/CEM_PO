@@ -157,11 +157,15 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
         # 单站相位
         phase_mid = 2.0 * np.dot(seg.midpoint, k_vec)
 
-        # 传播因子：Ufimtsev EEW (Eq. 7.137)
-        # σ = (k²/π)|I_PO + I_edge|²
-        # J_PO=2n̂×H 的因子2 已吸收进 k²/π 系数，
-        # EEW 边缘积分与 PO 共享相同归一化，无需额外 /2
-        pre_factor = -1j * sin_gamma0 / k
+        # 传播因子：Ufimtsev EEW 线积分 (Eq. 7.136-7.137, p.239)
+        #   dE⁽¹⁾ = (dζ/2π)·𝓔⁽¹⁾·e^{ikR}/R，𝓔⁽¹⁾ = [E₀ₜF⃗ + Z₀H₀ₜG⃗]·e^{ikφᵢ}
+        # 前置因子只有 1/(2π)，原文无虚数单位 i。归一化到 σ=(k²/π)|I|²
+        # 给出实常数 1/k（I = (2π/k)·远场方向图，方向图 = (1/2π)∫𝓔dζ）。
+        # sin_gamma0 来自激励切向投影 E₀ₜ=sinγ₀cosχ、Z₀H₀ₜ=sinγ₀sinχ，
+        # 恰好抵消 F,G 内的 1/sinγ₀（Eq.7.148/7.151），故 sinγ₀·D ≡ 𝓔⁽¹⁾·ê_r。
+        # 注意：i / e^{±iπ/4} / √k 仅在驻相法射线渐近式 (Eq.8.37) 出现，
+        # 本路径是数值线积分（逐段 sinc），绝不能带这些射线相位因子。
+        pre_factor = sin_gamma0 / k
 
         seg_contrib = pre_factor * D * seg.length * sinc_val * np.exp(1j * phase_mid)
         total_contrib += seg_contrib
