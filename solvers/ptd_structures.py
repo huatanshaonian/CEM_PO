@@ -44,7 +44,8 @@ class PTDSegment:
     """
     描述 PTD 边缘的一个微小线段
     """
-    def __init__(self, start, end, normal=None, normal_b=None, alpha=None):
+    def __init__(self, start, end, normal=None, normal_b=None, alpha=None,
+                 inward=None):
         self.start = start
         self.end = end
         self.midpoint = (start + end) / 2.0
@@ -65,13 +66,23 @@ class PTDSegment:
         else:
             self.normal = None
 
-        # Face B 法向（用于消除 e2 = cross(t, n_lit) 的符号歧义）
+        # Face B 法向（旧 e2 翻转判据用，对 α=2π 刀刃边失效，保留作 fallback）
         if normal_b is not None:
             nb = np.array(normal_b)
             nb_norm = np.linalg.norm(nb)
             self.normal_b = nb / nb_norm if nb_norm > 1e-12 else None
         else:
             self.normal_b = None
+
+        # 由边指向 Face A 内部的单位向量（已投影到 ⊥t 截面）
+        # ptd_core 用此向量定 e2 朝向；对所有 α 都适用（刀刃边必需）
+        if inward is not None and self.length > 1e-12:
+            iw = np.array(inward, dtype=float)
+            iw = iw - np.dot(iw, self.tangent) * self.tangent
+            iw_len = np.linalg.norm(iw)
+            self.inward = iw / iw_len if iw_len > 1e-12 else None
+        else:
+            self.inward = None
 
 
 class PTDEdge:
@@ -81,6 +92,7 @@ class PTDEdge:
     def __init__(self, name, points, lit_face_normal,
                  exterior_angle_rad=None, wedge_angle_deg=90.0,
                  point_normals=None, point_normals_b=None,
+                 point_inwards=None,
                  max_segment_angle_deg=2.0):
         """
         参数:
@@ -91,6 +103,9 @@ class PTDEdge:
             wedge_angle_deg:      楔角内角（度），仅在 exterior_angle_rad=None 时使用
             point_normals:        numpy array (N, 3) 每个点对应的 face_a 法向（可选）
             point_normals_b:      numpy array (N, 3) 每个点对应的 face_b 法向（可选）
+            point_inwards:        numpy array (N, 3) 每个点 "由边指向 face_a 内部"
+                                   的单位向量（可选，但对 α=2π 刀刃边必需，
+                                   否则 ptd_core 无法定 e2 朝向）
             max_segment_angle_deg: 自适应分段的最大累积切线转角（度）
         """
         self.name = name
@@ -146,9 +161,15 @@ class PTDEdge:
                 else:
                     seg_alpha = self.alpha
 
+                if point_inwards is not None:
+                    iw_mean = (point_inwards[i] + point_inwards[i + 1]) / 2.0
+                else:
+                    iw_mean = None
+
                 seg = PTDSegment(pts[i], pts[i + 1], normal=na_seg,
                                  normal_b=nb_seg if point_normals_b is not None else None,
-                                 alpha=seg_alpha)
+                                 alpha=seg_alpha,
+                                 inward=iw_mean)
                 if seg.length > 1e-12:
                     self.segments.append(seg)
         else:

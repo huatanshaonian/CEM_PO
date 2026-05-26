@@ -64,10 +64,18 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
             continue
         e2 = e2_raw / e2_len
 
-        # 消除 e2 符号歧义（e2 应指向 Face A 表面、远离 Face B）
-        n_b = seg.normal_b if hasattr(seg, 'normal_b') else None
-        if n_b is not None and np.dot(e2, n_b) > 0:
-            e2 = -e2
+        # 消除 e2 符号歧义：e2 必须沿 Face A 表面、由边指向面内。
+        # 优先用几何 inward 方向（对 α=2π 刀刃边唯一可靠的判据）；
+        # 旧的 normal_b 判据保留为 fallback：α<2π 楔形有效，但 α=2π 时
+        # normal_b ⊥ e2 恒为 0，必须用 inward。
+        inward = getattr(seg, 'inward', None)
+        if inward is not None:
+            if np.dot(e2, inward) < 0:
+                e2 = -e2
+        else:
+            n_b = seg.normal_b if hasattr(seg, 'normal_b') else None
+            if n_b is not None and np.dot(e2, n_b) > 0:
+                e2 = -e2
 
         # ── 3. 计算入射方向在截面内的投影 → angle0 ──
         k_perp = k_dir - k_dot_t * t

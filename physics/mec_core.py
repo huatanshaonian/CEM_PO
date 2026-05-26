@@ -87,10 +87,17 @@ def compute_mec_contribution(edge, wave, polarization='VV'):
             continue
         x1 = x1 / x1_len
 
-        # 消除 x_1 符号歧义: x_1 应远离面 2 (即 x_1·n_b 应 ≤ 0)
-        n_b = seg.normal_b if hasattr(seg, 'normal_b') else None
-        if n_b is not None and float(np.dot(x1, n_b)) > 0:
-            x1 = -x1
+        # 消除 x_1 符号歧义。x_1 (= y1 × t) 必须沿 Face 1 表面、由边指向面内。
+        # 优先用几何 inward 方向（对 α=2π 刀刃边唯一可靠的判据，因 normal_b 与
+        # x_1 恒垂直）；旧 normal_b 判据保留作 fallback (α<2π 楔形有效)。
+        inward = getattr(seg, 'inward', None)
+        if inward is not None:
+            if float(np.dot(x1, inward)) < 0:
+                x1 = -x1
+        else:
+            n_b = seg.normal_b if hasattr(seg, 'normal_b') else None
+            if n_b is not None and float(np.dot(x1, n_b)) > 0:
+                x1 = -x1
 
         # ---- 3. β' 与 φ' (Michaeli Fig.1 坐标) ----
         # β' = 入射方向 ŝ' 与边切线 t 的空间夹角

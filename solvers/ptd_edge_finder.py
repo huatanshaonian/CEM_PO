@@ -78,7 +78,10 @@ def find_shared_edges(face_a, face_b, max_angle_deg=2.0, n_initial=100,
     返回:
         List[Tuple]:  每条共享边一个元组
             (edge_points (N,3), normals_a (N,3), normals_b (N,3),
-             exterior_angle_rad, warning_msg)
+             inwards_a (N,3), exterior_angle_rad, warning_msg)
+
+        inwards_a: face_a 上 "由边指向面内" 的单位向量；ptd_core 用来
+                   定楔形截面 e2 朝向（对 α=2π 刀刃边尤其关键）。
 
     异常:
         ValueError: 两面没有共享边
@@ -95,9 +98,9 @@ def find_shared_edges(face_a, face_b, max_angle_deg=2.0, n_initial=100,
         warning_msg = None
 
         for round_idx in range(4):
-            edge_pts, normals_a = _get_edge_points_and_normals(
+            edge_pts, normals_a, inwards_a = _get_edge_points_and_normals(
                 face_a, idx_a, n_pts)
-            _, normals_b = _get_edge_points_and_normals(
+            _, normals_b, _ = _get_edge_points_and_normals(
                 face_b, idx_b, n_pts)
 
             bp = _adaptive_breakpoints(edge_pts, max_angle_rad)
@@ -126,12 +129,13 @@ def find_shared_edges(face_a, face_b, max_angle_deg=2.0, n_initial=100,
         pts_sel = edge_pts[bp]
         na_sel  = normals_a[bp]
         nb_sel  = normals_b[bp]
+        in_sel  = inwards_a[bp]
 
         cos_vals = np.einsum('ij,ij->i', na_sel, nb_sel)
         cos_mean = float(np.clip(np.mean(cos_vals), -1.0, 1.0))
         exterior_angle = np.pi + np.arccos(cos_mean)
 
-        results.append((pts_sel, na_sel, nb_sel, exterior_angle, warning_msg))
+        results.append((pts_sel, na_sel, nb_sel, in_sel, exterior_angle, warning_msg))
 
     return results
 
@@ -223,6 +227,46 @@ def _eval_boundary_normals_at_t(face, idx, t_vals):
     return normals / norms
 
 
+def _eval_boundary_inwards_at_t(face, idx, t_vals):
+    """
+    给定 t 值，返回第 idx 条边界点的 "向面内" 单位向量 (N, 3)。
+
+    用有限差分 (略向参数域内偏移点 - 边界点) 得到，等价于 ±∂P/∂u 或 ±∂P/∂v。
+    这是 ptd_core 用来定 e2 朝向的关键量：必须从边指向 Face A 表面内部。
+    """
+    u0, u1 = face.u_domain
+    v0, v1 = face.v_domain
+    t = np.asarray(t_vals)
+
+    if idx == 0:
+        u_edge = np.full(len(t), u0)
+        v_edge = v0 + t * (v1 - v0)
+        u_in   = np.full(len(t), u0 + _NORMAL_OFFSET)
+        v_in   = v_edge
+    elif idx == 1:
+        u_edge = np.full(len(t), u1)
+        v_edge = v0 + t * (v1 - v0)
+        u_in   = np.full(len(t), u1 - _NORMAL_OFFSET)
+        v_in   = v_edge
+    elif idx == 2:
+        u_edge = u0 + t * (u1 - u0)
+        v_edge = np.full(len(t), v0)
+        u_in   = u_edge
+        v_in   = np.full(len(t), v0 + _NORMAL_OFFSET)
+    else:
+        u_edge = u0 + t * (u1 - u0)
+        v_edge = np.full(len(t), v1)
+        u_in   = u_edge
+        v_in   = np.full(len(t), v1 - _NORMAL_OFFSET)
+
+    p_edge = face.evaluate(u_edge, v_edge).reshape(len(t), 3)
+    p_in   = face.evaluate(u_in,   v_in  ).reshape(len(t), 3)
+    delta  = p_in - p_edge
+    dnorm  = np.linalg.norm(delta, axis=1, keepdims=True)
+    dnorm  = np.where(dnorm < 1e-12, 1.0, dnorm)
+    return delta / dnorm
+
+
 # ──────────────────────── 统一采样函数 ────────────────────────
 
 def _get_boundary_edge(face, idx, n_samples):
@@ -235,25 +279,36 @@ def _get_boundary_edge(face, idx, n_samples):
 
 def _get_edge_points_and_normals(face, idx, n_samples):
     """
-    获取 face 第 idx 条边的采样点和法向量，统一走 get_edge_by_index 路径。
-    返回 (points (N,3), normals (N,3))。
+    获取 face 第 idx 条边的采样点、法向量、面内方向。
+    返回 (points (N,3), normals (N,3), inwards (N,3))。
+
+    inwards: 从边界点指向面内的单位向量；ptd_core 用来定 e2 朝向。
+    若 face 提供 get_edge_by_index_with_normals 但无 inward，则 inward 用
+    参数化有限差分回退求出。
     """
+    t = np.linspace(0.0, 1.0, n_samples)
+
     if hasattr(face, 'get_edge_by_index_with_normals'):
         try:
-            return face.get_edge_by_index_with_normals(idx, n_samples=n_samples)
+            res = face.get_edge_by_index_with_normals(idx, n_samples=n_samples)
+            if len(res) >= 3:
+                return res[0], res[1], res[2]
+            pts, normals = res
+            inwards = _eval_boundary_inwards_at_t(face, idx, t)
+            return pts, normals, inwards
         except NotImplementedError:
             pass
 
     if hasattr(face, 'get_edge_by_index'):
         pts = face.get_edge_by_index(idx, n_samples=n_samples)
-        normals = _eval_boundary_normals_at_t(face, idx,
-                                              np.linspace(0.0, 1.0, n_samples))
-        return pts, normals
+        normals = _eval_boundary_normals_at_t(face, idx, t)
+        inwards = _eval_boundary_inwards_at_t(face, idx, t)
+        return pts, normals, inwards
 
-    t = np.linspace(0.0, 1.0, n_samples)
     pts = _eval_boundary_edge_at_t(face, idx, t)
     normals = _eval_boundary_normals_at_t(face, idx, t)
-    return pts, normals
+    inwards = _eval_boundary_inwards_at_t(face, idx, t)
+    return pts, normals, inwards
 
 
 

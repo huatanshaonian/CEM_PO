@@ -44,7 +44,7 @@ class PTDProcessor:
                     surfaces[a], surfaces[b], max_angle_deg=max_angle_deg
                 )
                 multi = len(edges_data) > 1
-                for k, (edge_pts, normals_a, normals_b, ext_angle, warn) in enumerate(edges_data):
+                for k, (edge_pts, normals_a, normals_b, inwards_a, ext_angle, warn) in enumerate(edges_data):
                     tag = f"({a},{b})#{k}" if multi else f"({a},{b})"
                     if warn and verbose:
                         print(f"  [PTD] 警告 面对 {tag}: {warn}")
@@ -56,6 +56,7 @@ class PTDProcessor:
                         exterior_angle_rad=ext_angle,
                         point_normals=normals_a,
                         point_normals_b=normals_b,
+                        point_inwards=inwards_a,
                     )
                     ptd_edges.append(edge)
                     if verbose:
