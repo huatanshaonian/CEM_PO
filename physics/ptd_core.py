@@ -41,15 +41,7 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
         t = seg.tangent
         n_lit = seg.normal if (seg.normal is not None) else edge.n_lit
 
-        # ── 1. 计算斜入射角 γ₀（入射方向与棱边的夹角）──
-        k_dot_t = np.dot(k_dir, t)
-        k_dot_t = np.clip(k_dot_t, -1.0, 1.0)
-        sin_gamma0 = np.sqrt(1.0 - k_dot_t ** 2)
-        if sin_gamma0 < 1e-3:
-            # 入射方向近乎平行棱边，PTD 无贡献
-            continue
-
-        # ── 2. 建立楔形截面局部坐标系（⊥ t 平面内）──
+        # ── 1. 建立楔形截面局部坐标系（⊥ t 平面内）──
         # 曲面棱边上 n_lit 可能有沿 t 的分量，必须投影到截面平面
         n_dot_t = np.dot(n_lit, t)
         e1_raw = n_lit - n_dot_t * t
@@ -77,8 +69,26 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
             if n_b is not None and np.dot(e2, n_b) > 0:
                 e2 = -e2
 
+        # ── 2. Ufimtsev 手性约定：ẑ = t̂ = r̂×φ̂ = e2×e1（对所有边右手系）──
+        # e2 因对齐 inward 可能翻号；t̂ 必须随之由 e2×e1 反求，否则翻号的边局部系
+        # 变左手、违反 r̂×φ̂=t̂。注意：共极化 D 对 t̂ 符号不变（cos²χ/sin²χ/sinχcosχ
+        # 在 χ→χ+π 下不变），故 φ=0 的 VV/HH 数值完全不受影响；本修正只让交叉极化 /
+        # 斜入射 / 双站里 G1_Vt 的 cos γ₀ 符号正确。
+        t_hat = np.cross(e2, e1)
+        t_len = np.linalg.norm(t_hat)
+        if t_len < 1e-10:
+            continue
+        t_hat = t_hat / t_len
+
+        # 斜入射角 γ₀ = ∠(k_dir, t̂) ∈ (0, π)，cos γ₀ = k_dir·t̂（带符号）
+        k_dot_t = float(np.clip(np.dot(k_dir, t_hat), -1.0, 1.0))
+        sin_gamma0 = np.sqrt(max(0.0, 1.0 - k_dot_t ** 2))
+        if sin_gamma0 < 1e-3:
+            # 入射方向近乎平行棱边，PTD 无贡献
+            continue
+
         # ── 3. 计算入射方向在截面内的投影 → angle0 ──
-        k_perp = k_dir - k_dot_t * t
+        k_perp = k_dir - k_dot_t * t_hat
         k_perp_len = np.linalg.norm(k_perp)
         if k_perp_len < 1e-10:
             continue
@@ -95,8 +105,8 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
         angle0 = np.clip(angle0_raw, 0.0, alfa)
 
         # ── 3b. 散射方向投影 → angle_obs ──
-        s_dot_t = np.dot(s_dir, t)
-        s_perp = s_dir - s_dot_t * t
+        s_dot_t = np.dot(s_dir, t_hat)
+        s_perp = s_dir - s_dot_t * t_hat
         s_perp_len = np.linalg.norm(s_perp)
         if s_perp_len < 1e-10:
             continue
@@ -111,7 +121,7 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
 
         # ── 4. Keller 锥局部基向量 ──
         # β̂ = ϑ̂_local: t̂ 在垂直于观测方向 ŝ 的平面上的投影（归一化）
-        beta_raw = t - np.dot(t, s_dir) * s_dir
+        beta_raw = t_hat - np.dot(t_hat, s_dir) * s_dir
         beta_len = np.linalg.norm(beta_raw)
         if beta_len < 1e-10:
             continue
@@ -124,7 +134,8 @@ def compute_ptd_contribution(edge, wave, polarization='VV'):
         sin_chi = np.dot(e_pol, alpha_hat)
 
         # ── 5. 计算 FG 衍射系数（含奇点处理）──
-        gamma0 = np.arcsin(sin_gamma0)
+        # γ₀ 用带符号 arccos(k·t̂) ∈ (0,π)：sin γ₀≥0 供分母，cos γ₀ 带符号供 G1_Vt
+        gamma0 = np.arccos(k_dot_t)
 
         psi1 = angle_obs - angle0
         psi2 = angle_obs + angle0
