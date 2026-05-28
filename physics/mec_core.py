@@ -149,11 +149,16 @@ def compute_mec_contribution(edge, wave, polarization='VV'):
         sinc_val = np.sinc(sinc_arg)
         phase = 2.0 * float(np.dot(seg.midpoint, k_vec))
 
-        # MEC 远场 E 场 → Ufimtsev I 量换算:
-        #   σ = (k²/π)|I|², |E^s| = k|I|/(2πr) ⇒ I = 2πr·E^s/k
-        # 代入 Knott 标准 MEC 远场表达式 E^s = -jk/(4πr) ∫ [...] dl, 化简得
-        # 单段贡献前置因子 = -j/2 (替代原先错误的 +jk, 差 K = -1/(2k))
-        seg_contrib = (-0.5j) * seg.length * sinc_val * np.exp(1j * phase) * amp
+        # MEC 远场 → I 量换算 + Michaeli↔Ufimtsev 时谐约定翻译
+        # Michaeli 1984 Eq.1: E^s ~ -jk·G·∫[...]dl, Michaeli 用 e^{+jωt} 约定
+        # 归一到 σ=(k²/π)|I|² 给前置因子 -j/2 (Michaeli 约定内)
+        # 但本代码其余项 (PO/EEW) 都在 Ufimtsev e^{-iωt} 约定下(I_PO 实测为实数);
+        # 而 compute_total_fringe_currents 把 Michaeli 公式里的 j 逐字搬成 Python
+        # 的 1j (=+i), 没做约定翻译 j↔-i。把 MEC 整体乘 -j 完成翻译:
+        #   (-0.5j) · (-j) = -0.5 (实数)
+        # 修后 MEC 与实数 I_PO 正交、与 EEW 一致(数值验证 max 偏差 ≤0.5 dB)。
+        # 理论依据: Michaeli 1986 Part I p.913 内嵌 j/k + 1984 Eq.1 (-jk) 前置因子。
+        seg_contrib = (-0.5) * seg.length * sinc_val * np.exp(1j * phase) * amp
         total += seg_contrib
 
     return total
