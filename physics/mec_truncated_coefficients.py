@@ -40,6 +40,7 @@ from .uniform_transition import modified_fresnel
 
 
 _DENOM_EPS = 1e-9    # 防 (μ+cosφ_0) → 0 数值除零 (Ufimtsev 奇点附近)
+_MU1_EPS = 1e-9      # 防 sqrt(1-μ) → 0 数值除零 (μ→1, 即 Keller 锥反射边界)
 
 
 def compute_correction_currents(beta_0, phi_0, beta, phi, l_A,
@@ -105,7 +106,12 @@ def compute_correction_currents(beta_0, phi_0, beta, phi, l_A,
     # F 的两个参量
     F1_arg = np.sqrt(2.0 * L) * abs_cos_half          # 实数 ≥ 0
     # √(1-μ): μ ≤ 1 时为实数, μ > 1 时纯虚 (Johansen 接 modified_fresnel 自动延拓)
+    # μ → 1 时分母 → 0; 此时 cos(φ_0/2) 项的系数 √2·cos(φ_0/2)/√(1-μ) 极限存在
+    # (Johansen §III.B), 但直接 floating-point 求值给 NaN. 用 ε-floor 防数值崩.
     one_minus_mu = 1.0 - mu
+    if abs(one_minus_mu) < _MU1_EPS:
+        # μ ≈ 1 (Keller 锥反射边界): 系数有限极限, 但数值上分母太小. 退回非截断.
+        return 0.0 + 0.0j, 0.0 + 0.0j
     sqrt_1mmu = np.lib.scimath.sqrt(one_minus_mu)    # 处理负数 → 纯虚
     F2_arg = np.lib.scimath.sqrt(L * one_minus_mu)
 
