@@ -3,6 +3,7 @@ import numpy as np
 from .ptd_structures import PTDEdge
 from .ptd_edge_finder import find_shared_edges
 from physics.ptd_algorithms import get_ptd_function, DEFAULT_PTD_ALGORITHM
+from physics.mec_truncated_geometry import compute_truncation_length
 
 
 class PTDProcessor:
@@ -65,6 +66,13 @@ class PTDProcessor:
             except Exception as e:
                 if verbose:
                     print(f"  [PTD] 面对 ({a},{b}) 边提取失败: {e}")
+
+        # 预计算 Johansen 截断 MEC 所需的 l_A (沿 inward 方向到 trailing edge 距离)
+        # β_0=π/2 简化下 l_A 与 k_dir 无关, 仅几何; 用 'michaeli_mec_truncated' 算法时必需,
+        # 其他算法无害 (只是多算一遍几何). 不存为属性会被截断 MEC 检测并退化到非截断.
+        for edge in ptd_edges:
+            for seg in edge.segments:
+                seg.l_A = compute_truncation_length(seg, None, ptd_edges)
 
         return ptd_edges
 

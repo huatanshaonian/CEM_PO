@@ -8,6 +8,7 @@ freq_sweep.py) 通过 get_ptd_function 获取具体计算函数。
 """
 from physics.ptd_core import compute_ptd_contribution
 from physics.mec_core import compute_mec_contribution
+from physics.mec_truncated_core import compute_mec_truncated_contribution
 
 PTD_ALGORITHMS = {
     'ufimtsev_eew': {
@@ -20,6 +21,13 @@ PTD_ALGORITHMS = {
         'name': 'Michaeli MEC (1986 Part I)',
         'func': compute_mec_contribution,
         'description': 'Ray-coordinate 等效边电流闭式, 全方位无奇异 (除 Ufimtsev 奇点)',
+        'supports_cross_pol': True,
+    },
+    'michaeli_mec_truncated': {
+        'name': 'Michaeli MEC + Johansen 1996 截断修正',
+        'func': compute_mec_truncated_contribution,
+        'description': '非截断 Michaeli MEC 减去 Johansen 1996 Eq.26/27 修正, '
+                       '消除 Ufimtsev 奇点 + 改进掠射区行为',
         'supports_cross_pol': True,
     },
 }
