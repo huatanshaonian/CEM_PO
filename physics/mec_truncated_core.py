@@ -19,7 +19,7 @@ import numpy as np
 
 from .constants import ETA0
 from .mec_coefficients import compute_total_fringe_currents
-from .mec_truncated_coefficients import compute_correction_currents
+from .mec_truncated_coefficients import compute_correction_currents_consistent
 
 
 # 发射/接收极化基向量名称映射 (与 mec_core 一致)
@@ -117,41 +117,41 @@ def compute_mec_truncated_contribution(edge, wave, polarization='VV'):
         E0z = complex(np.dot(e_t, t))
         H0z = complex(np.dot(H0_vec, t))
 
-        # ---- 4. Michaeli 非截断 EEC (现有实现, Michaeli 单站 Eq.26/27) ----
+        # ---- 4. Michaeli 非截断 EEC (Michaeli 1986 抄入, 不 conj) ----
+        # 与 mec_core 一致的"乘 j"翻译风格 (见 docs/MEC_PTD_THEORY.md §3.5/§6)
         If_UT, Mf_UT = compute_total_fringe_currents(
             beta_prime, phi_prime, N, E0z, H0z, k, Z)
 
-        # ---- 5. Johansen 截断修正 (Eq.26/27, 双站通式) ----
-        # 单站映射: beta_obs = π - β', phi_obs = φ' (mec_coefficients docstring 一致)
+        # ---- 5. Johansen 截断修正 (混合翻译: 相位指数翻, 代数 j 保留) ----
+        # 必须用 consistent 版本与 If_UT 同约定, 否则减法相位错 (见 §5)
         l_A = getattr(seg, 'l_A', None)
         if l_A is None or not np.isfinite(l_A) or l_A < 1e-12:
-            # 找不到 trailing edge 或零长度 → 退回非截断 (修正项=0)
             M_cor = 0.0 + 0.0j
             I_cor = 0.0 + 0.0j
         else:
             beta_obs = np.pi - beta_prime
             phi_obs = phi_prime
-            M_cor, I_cor = compute_correction_currents(
+            M_cor, I_cor = compute_correction_currents_consistent(
                 beta_prime, phi_prime, beta_obs, phi_obs, l_A,
                 E0z, H0z, k, Z)
 
-        # ---- 6. 截断 EEC = UT - cor ----
+        # ---- 6. 截断 EEC = UT - cor (同约定下的减法) ----
         If_T = If_UT - I_cor
         Mf_T = Mf_UT - M_cor
 
-        # ---- 7. 接收侧投影 (与 mec_core 一致) ----
+        # ---- 7. 接收侧投影 ----
         s_cross_t = np.cross(s_dir, t)
         proj_If = float(np.dot(t, e_r))
         proj_Mf = float(np.dot(s_cross_t, e_r))
 
         amp = -Z * If_T * proj_If + Mf_T * proj_Mf
 
-        # ---- 8. 段积分 + 累加 (与 mec_core 一致的相位约定 + 修正后前置因子) ----
+        # ---- 8. 段积分 + 累加 ----
         sinc_arg = k * seg.length * k_dot_t / np.pi
         sinc_val = np.sinc(sinc_arg)
         phase = 2.0 * float(np.dot(seg.midpoint, k_vec))
 
-        # 与 mec_core 同步: pre_factor = -0.5 (Michaeli↔Ufimtsev 时谐约定翻译, commit 6565600)
+        # pre_factor = -0.5: 与 mec_core (commit 6565600) "乘 j" 翻译同步
         seg_contrib = (-0.5) * seg.length * sinc_val * np.exp(1j * phase) * amp
         total += seg_contrib
 

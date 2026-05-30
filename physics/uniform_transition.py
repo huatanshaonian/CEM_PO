@@ -26,6 +26,35 @@ from scipy.special import erfc
 _ASYMPTOTIC_THRESHOLD = 10.0   # 仅 |x|>10 走渐近 (避免 scipy.erfc 复参数潜在数值噪声)
 
 
+def modified_fresnel_uf(x):
+    """
+    Ufimtsev 约定 (e^{-iωt}) 版本的改进 Fresnel 函数.
+
+    把原 Johansen/Michaeli 公式 F(x) = √(j/π) e^{jx²} ∫_x^∞ e^{-jt²} dt 中的 j 替换为 -i:
+        F_uf(x) = √(-i/π) e^{-i·x²} ∫_x^∞ e^{+i·t²} dt
+                = (1/2) · exp(-i·x²) · erfc(x · exp(-iπ/4))
+
+    实数参数下: F_uf(x) = conj(F(x))。
+
+    这是 mec_truncated_coefficients 用的版本; modified_fresnel (原版) 留作其他可能用途。
+    """
+    x_arr = np.asarray(x, dtype=complex)
+    abs_x = np.abs(x_arr)
+
+    sqrt_mjpi = np.sqrt(-1j * np.pi)   # √(-iπ)
+    rot = np.exp(-1j * np.pi / 4.0)
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        exact = 0.5 * np.exp(-1j * x_arr * x_arr) * erfc(x_arr * rot)
+        asymp = 1.0 / (2.0 * x_arr * sqrt_mjpi)
+
+    result = np.where(abs_x > _ASYMPTOTIC_THRESHOLD, asymp, exact)
+
+    if np.ndim(x) == 0:
+        return complex(result)
+    return result
+
+
 def modified_fresnel(x):
     """
     计算 Johansen / Michaeli 改进 Fresnel 函数 F(x).

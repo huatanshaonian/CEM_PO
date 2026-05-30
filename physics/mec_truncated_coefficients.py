@@ -36,7 +36,7 @@ Johansen 1996 Section III.B/IV-C 证明.
                     + √2·cos(φ_0/2)/√(1-μ)·(cotβ·cosφ-μ·cotβ_0)·F(√(L(1-μ))) }
 """
 import numpy as np
-from .uniform_transition import modified_fresnel
+from .uniform_transition import modified_fresnel, modified_fresnel_uf
 
 
 _DENOM_EPS = 1e-9    # 防 (μ+cosφ_0) → 0 数值除零 (Ufimtsev 奇点附近)
@@ -136,6 +136,176 @@ def compute_correction_currents(beta_0, phi_0, beta, phi, l_A,
 
     # ---- 8. I_cor (Eq.27) H_z0 项 ----
     # cot β = cosβ/sinβ; 这里 sin 已 >0 (前面检 sb0, sb), cosβ 可正可负
+    cot_b0 = np.cos(beta_0) / sb0
+    cot_b = np.cos(beta) / sb
+
+    coef1_H = -sign_cos_half * (cot_b0 * cos_phi0 + cot_b * cos_phi)
+    coef2_H = (np.sqrt(2.0) * cos_half / sqrt_1mmu) * (cot_b * cos_phi - mu * cot_b0)
+
+    I_H_pre = (4.0 * H0z * exp_factor) / (1j * k * sb0 * denom)
+    I_H_bracket = coef1_H * F1 + coef2_H * F2
+    I_H = I_H_pre * I_H_bracket
+
+    I_cor = I_E + I_H
+
+    return complex(M_cor), complex(I_cor)
+
+
+def compute_correction_currents_uf(beta_0, phi_0, beta, phi, l_A,
+                                    E0z, H0z, k, Z):
+    """
+    Johansen Eq.26/27 的 Ufimtsev e^{-iωt} 约定版本.
+
+    与 compute_correction_currents (Michaeli e^{+jωt} 原版) 区别:
+        1. 公式中所有显式 j → -i (代数项和相位项一致翻译)
+        2. modified_fresnel → modified_fresnel_uf
+
+    背景:
+        Johansen 1996 原文用 e^{+jωt}; 本仓库一阶 EEW/MEC 已统一到 e^{-iωt}.
+        简单的"对结果乘 j"翻译只对**代数 j 因子**正确, 对**相位指数**
+        (如 exp(jL(μ-1))) 会反号. 必须在公式层全替换才一致.
+
+    参数/返回与 compute_correction_currents 完全相同.
+    """
+    sb0 = np.sin(beta_0)
+    sb = np.sin(beta)
+    if abs(sb0) < 1e-12:
+        return 0.0 + 0.0j, 0.0 + 0.0j
+
+    cos_phi0 = np.cos(phi_0)
+    cos_phi = np.cos(phi)
+
+    mu = (sb * sb0 * cos_phi + np.cos(beta_0) * (np.cos(beta) - np.cos(beta_0))) / (sb0 * sb0)
+
+    denom = mu + cos_phi0
+    if abs(denom) < _DENOM_EPS:
+        return 0.0 + 0.0j, 0.0 + 0.0j
+
+    L = k * l_A * sb0 * sb0
+
+    cos_half = np.cos(phi_0 / 2.0)
+    abs_cos_half = abs(cos_half)
+    if cos_half > 0:
+        sign_cos_half = 1.0
+    elif cos_half < 0:
+        sign_cos_half = -1.0
+    else:
+        sign_cos_half = 0.0
+
+    F1_arg = np.sqrt(2.0 * L) * abs_cos_half
+    one_minus_mu = 1.0 - mu
+    if abs(one_minus_mu) < _MU1_EPS:
+        return 0.0 + 0.0j, 0.0 + 0.0j
+    sqrt_1mmu = np.lib.scimath.sqrt(one_minus_mu)
+    F2_arg = np.lib.scimath.sqrt(L * one_minus_mu)
+
+    # Ufimtsev 版 F: F_uf(x) = conj(F(x)) for real x
+    F1 = modified_fresnel_uf(F1_arg)
+    F2 = modified_fresnel_uf(F2_arg)
+
+    # 相位指数: j → -i  ⇒  exp(jL(μ-1)) → exp(-iL(μ-1))
+    exp_factor = np.exp(-1j * L * (mu - 1.0))
+
+    # M_cor (Eq.26):  分母里的 jk → -i·k
+    M_pre = (4.0 * Z * H0z * np.sin(phi) * exp_factor) / (-1j * k * sb * sb0 * denom)
+    M_bracket = (-sign_cos_half * F1
+                 + (np.sqrt(2.0) * cos_half / sqrt_1mmu) * F2)
+    M_cor = M_pre * M_bracket
+
+    # I_cor (Eq.27) E_z0 项
+    I_E_pre = (4.0 * E0z * np.sin(phi_0 / 2.0) * exp_factor) / (-1j * k * Z * sb0 * sb0 * denom)
+    I_E_bracket = (2.0 * cos_half * F1
+                   - np.lib.scimath.sqrt(2.0 * one_minus_mu) * F2)
+    I_E = I_E_pre * I_E_bracket
+
+    # I_cor (Eq.27) H_z0 项
+    cot_b0 = np.cos(beta_0) / sb0
+    cot_b = np.cos(beta) / sb
+
+    coef1_H = -sign_cos_half * (cot_b0 * cos_phi0 + cot_b * cos_phi)
+    coef2_H = (np.sqrt(2.0) * cos_half / sqrt_1mmu) * (cot_b * cos_phi - mu * cot_b0)
+
+    I_H_pre = (4.0 * H0z * exp_factor) / (-1j * k * sb0 * denom)
+    I_H_bracket = coef1_H * F1 + coef2_H * F2
+    I_H = I_H_pre * I_H_bracket
+
+    I_cor = I_E + I_H
+
+    return complex(M_cor), complex(I_cor)
+
+
+def compute_correction_currents_consistent(beta_0, phi_0, beta, phi, l_A,
+                                            E0z, H0z, k, Z):
+    """
+    Johansen Eq.26/27 半平面修正项 — 混合翻译 (推荐版本).
+
+    设计意图 (见 docs/MEC_PTD_THEORY.md §6):
+        与 mec_core 的"乘 j"翻译规则一致, 使 I_T = I_UT - I_cor 在
+        同一数值约定下做减法.
+
+    翻译规则:
+        - 相位指数翻译:
+            exp(+jL(μ-1)) → exp(-iL(μ-1))
+            F(z) → F_uf(z) (= conj(F) for real z)
+        - 代数 j 保留 (与 compute_total_fringe_currents 的 1j 因子同步):
+            分母 jk 写作 1j*k
+            其他单 j 因子保持
+
+    与 compute_correction_currents (Johansen 原文 e^{+jωt}) 区别仅在前两条;
+    与 compute_correction_currents_uf (整体共轭) 区别在保留代数 j 不翻.
+
+    参数/返回与 compute_correction_currents 完全相同.
+    """
+    sb0 = np.sin(beta_0)
+    sb = np.sin(beta)
+    if abs(sb0) < 1e-12:
+        return 0.0 + 0.0j, 0.0 + 0.0j
+
+    cos_phi0 = np.cos(phi_0)
+    cos_phi = np.cos(phi)
+
+    mu = (sb * sb0 * cos_phi + np.cos(beta_0) * (np.cos(beta) - np.cos(beta_0))) / (sb0 * sb0)
+
+    denom = mu + cos_phi0
+    if abs(denom) < _DENOM_EPS:
+        return 0.0 + 0.0j, 0.0 + 0.0j
+
+    L = k * l_A * sb0 * sb0
+
+    cos_half = np.cos(phi_0 / 2.0)
+    abs_cos_half = abs(cos_half)
+    if cos_half > 0:
+        sign_cos_half = 1.0
+    elif cos_half < 0:
+        sign_cos_half = -1.0
+    else:
+        sign_cos_half = 0.0
+
+    F1_arg = np.sqrt(2.0 * L) * abs_cos_half
+    one_minus_mu = 1.0 - mu
+    if abs(one_minus_mu) < _MU1_EPS:
+        return 0.0 + 0.0j, 0.0 + 0.0j
+    sqrt_1mmu = np.lib.scimath.sqrt(one_minus_mu)
+    F2_arg = np.lib.scimath.sqrt(L * one_minus_mu)
+
+    # ★ 相位项翻译: F → F_uf
+    F1 = modified_fresnel_uf(F1_arg)
+    F2 = modified_fresnel_uf(F2_arg)
+
+    # ★ 相位指数翻译: exp(+jL(μ-1)) → exp(-iL(μ-1))
+    exp_factor = np.exp(-1j * L * (mu - 1.0))
+
+    # ★ 代数 j 保留: 分母 1j*k (与 mec_coefficients 中 2j/k 同符号)
+    M_pre = (4.0 * Z * H0z * np.sin(phi) * exp_factor) / (1j * k * sb * sb0 * denom)
+    M_bracket = (-sign_cos_half * F1
+                 + (np.sqrt(2.0) * cos_half / sqrt_1mmu) * F2)
+    M_cor = M_pre * M_bracket
+
+    I_E_pre = (4.0 * E0z * np.sin(phi_0 / 2.0) * exp_factor) / (1j * k * Z * sb0 * sb0 * denom)
+    I_E_bracket = (2.0 * cos_half * F1
+                   - np.lib.scimath.sqrt(2.0 * one_minus_mu) * F2)
+    I_E = I_E_pre * I_E_bracket
+
     cot_b0 = np.cos(beta_0) / sb0
     cot_b = np.cos(beta) / sb
 
