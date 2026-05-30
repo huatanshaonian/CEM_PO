@@ -5,11 +5,19 @@
   VV (hard / H_z, 掠射绕射, 强 ~k⁻¹)   : 用全 GTD 系数 g(φ,0,α)         (Eq.10.40/10.34)
   HH (soft / E_z, 斜率绕射, 弱 ~(kR)⁻³ᐟ²): 用斜率系数 ∂f(φ,0,α)/∂φ₀       (Eq.10.41/10.35)
 
-复用一阶的截面坐标系 (e1,e2,angle0,angle_obs,γ₀) 与辐射归一化 (sinγ₀/k·L·sinc·相位)，
-故 3D "I" 量与一阶自洽，直接相加到 total_I_ptd。
+复用一阶的截面坐标系 (e1,e2,angle0,angle_obs,γ₀)；边 B 的再绕射复用一阶 EEW
+辐射算子 (-i/k)·(原始系数)，故 3D "I" 量与一阶相位自洽，可相干相加到 total_I_ptd。
 
-系数已对书闭式校验：g_full(0,φ₀)=−1/cos(φ₀/2)；∂f 积 = Eq.10.61；
-hard 2D 组装 = Eq.10.51（见 scratch 验证）。
+时谐约定：e^{-iωt}（出射 e^{+ikR}），与一阶 EEW / MEC 统一。
+
+校验现状（诚实标注）：
+  - 已校验：角度系数积 g(0,φ₀)·g(φ,0) → 1/cos²(φ₀/2)（Eq.10.51 角度部分,
+    见 scratch_so_kernel.py）。
+  - 未校验：3D 绝对归一化与 strip 极限 |I| 量级（Eq.10.51/10.61 全闭式含前因子的
+    数值匹配尚未做）。soft 支斜率绕射的方向因子 (1/sinβ₀、∂u^inc/∂n) 用 exc 近似,
+    定量精度未验证。
+  ⇒ 本模块为实验性, 未接入 ptd_algorithms 正式分发；hard 支相对一阶相位已修正,
+    soft 支幂次 (kR10)^{-3/2} 已修正, 但绝对量级仍需 strip 闭式标定后方可投产。
 
 接口：compute_second_order_contribution(edges, wave, polarization) -> complex
 默认仅 VV/HH（与 Ufimtsev EEW 一致；VH/HV 暂不支持）。
@@ -204,24 +212,39 @@ def compute_second_order_contribution(edges, wave, polarization='VV'):
                 else:
                     exc = float(np.dot(e_pol, t_a))
 
-                # 主波传播 A→B（射线渐近, 直边 ρ=∞ → 1/√(2πkR10)）
-                prim = (exc * pri_coeff
-                        * np.exp(1j * (k * R10) + 1j * np.pi / 4.0)
-                        / np.sqrt(2.0 * np.pi * k * R10))
+                # ---- 主波 A→B 射线渐近振幅 (直边 ρ→∞) ----
+                # Hard (掠射绕射, Ufimtsev GTD 2D / Eq.10.3): 振幅 ∝ (kR10)^{-1/2}
+                # Soft (斜率绕射, Eq.10.22): 振幅 ∝ (kR10)^{-3/2}, 含 1/(ik) 因子;
+                #   直边时扩散因子 √(2π(1+R10/ρ1)) → √(2π)。
+                # 两支都带传播相位 e^{i(kR10+π/4)} —— A→B 的 kR10 相位只在此处计一次
+                # (旧版在下方 phase 里又加了一遍 k·R10, 即 e^{2ikR10}, 是相位重复 bug)。
+                if hard:
+                    prim = (exc * pri_coeff
+                            * np.exp(1j * (k * R10 + np.pi / 4.0))
+                            / np.sqrt(2.0 * np.pi * k * R10))
+                else:
+                    prim = (exc * pri_coeff * (1.0 / (1j * k))
+                            * np.exp(1j * (k * R10 + np.pi / 4.0))
+                            / ((k * R10) ** 1.5 * np.sqrt(2.0 * np.pi)))
 
-                # 再绕射方向图 → 接收极化投影（co-pol）
+                # 再绕射方向图 → 接收极化投影 (co-pol)
                 proj = float(np.dot(e_pol, alpha_B)) if hard else float(np.dot(e_pol, beta_B))
-                directivity = prim * sec_coeff * proj
 
-                # 与一阶共享辐射归一化：sinγ₀/k · L · sinc · 相位
+                # 边 B 把入射其上的主波 prim 再绕射到观察者: 这一步本身是一次
+                # "一阶边缘辐射", 故复用一阶 EEW 辐射算子 = (-i/k)·(原始系数)。
+                # 推导: 一阶里 pre=-i·sinγ/k 与 D=系数/sinγ 的 sinγ 相消, 净 -i·系数/k;
+                # 此处 sec_coeff 为原始 g/∂f (未除 sinγ), 故直接乘 -i/k, 不含 sinγ。
+                # (旧版 pre=sin_gB/k 既丢了 -i (90° 相位, 破坏与一阶的相干叠加),
+                #  又混入了多余的 sinγ。)
+                pre = -1j / k
+                directivity = pre * sec_coeff * proj * prim
+
+                # 段长 sinc + 单站相位 (仅 入射→A 与 B→观察者; A→B 的 R10 相位已在 prim)
                 k_dot_tB = float(np.dot(k_dir, seg.tangent))
                 sinc_val = np.sinc(k * seg.length * k_dot_tB / np.pi)
-                # 双次路径单站相位：入射到A + A→B + B到观察者
                 phase = (k * float(np.dot(k_dir, a_pt))
-                         + k * R10
                          + k * float(np.dot(k_dir, seg.midpoint)))
-                pre = sin_gB / k
-                total += (pre * directivity * seg.length * sinc_val
+                total += (directivity * seg.length * sinc_val
                           * np.exp(1j * phase))
 
     return total
