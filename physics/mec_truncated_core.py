@@ -19,7 +19,7 @@ import numpy as np
 
 from .constants import ETA0
 from .mec_coefficients import compute_total_fringe_currents
-from .mec_truncated_coefficients import compute_correction_currents_consistent
+from .mec_truncated_coefficients import compute_correction_currents
 
 
 # 发射/接收极化基向量名称映射 (与 mec_core 一致)
@@ -117,13 +117,20 @@ def compute_mec_truncated_contribution(edge, wave, polarization='VV'):
         E0z = complex(np.dot(e_t, t))
         H0z = complex(np.dot(H0_vec, t))
 
-        # ---- 4. Michaeli 非截断 EEC (Michaeli 1986 抄入, 不 conj) ----
-        # 与 mec_core 一致的"乘 j"翻译风格 (见 docs/MEC_PTD_THEORY.md §3.5/§6)
-        If_UT, Mf_UT = compute_total_fringe_currents(
+        # ---- 4. Michaeli 非截断 EEC, 翻到 e^{-iωt} (整支 conj, 与 mec_core 一致) ----
+        # Michaeli 1986 闭式以 e^{+jωt} 写成; conj 即严格的 j→-i 约定翻译。
+        If_UT_m, Mf_UT_m = compute_total_fringe_currents(
             beta_prime, phi_prime, N, E0z, H0z, k, Z)
+        If_UT = np.conj(If_UT_m)
+        Mf_UT = np.conj(Mf_UT_m)
 
-        # ---- 5. Johansen 截断修正 (混合翻译: 相位指数翻, 代数 j 保留) ----
-        # 必须用 consistent 版本与 If_UT 同约定, 否则减法相位错 (见 §5)
+        # ---- 5. Johansen 截断修正, 同样整支 conj 翻到 e^{-iωt} ----
+        # 关键: I_UT 与 I_cor 必须用同一约定 + 同一复分支 (二者都用原始 Johansen
+        # e^{+jωt} 闭式再整支 conj)。这样 exp(±jL(μ-1))、F(z) 的相位指数 与
+        # sqrt(1-μ)/jk 的代数 j 在两侧用完全相同的 numpy 分支求值, 再被同一 conj
+        # 翻转, 故 Ufimtsev 奇点 (φ0→π, μ→1) 处两发散项精确抵消 (Johansen III.B)。
+        # (旧 _consistent 的"相位翻、代数 j 不翻"半翻译会与 conj(I_UT) 约定错位,
+        #  已被实测否决; 见 docs 修订。)
         l_A = getattr(seg, 'l_A', None)
         if l_A is None or not np.isfinite(l_A) or l_A < 1e-12:
             M_cor = 0.0 + 0.0j
@@ -131,9 +138,11 @@ def compute_mec_truncated_contribution(edge, wave, polarization='VV'):
         else:
             beta_obs = np.pi - beta_prime
             phi_obs = phi_prime
-            M_cor, I_cor = compute_correction_currents_consistent(
+            M_cor_m, I_cor_m = compute_correction_currents(
                 beta_prime, phi_prime, beta_obs, phi_obs, l_A,
                 E0z, H0z, k, Z)
+            M_cor = np.conj(M_cor_m)
+            I_cor = np.conj(I_cor_m)
 
         # ---- 6. 截断 EEC = UT - cor (同约定下的减法) ----
         If_T = If_UT - I_cor
@@ -151,8 +160,8 @@ def compute_mec_truncated_contribution(edge, wave, polarization='VV'):
         sinc_val = np.sinc(sinc_arg)
         phase = 2.0 * float(np.dot(seg.midpoint, k_vec))
 
-        # pre_factor = -0.5: 与 mec_core (commit 6565600) "乘 j" 翻译同步
-        seg_contrib = (-0.5) * seg.length * sinc_val * np.exp(1j * phase) * amp
+        # 装配前因子 +0.5: 与 mec_core 同 (conj 电流后的 Ufimtsev e^{-iωt} 约定)。
+        seg_contrib = (0.5) * seg.length * sinc_val * np.exp(1j * phase) * amp
         total += seg_contrib
 
     return total
