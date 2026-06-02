@@ -34,6 +34,7 @@ from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as Navigation
 from core.solver_bridge import SolverBridge
 from geometry.factory import GeometryFactory
 from solvers.api import AVAILABLE_ALGORITHMS
+from physics.ptd_algorithms import PTD_ALGORITHMS, DEFAULT_PTD_ALGORITHM
 from physics.analytical_rcs import get_analytical_solution
 from physics.analytical_rcs import get_analytical_solution, compute_error_stats
 
@@ -474,12 +475,28 @@ class CEMPoQtWindow(QMainWindow):
         )
         h_ptd_top.addWidget(self.chk_ptd_only)
         h_ptd_top.addStretch()
+        lbl_algo = QLabel("Algo:")
+        self.ptd_algo_combo = QComboBox()
+        for aid, meta in PTD_ALGORITHMS.items():
+            self.ptd_algo_combo.addItem(meta['name'], aid)
+            tip = meta.get('description', '')
+            if meta.get('supports_cross_pol'):
+                tip += '  [支持 VH/HV 交叉极化]'
+            self.ptd_algo_combo.setItemData(
+                self.ptd_algo_combo.count() - 1, tip, Qt.ToolTipRole)
+        idx = self.ptd_algo_combo.findData(DEFAULT_PTD_ALGORITHM)
+        if idx >= 0:
+            self.ptd_algo_combo.setCurrentIndex(idx)
+        self.ptd_algo_combo.setMinimumWidth(170)
+        h_ptd_top.addWidget(lbl_algo)
+        h_ptd_top.addWidget(self.ptd_algo_combo)
         lbl_pol = QLabel("Pol:")
         self.ptd_pol = QComboBox()
-        self.ptd_pol.addItems(["VV", "HH"])
         self.ptd_pol.setFixedWidth(55)
         h_ptd_top.addWidget(lbl_pol)
         h_ptd_top.addWidget(self.ptd_pol)
+        self.ptd_algo_combo.currentIndexChanged.connect(self._refresh_ptd_pol_options)
+        self._refresh_ptd_pol_options()
         l_ptd.addLayout(h_ptd_top)
 
         # Face pairs displayed as wrapping chips
@@ -885,7 +902,7 @@ class CEMPoQtWindow(QMainWindow):
                         "edges": self._get_ptd_pairs_str(),
                         "seg_angle_deg": float(self.ptd_seg_angle.text() or '2.0'),
                         "use_parallel_ptd": self.ptd_parallel.isChecked() if hasattr(self, 'ptd_parallel') else False,
-                        "algorithm": "ufimtsev_eew",  # GUI 默认走 EEW
+                        "algorithm": self.ptd_algo_combo.currentData(),
                     }
                 },
                 "scan": {
@@ -942,6 +959,23 @@ class CEMPoQtWindow(QMainWindow):
             if m:
                 pairs.add((int(m.group(1)), int(m.group(2))))
         return pairs
+
+    def _refresh_ptd_pol_options(self):
+        """根据当前 PTD 算法的 supports_cross_pol 刷新极化下拉。
+        切换时尽量保留旧选项；若旧选项不被新算法支持则回退到 VV。
+        """
+        algo_id = self.ptd_algo_combo.currentData()
+        meta = PTD_ALGORITHMS.get(algo_id, {})
+        supports_cross = bool(meta.get('supports_cross_pol', False))
+        items = ["VV", "HH", "VH", "HV"] if supports_cross else ["VV", "HH"]
+
+        prev = self.ptd_pol.currentText() if self.ptd_pol.count() > 0 else "VV"
+        self.ptd_pol.blockSignals(True)
+        self.ptd_pol.clear()
+        self.ptd_pol.addItems(items)
+        keep_idx = self.ptd_pol.findText(prev)
+        self.ptd_pol.setCurrentIndex(keep_idx if keep_idx >= 0 else 0)
+        self.ptd_pol.blockSignals(False)
 
     def _ptd_add_pairs(self, pairs):
         """将面对列表添加到 ptd_pairs_list，跳过重复项，返回新增数量。"""
@@ -1811,7 +1845,7 @@ class CEMPoQtWindow(QMainWindow):
                     'edges': ptd_edges_str,
                     'polarization': self.ptd_pol.currentText(),
                     'seg_angle_deg': float(self.ptd_seg_angle.text() or '2.0'),
-                    'algorithm': 'ufimtsev_eew',  # GUI 默认走 EEW
+                    'algorithm': self.ptd_algo_combo.currentData(),
                 },
                 'compute': {
                     'gpu': self.use_gpu.isChecked(),
@@ -2303,7 +2337,7 @@ class CEMPoQtWindow(QMainWindow):
                     'edges':         ptd_edges_str,
                     'polarization':  self.ptd_pol.currentText(),
                     'seg_angle_deg': float(self.ptd_seg_angle.text() or '2.0'),
-                    'algorithm':     'ufimtsev_eew',  # GUI 默认走 EEW
+                    'algorithm':     self.ptd_algo_combo.currentData(),
                 },
                 'compute': {
                     'gpu':      self.use_gpu.isChecked(),
