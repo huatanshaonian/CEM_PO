@@ -1,6 +1,7 @@
 import os
 import numpy as np
 from geometry.plate import AnalyticPlate, create_double_sided_plate
+from geometry.triangle import create_double_sided_triangle
 from geometry.sphere import AnalyticSphere
 from geometry.cylinder import AnalyticCylinder
 from geometry.occ_surface import OCCSurface
@@ -19,7 +20,7 @@ class GeometryFactory:
     def create_geometry(geo_type, params):
         """
         Args:
-            geo_type (str): 'Cylinder', 'Plate', 'Sphere', 'STEP File', 'Wedge', 'Brick', 'Infinite Wedge'
+            geo_type (str): 'Cylinder', 'Plate', 'Triangle', 'Sphere', 'STEP File', 'Wedge', 'Brick', 'Infinite Wedge'
             params (dict): 包含 radius, height, width 等参数
         Returns:
             list: Surface 对象列表
@@ -34,7 +35,14 @@ class GeometryFactory:
             l = float(params.get('length', 10.0))
             surfaces, ptd_id = create_double_sided_plate(w, l)
             return surfaces, ptd_id
-        
+
+        elif geo_type == "Triangle":
+            p1 = params.get('p1', [0.0, 0.0, 0.0])
+            p2 = params.get('p2', [1.0, 0.0, 0.0])
+            p3 = params.get('p3', [0.0, 1.0, 0.0])
+            surfaces, ptd_id = create_double_sided_triangle(p1, p2, p3)
+            return surfaces, ptd_id
+
         elif geo_type == "Sphere":
             r = float(params.get('radius', 1.0))
             return [AnalyticSphere(r)]

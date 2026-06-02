@@ -305,7 +305,7 @@ class CEMPoQtWindow(QMainWindow):
         group_geo = QGroupBox("Geometry Definition")
         l_geo = QFormLayout()
         self.geo_type_combo = QComboBox()
-        self.geo_type_combo.addItems(["Cylinder", "Plate", "Sphere", "Wedge", "Brick", "Infinite Wedge", "OCC Cylinder (NURBS)", "STEP File", "IGES File"])
+        self.geo_type_combo.addItems(["Cylinder", "Plate", "Triangle", "Sphere", "Wedge", "Brick", "Infinite Wedge", "OCC Cylinder (NURBS)", "STEP File", "IGES File"])
         self.geo_type_combo.currentTextChanged.connect(self.update_geo_inputs)
         l_geo.addRow("Type:", self.geo_type_combo)
         
@@ -739,7 +739,7 @@ class CEMPoQtWindow(QMainWindow):
         # Colorbar manual range (2D heatmap)
         h_cbar = QHBoxLayout()
         self.chk_cbar_manual = QCheckBox("Colorbar:")
-        self.chk_cbar_manual.setToolTip("勾选后使用手动设置的 colorbar 范围")
+        self.chk_cbar_manual.setToolTip("勾选后使用手动范围：2D 热图 colorbar / 1D 线图纵轴 (dBsm)")
         self.chk_cbar_manual.stateChanged.connect(self._comp_mgr.update_comparison_plot)
         h_cbar.addWidget(self.chk_cbar_manual)
         self.cbar_vmin = QLineEdit("-40")
@@ -1162,6 +1162,12 @@ class CEMPoQtWindow(QMainWindow):
         elif gtype == "Plate":
             self.add_input("Width (m):", "5.0", "width")
             self.add_input("Length (m):", "10.0", "length")
+        elif gtype == "Triangle":
+            # 三角形薄板：三个顶点坐标，每个 QLineEdit 接 "x, y, z"。
+            # 顶点顺序 (p1→p2→p3) 决定顶面法向（右手定则）。
+            self.add_input("Vertex P1 (x,y,z):", "0.0, 0.0, 0.0", "p1")
+            self.add_input("Vertex P2 (x,y,z):", "0.5, 0.0, 0.0", "p2")
+            self.add_input("Vertex P3 (x,y,z):", "0.0, 0.5, 0.0", "p3")
         elif gtype == "Sphere":
             self.add_input("Radius (m):", "1.0", "radius")
         elif gtype == "Wedge" or gtype == "Brick":
@@ -1346,6 +1352,17 @@ class CEMPoQtWindow(QMainWindow):
         params = {}
         for k, v in self.geo_inputs.items():
             params[k] = v.text()
+        if self.geo_type_combo.currentText() == "Triangle":
+            # 把 "x, y, z" 字符串解析成 [x, y, z]，factory 直接消费
+            for key in ('p1', 'p2', 'p3'):
+                text = params.get(key, '')
+                try:
+                    parts = [float(s.strip()) for s in text.split(',') if s.strip()]
+                    if len(parts) != 3:
+                        raise ValueError(f"{key} 需要 3 个分量，收到 {len(parts)}")
+                    params[key] = parts
+                except ValueError as e:
+                    raise ValueError(f"Triangle vertex {key} 解析失败 ({text!r}): {e}")
         if self.geo_type_combo.currentText() == "STEP File":
             params['file_path'] = self.step_file_path
             params['unit'] = self.step_unit_combo.currentText()
