@@ -68,6 +68,45 @@ class AnalyticTriangle(Surface):
                                    np.asarray(v, dtype=float))
         return u * self._jac_const
 
+    def tessellate(self, resolution=30):
+        """
+        生成预览用的 barycentric 三角网格 (points, faces)，PyVista 格式。
+
+        关键约定：把 (p1, p2, p3) 三个物理顶点按字典序排序后再做细分，
+        这样 create_double_sided_triangle 里顶面 (p1,p2,p3) 和底面
+        (p1,p3,p2) 输出的 (points, faces) 完全相同 → GUI 预览叠加后不会
+        看到两套方向不一致的对角线（用户先前观察到的"全三角形"现象）。
+
+        细分: 沿 a→b 和 a→c 各 resolution 段，每行 N-i 个梯形再切成
+        2 个三角形（最末层 1 个三角形），共 resolution^2 个 face。
+        """
+        verts = sorted([tuple(self.p1), tuple(self.p2), tuple(self.p3)])
+        a = np.asarray(verts[0])
+        b = np.asarray(verts[1])
+        c = np.asarray(verts[2])
+        N = max(1, int(resolution))
+
+        # barycentric 节点 P(i,j) = a + (i/N)·(b-a) + (j/N)·(c-a), i+j <= N
+        coords = []
+        index = {}
+        for i in range(N + 1):
+            for j in range(N + 1 - i):
+                index[(i, j)] = len(coords)
+                coords.append(a + (i / N) * (b - a) + (j / N) * (c - a))
+        points = np.array(coords)
+
+        faces = []
+        for i in range(N):
+            for j in range(N - i):
+                v00 = index[(i, j)]
+                v10 = index[(i + 1, j)]
+                v01 = index[(i, j + 1)]
+                faces.extend([3, v00, v10, v01])
+                if (i + 1, j + 1) in index:
+                    v11 = index[(i + 1, j + 1)]
+                    faces.extend([3, v10, v11, v01])
+        return points, np.array(faces)
+
     def get_edge_by_index(self, index, n_samples=2):
         """
         三角形物理边采样点。返回 (n_samples, 3)。

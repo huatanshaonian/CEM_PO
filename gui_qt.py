@@ -1413,7 +1413,13 @@ class CEMPoQtWindow(QMainWindow):
         """
         Generate visualization mesh for any Surface object by sampling its UV domain.
         Returns: (points, faces) where faces are formatted for PyVista [3, i, j, k, ...]
+
+        若 surface 自带 tessellate(resolution)，优先使用；让双面薄板 (如三角形)
+        的顶/底面 tessellation 物理对齐，预览不会因为对角线方向不一致而看起来杂乱。
         """
+        if hasattr(surface, 'tessellate'):
+            return surface.tessellate(resolution)
+
         u_min, u_max = surface.u_domain
         v_min, v_max = surface.v_domain
         

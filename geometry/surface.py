@@ -97,3 +97,10 @@ class TransformedSurface(Surface):
             pts_local, normals_local = self.base.get_edge_by_index_with_normals(index, n_samples)
             return np.dot(pts_local, self.R.T) + self.T, np.dot(normals_local, self.R.T)
         raise NotImplementedError("Base surface does not support edge extraction with normals")
+
+    def tessellate(self, resolution=30):
+        if not hasattr(self.base, 'tessellate'):
+            raise NotImplementedError("Base surface does not support tessellate")
+        pts_local, faces = self.base.tessellate(resolution)
+        pts_global = np.dot(pts_local, self.R.T) + self.T
+        return pts_global, faces
