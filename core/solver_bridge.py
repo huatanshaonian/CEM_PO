@@ -57,6 +57,7 @@ class SolverBridge:
             ptd_pol = ptd_params.get('polarization', 'VV')
             ptd_seg_angle = ptd_params.get('seg_angle_deg', 2.0)
             ptd_algorithm = ptd_params.get('algorithm', 'ufimtsev_eew')
+            ptd_max_seg_lambda = ptd_params.get('max_seg_lambda', None)
 
             theta_start = angle_params.get('theta_start', -90)
             theta_end = angle_params.get('theta_end', 90)
@@ -105,7 +106,8 @@ class SolverBridge:
                     gpu=use_gpu, use_degenerate_mesh=use_degen,
                     ptd_seg_angle_deg=ptd_seg_angle,
                     abort_event=abort_event, ptd_only=ptd_only,
-                    ptd_algorithm=ptd_algorithm
+                    ptd_algorithm=ptd_algorithm,
+                    ptd_max_seg_lambda=ptd_max_seg_lambda,
                 )
 
                 # 结果标准化
@@ -142,7 +144,8 @@ class SolverBridge:
                     gpu=use_gpu, use_degenerate_mesh=use_degen,
                     ptd_seg_angle_deg=ptd_seg_angle,
                     abort_event=abort_event, ptd_only=ptd_only,
-                    ptd_algorithm=ptd_algorithm
+                    ptd_algorithm=ptd_algorithm,
+                    ptd_max_seg_lambda=ptd_max_seg_lambda,
                 )
 
                 if isinstance(rcs_result_raw, dict):
@@ -179,7 +182,8 @@ class SolverBridge:
                     gpu=use_gpu, use_degenerate_mesh=use_degen,
                     ptd_seg_angle_deg=ptd_seg_angle,
                     abort_event=abort_event, ptd_only=ptd_only,
-                    ptd_algorithm=ptd_algorithm
+                    ptd_algorithm=ptd_algorithm,
+                    ptd_max_seg_lambda=ptd_max_seg_lambda,
                 )
 
                 if isinstance(rcs_result_raw, dict):
@@ -324,6 +328,7 @@ class SolverBridge:
             ptd_edges_str = ptd_params.get('edges', '')
             ptd_seg_angle = ptd_params.get('seg_angle_deg', 2.0)
             ptd_algorithm = ptd_params.get('algorithm', 'ufimtsev_eew')
+            ptd_max_seg_lambda = ptd_params.get('max_seg_lambda', None)
 
             # sinc 模式从算法注册表读取
             sinc_mode = AVAILABLE_ALGORITHMS.get(algo_id, {}).get('kwargs', {}).get('sinc_mode', 'none')
@@ -359,8 +364,13 @@ class SolverBridge:
             if enable_ptd and ptd_edges_str:
                 from solvers.ptd import PTDProcessor
                 try:
+                    # 频扫: 用最高频对应 λ_min 算 max_seg_length, 保守上限
+                    max_seg_length = None
+                    if ptd_max_seg_lambda is not None and ptd_max_seg_lambda > 0:
+                        max_seg_length = float(ptd_max_seg_lambda) * (C0 / f_max)
                     ptd_edges = PTDProcessor.extract_edges_from_face_pairs(
-                        surfaces, ptd_edges_str, max_angle_deg=ptd_seg_angle
+                        surfaces, ptd_edges_str, max_angle_deg=ptd_seg_angle,
+                        max_seg_length=max_seg_length,
                     )
                     print(f"  [PTD] 已提取 {len(ptd_edges)} 条边缘 (频扫)")
                 except Exception as e:

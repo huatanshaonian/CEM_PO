@@ -128,6 +128,48 @@ class AnalyticTriangle(Surface):
             raise IndexError(f"Triangle edge index {index} out of range (0-2)")
         return self.evaluate(u_vals, v_vals)
 
+    def get_edge_by_index_with_normals(self, index, n_samples=40):
+        """
+        返回 (pts, normals, inwards) 三元组, 让 ptd_edge_finder 拿到正确的
+        inward (在面内 ⊥ 边切线, 指向三角形重心), 绕开默认 _eval_boundary_inwards_at_t
+        基于矩形参数空间的兜底 (那条路径对 Duffy 三角形的边索引不对应, 会给出
+        奇异 / 错误方向的 inward, 是 l_A ray-cast 失败 / ±θ 不对称的根因).
+
+        三条物理边索引与 get_edge_by_index 完全一致 (0/1/2 = p1->p2, p2->p3, p3->p1).
+        """
+        if index == 0:
+            P_start, P_end = self.p1, self.p2
+        elif index == 1:
+            P_start, P_end = self.p2, self.p3
+        elif index == 2:
+            P_start, P_end = self.p3, self.p1
+        else:
+            raise IndexError(f"Triangle edge index {index} out of range (0-2)")
+
+        pts = np.linspace(P_start, P_end, n_samples)
+        normals = np.tile(self._n_const, (n_samples, 1))
+
+        # inward: 面内 ⊥ 边切线, 指向重心
+        t_vec = P_end - P_start
+        t_len = np.linalg.norm(t_vec)
+        if t_len < 1e-12:
+            inward_unit = np.zeros(3)
+        else:
+            t_hat = t_vec / t_len
+            inward_raw = np.cross(self._n_const, t_hat)
+            inward_len = np.linalg.norm(inward_raw)
+            if inward_len < 1e-12:
+                inward_unit = np.zeros(3)
+            else:
+                inward_unit = inward_raw / inward_len
+                centroid = (self.p1 + self.p2 + self.p3) / 3.0
+                midpoint = 0.5 * (P_start + P_end)
+                if np.dot(inward_unit, centroid - midpoint) < 0:
+                    inward_unit = -inward_unit
+        inwards = np.tile(inward_unit, (n_samples, 1))
+
+        return pts, normals, inwards
+
 
 def create_double_sided_triangle(p1, p2, p3):
     """

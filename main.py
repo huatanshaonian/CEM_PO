@@ -118,7 +118,8 @@ def build_sim_params(task_cfg, global_overrides):
             'polarization': polarization, # Sync with solver level
             'seg_angle_deg': ptd_cfg.get('seg_angle_deg', 2.0),
             'use_parallel_ptd': ptd_cfg.get('use_parallel_ptd', False),
-            'algorithm': ptd_cfg.get('algorithm', 'ufimtsev_eew')
+            'algorithm': ptd_cfg.get('algorithm', 'ufimtsev_eew'),
+            'max_seg_lambda': ptd_cfg.get('max_seg_lambda', None),
         },
         'compute': {
             'gpu': use_gpu,

@@ -47,7 +47,8 @@ class RCSAnalyzer:
                           enable_ptd, ptd_edge_identifiers,
                           cached_mesh_data, gpu, use_degenerate_mesh,
                           show_progress, progress_callback, total_points,
-                          ptd_seg_angle_deg=2.0, ptd_only=False):
+                          ptd_seg_angle_deg=2.0, ptd_only=False,
+                          ptd_max_seg_lambda=None):
         """共同前置逻辑：GPU检查、曲面归一化、PTD提取、网格预计算、GPU迁移。
 
         Returns (geometry_data, is_cached, ptd_edges, k_mag, gpu)
@@ -61,9 +62,15 @@ class RCSAnalyzer:
         ptd_edges = []
         if enable_ptd and ptd_edge_identifiers:
             try:
+                # 计算物理段长上限: ptd_max_seg_lambda 是 λ 的倍数 (如 0.125 = λ/8)
+                max_seg_length = None
+                if ptd_max_seg_lambda is not None and ptd_max_seg_lambda > 0:
+                    wavelength = C0 / frequency
+                    max_seg_length = float(ptd_max_seg_lambda) * wavelength
                 ptd_edges = PTDProcessor.extract_edges_from_face_pairs(
                     surfaces, ptd_edge_identifiers,
-                    max_angle_deg=ptd_seg_angle_deg
+                    max_angle_deg=ptd_seg_angle_deg,
+                    max_seg_length=max_seg_length,
                 )
                 if show_progress:
                     print(f"  [PTD] 已提取 {len(ptd_edges)} 条边缘")
@@ -170,7 +177,8 @@ class RCSAnalyzer:
                                gpu=False, use_degenerate_mesh=False,
                                ptd_seg_angle_deg=2.0,
                                abort_event=None, ptd_only=False,
-                               ptd_algorithm='ufimtsev_eew'):
+                               ptd_algorithm='ufimtsev_eew',
+                               ptd_max_seg_lambda=None):
 
         frequency = wave_params['frequency']
         n_angles = len(angles)
@@ -180,7 +188,8 @@ class RCSAnalyzer:
             enable_ptd, ptd_edge_identifiers,
             cached_mesh_data, gpu, use_degenerate_mesh,
             show_progress, progress_callback, n_angles,
-            ptd_seg_angle_deg=ptd_seg_angle_deg, ptd_only=ptd_only
+            ptd_seg_angle_deg=ptd_seg_angle_deg, ptd_only=ptd_only,
+            ptd_max_seg_lambda=ptd_max_seg_lambda,
         )
 
         info_msg = (f"计算参数: {len(geometry_data) if isinstance(geometry_data, list) else 1} 个曲面, "
@@ -390,7 +399,8 @@ class RCSAnalyzer:
                                    gpu=False, use_degenerate_mesh=False,
                                    ptd_seg_angle_deg=2.0,
                                    abort_event=None, ptd_only=False,
-                                   ptd_algorithm='ufimtsev_eew'):
+                                   ptd_algorithm='ufimtsev_eew',
+                                   ptd_max_seg_lambda=None):
 
         n_theta = len(theta_array)
         n_phi = len(phi_array)
@@ -401,7 +411,8 @@ class RCSAnalyzer:
             enable_ptd, ptd_edge_identifiers,
             cached_mesh_data, gpu, use_degenerate_mesh,
             show_progress, progress_callback, total_points,
-            ptd_seg_angle_deg=ptd_seg_angle_deg, ptd_only=ptd_only
+            ptd_seg_angle_deg=ptd_seg_angle_deg, ptd_only=ptd_only,
+            ptd_max_seg_lambda=ptd_max_seg_lambda,
         )
 
         info_msg = (f"2D扫描: {len(geometry_data) if isinstance(geometry_data, list) else 1} 个曲面, "
