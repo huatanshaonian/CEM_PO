@@ -54,6 +54,27 @@ class Surface(ABC):
         return points, normals, jacobians
 
 
+def _uv_grid_tessellate(surface, resolution=30):
+    u_min, u_max = surface.u_domain
+    v_min, v_max = surface.v_domain
+    u = np.linspace(u_min, u_max, resolution)
+    v = np.linspace(v_min, v_max, resolution)
+    ug, vg = np.meshgrid(u, v)
+    pts_grid = surface.evaluate(ug, vg)
+    rows, cols, _ = pts_grid.shape
+    pts = pts_grid.reshape(-1, 3)
+    faces = []
+    for i in range(rows - 1):
+        for j in range(cols - 1):
+            idx0 = i * cols + j
+            idx1 = i * cols + (j + 1)
+            idx2 = (i + 1) * cols + (j + 1)
+            idx3 = (i + 1) * cols + j
+            faces.extend([3, idx0, idx1, idx3])
+            faces.extend([3, idx1, idx2, idx3])
+    return pts, np.array(faces)
+
+
 class TransformedSurface(Surface):
     """
     对基础曲面进行旋转和平移
@@ -108,8 +129,9 @@ class TransformedSurface(Surface):
         raise NotImplementedError("Base surface does not support edge extraction with normals")
 
     def tessellate(self, resolution=30):
-        if not hasattr(self.base, 'tessellate'):
-            raise NotImplementedError("Base surface does not support tessellate")
-        pts_local, faces = self.base.tessellate(resolution)
+        if hasattr(self.base, 'tessellate'):
+            pts_local, faces = self.base.tessellate(resolution)
+        else:
+            pts_local, faces = _uv_grid_tessellate(self.base, resolution)
         pts_global = np.dot(pts_local, self.R.T) + self.T
         return pts_global, faces
