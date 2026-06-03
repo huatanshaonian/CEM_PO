@@ -9,6 +9,7 @@ freq_sweep.py) 通过 get_ptd_function 获取具体计算函数。
 from physics.ptd_core import compute_ptd_contribution
 from physics.mec_core import compute_mec_contribution
 from physics.mec_truncated_core import compute_mec_truncated_contribution
+from physics.michaeli_so_1987_core import compute_michaeli_so_1987_contribution
 
 PTD_ALGORITHMS = {
     'ufimtsev_eew': {
@@ -29,6 +30,13 @@ PTD_ALGORITHMS = {
         'description': '非截断 Michaeli MEC 减去 Johansen 1996 Eq.26/27 修正, '
                        '消除 Ufimtsev 奇点 + 改进掠射区行为',
         'supports_cross_pol': True,
+    },
+    'michaeli_so_1987': {
+        'name': 'Michaeli 二阶 EEC (1987, N=2 平板)',
+        'func': compute_michaeli_so_1987_contribution,
+        'description': '边对相互作用二阶 EEC (Eq.21+12, N=2 薄板), 端点贡献闭式, '
+                       'beta_0=pi/2 简化几何; 骨架版未做绝对归一化校准',
+        'supports_cross_pol': False,
     },
 }
 

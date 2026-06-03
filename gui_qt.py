@@ -463,6 +463,7 @@ class CEMPoQtWindow(QMainWindow):
         l_ptd.setSpacing(4)
         l_ptd.setContentsMargins(6, 4, 6, 4)
 
+        # 第 1 行: Enable/PTD Only + Pol (紧凑)
         h_ptd_top = QHBoxLayout()
         self.chk_ptd_enabled = QCheckBox("Enable PTD")
         self.chk_ptd_enabled.setChecked(False)
@@ -475,7 +476,16 @@ class CEMPoQtWindow(QMainWindow):
         )
         h_ptd_top.addWidget(self.chk_ptd_only)
         h_ptd_top.addStretch()
-        lbl_algo = QLabel("Algo:")
+        lbl_pol = QLabel("Pol:")
+        self.ptd_pol = QComboBox()
+        self.ptd_pol.setFixedWidth(55)
+        h_ptd_top.addWidget(lbl_pol)
+        h_ptd_top.addWidget(self.ptd_pol)
+        l_ptd.addLayout(h_ptd_top)
+
+        # 第 2 行: PTD 算法选择 + 边缘细分参数 (单独一行避免拥挤)
+        h_ptd_algo = QHBoxLayout()
+        h_ptd_algo.addWidget(QLabel("Algo:"))
         self.ptd_algo_combo = QComboBox()
         for aid, meta in PTD_ALGORITHMS.items():
             self.ptd_algo_combo.addItem(meta['name'], aid)
@@ -487,17 +497,26 @@ class CEMPoQtWindow(QMainWindow):
         idx = self.ptd_algo_combo.findData(DEFAULT_PTD_ALGORITHM)
         if idx >= 0:
             self.ptd_algo_combo.setCurrentIndex(idx)
-        self.ptd_algo_combo.setMinimumWidth(170)
-        h_ptd_top.addWidget(lbl_algo)
-        h_ptd_top.addWidget(self.ptd_algo_combo)
-        lbl_pol = QLabel("Pol:")
-        self.ptd_pol = QComboBox()
-        self.ptd_pol.setFixedWidth(55)
-        h_ptd_top.addWidget(lbl_pol)
-        h_ptd_top.addWidget(self.ptd_pol)
+        self.ptd_algo_combo.setMinimumWidth(220)
+        h_ptd_algo.addWidget(self.ptd_algo_combo, 1)
+        # 边缘按 lambda/N 强制细分 (λ/8 推荐). 空 = 不细分.
+        h_ptd_algo.addSpacing(8)
+        self.chk_edge_refine = QCheckBox("Refine λ/")
+        self.chk_edge_refine.setChecked(False)
+        self.chk_edge_refine.setToolTip(
+            "勾选后, PTD 边缘按 λ/N 段长强制细分.\n"
+            "对 l_A 沿边大幅变化的非对称几何 (如三角形 trailing edge) 能改善\n"
+            "Johansen truncated MEC 的精度. 空 / 未勾 = 不细分, 直边仅 1 段."
+        )
+        h_ptd_algo.addWidget(self.chk_edge_refine)
+        self.ptd_seg_lambda_n = QLineEdit("8")
+        self.ptd_seg_lambda_n.setFixedWidth(40)
+        self.ptd_seg_lambda_n.setToolTip("段长 = λ/N, 此处填 N (推荐 8 或 16)")
+        h_ptd_algo.addWidget(self.ptd_seg_lambda_n)
+        l_ptd.addLayout(h_ptd_algo)
+
         self.ptd_algo_combo.currentIndexChanged.connect(self._refresh_ptd_pol_options)
         self._refresh_ptd_pol_options()
-        l_ptd.addLayout(h_ptd_top)
 
         # Face pairs displayed as wrapping chips
         self.ptd_pairs_list = QListWidget()
@@ -879,11 +898,25 @@ class CEMPoQtWindow(QMainWindow):
         try:
             gtype = self.geo_type_combo.currentText()
             geo_params = self.get_geo_params()
-            
+
+            po_algo_id  = self.algo_combo.currentData() or 'po'
+            ptd_algo_id = self.ptd_algo_combo.currentData() or 'noptd'
+            pol_str     = self.ptd_pol.currentText()
+            ptd_on      = self.chk_ptd_enabled.isChecked()
+            # task name 含算法标识, 多次导出不覆盖文件名; 主程序 filename_format
+            # 默认是 "{task_name}", 所以这个 name 直接进 csv/png 文件名.
+            algo_tag = po_algo_id.replace('discrete_po_', 'po-')
+            if ptd_on:
+                algo_tag += f"+{ptd_algo_id}"
+            task_name = f"{gtype}_{algo_tag}_{pol_str}_{time.strftime('%H%M%S')}"
+
             # Construct standard task structure
             task = {
-                "name": f"Exported_{gtype}_{time.strftime('%H%M%S')}",
-                "description": f"Generated from GUI at {time.ctime()}",
+                "name": task_name,
+                "description": (f"GUI export {time.ctime()} | "
+                                f"PO={po_algo_id} | "
+                                f"PTD={'on:'+ptd_algo_id if ptd_on else 'off'} | "
+                                f"pol={pol_str} | geo={gtype}"),
                 "geometry": {
                     "type": gtype,
                     "params": geo_params
@@ -903,6 +936,7 @@ class CEMPoQtWindow(QMainWindow):
                         "seg_angle_deg": float(self.ptd_seg_angle.text() or '2.0'),
                         "use_parallel_ptd": self.ptd_parallel.isChecked() if hasattr(self, 'ptd_parallel') else False,
                         "algorithm": self.ptd_algo_combo.currentData(),
+                        "max_seg_lambda": self._read_max_seg_lambda(),
                     }
                 },
                 "scan": {
@@ -959,6 +993,18 @@ class CEMPoQtWindow(QMainWindow):
             if m:
                 pairs.add((int(m.group(1)), int(m.group(2))))
         return pairs
+
+    def _read_max_seg_lambda(self):
+        """读 "Refine λ/N" 复选框 + N 输入框, 返回 λ 倍数 (e.g. 0.125 = λ/8) 或 None."""
+        if not getattr(self, 'chk_edge_refine', None) or not self.chk_edge_refine.isChecked():
+            return None
+        try:
+            N = float(self.ptd_seg_lambda_n.text() or '8')
+            if N > 0:
+                return 1.0 / N
+        except ValueError:
+            pass
+        return None
 
     def _refresh_ptd_pol_options(self):
         """根据当前 PTD 算法的 supports_cross_pol 刷新极化下拉。
@@ -1846,6 +1892,7 @@ class CEMPoQtWindow(QMainWindow):
                     'polarization': self.ptd_pol.currentText(),
                     'seg_angle_deg': float(self.ptd_seg_angle.text() or '2.0'),
                     'algorithm': self.ptd_algo_combo.currentData(),
+                    'max_seg_lambda': self._read_max_seg_lambda(),
                 },
                 'compute': {
                     'gpu': self.use_gpu.isChecked(),
@@ -2338,6 +2385,7 @@ class CEMPoQtWindow(QMainWindow):
                     'polarization':  self.ptd_pol.currentText(),
                     'seg_angle_deg': float(self.ptd_seg_angle.text() or '2.0'),
                     'algorithm':     self.ptd_algo_combo.currentData(),
+                    'max_seg_lambda': self._read_max_seg_lambda(),
                 },
                 'compute': {
                     'gpu':      self.use_gpu.isChecked(),
