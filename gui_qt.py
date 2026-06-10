@@ -91,6 +91,10 @@ class CEMPoQtWindow(QMainWindow):
     def closeEvent(self, event):
         save_config(self)
         sys.stdout = sys.__stdout__
+        try:
+            self.plotter.close()
+        except Exception:
+            pass
         super().closeEvent(event)
 
     def setup_ui(self):
