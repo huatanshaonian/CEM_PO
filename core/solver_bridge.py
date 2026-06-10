@@ -524,6 +524,57 @@ class SolverBridge:
             traceback.print_exc()
             raise e
 
+    def compute_surface_current(self, geo, params, theta_deg, phi_deg, polarization='V'):
+        """
+        计算指定入射角下每个 Surface 的 PO 表面电流分布。
+
+        Args:
+            geo: Surface 列表或单个 Surface
+            params: 与 run_simulation 相同结构的参数字典（用到 frequency / algorithm / mesh）
+            theta_deg, phi_deg: 入射方向（度）
+            polarization: 'V' / 'H' / 'VV' / 'HH' / 'VH' / 'HV'（按首字母取入射极化）
+
+        Returns:
+            list[SurfaceCurrentField] —— 每个 Surface 一个，已在 CPU 端
+        """
+        from physics.wave import IncidentWave
+        from physics.surface_current import compute_surface_current
+
+        freq = params['frequency']
+        algo_id = params['algorithm']
+        mesh_params = params.get('mesh', {})
+        samples = mesh_params.get('density', 10.0)
+        min_points = mesh_params.get('min_points', 18)
+        use_degen = mesh_params.get('use_degenerate', False)
+
+        if 'discrete_po' not in algo_id:
+            raise ValueError(f"表面电流可视化仅支持 discrete_po 类算法，当前: {algo_id}")
+
+        # 取/生成网格（CPU 端，不合并、不上 GPU）
+        cached = self._resolve_mesh_cache(geo, freq, samples, use_degen, algo_id, use_gpu=False)
+        if cached is None:
+            solver = get_integrator(algo_id, min_points=min_points)
+            wavelength = C0 / freq
+            surfaces = geo if isinstance(geo, list) else [geo]
+            mesh_list = [solver.precompute_mesh(s, wavelength, samples, use_degenerate_mesh=use_degen)
+                         for s in surfaces]
+            check_params = {
+                'freq': freq,
+                'samples': samples,
+                'use_degenerate_mesh': use_degen,
+                'n_surfaces': len(surfaces),
+            }
+            self.update_mesh_cache(mesh_list, check_params)
+        else:
+            mesh_list = cached if isinstance(cached, list) else [cached]
+            # 若缓存被推到 GPU，先拉回
+            for m in mesh_list:
+                if hasattr(m, 'to_cpu'):
+                    m.to_cpu()
+
+        wave = IncidentWave(freq, np.radians(theta_deg), np.radians(phi_deg))
+        return [compute_surface_current(m, wave, polarization=polarization) for m in mesh_list]
+
     def generate_mesh_visualization(self, geo, params):
         """
         生成用于可视化的网格数据 (Structured Grid)

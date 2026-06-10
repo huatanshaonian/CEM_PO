@@ -56,8 +56,16 @@ run_self_test(verbose=True) -> float
 import numpy as np
 
 from .constants import ETA0
-from .mec_coefficients import compute_total_fringe_currents
+from .mec_coefficients import (
+    compute_total_fringe_currents,
+    compute_total_fringe_currents_bistatic,
+    compute_total_fringe_currents_bistatic_raw,
+)
 from .mec_truncated_coefficients import compute_correction_currents
+from .mec_truncated_general_coefficients import (
+    compute_total_correction_general,
+    compute_total_correction_general_raw,
+)
 
 _POL_BASIS = {
     'VV': ('theta_hat', 'theta_hat'),
@@ -66,7 +74,21 @@ _POL_BASIS = {
     'HV': ('phi_hat',   'theta_hat'),
 }
 
-_SUPPORTED = ('michaeli_mec', 'michaeli_mec_truncated')
+# 算法清单:
+#   michaeli_mec               — Michaeli 1986 非截断 EEC, 含 ±_SING_OFFSET 平滑
+#                                 (Ufimtsev 奇点被平均掉, 适合常规 RCS)
+#   michaeli_mec_raw           — Michaeli 1986 非截断 EEC, 无平滑
+#                                 (奇点保留 → Johansen Fig.4 复现)
+#   michaeli_mec_truncated     — N=2 (半平面) 截断, Eq.26/27 + 平滑
+#   michaeli_mec_truncated_general    — 任意 N 截断 (Eq.21/22), 平滑版
+#   michaeli_mec_truncated_general_raw — 任意 N 截断, 无平滑
+#                                         (M_UT_raw - M_cor_raw 自然抵消奇点
+#                                          → Johansen Fig.6 复现)
+_SUPPORTED = ('michaeli_mec',
+              'michaeli_mec_raw',
+              'michaeli_mec_truncated',
+              'michaeli_mec_truncated_general',
+              'michaeli_mec_truncated_general_raw')
 
 
 def _edge_frame(seg, k_dir):
@@ -149,6 +171,9 @@ def assemble_bistatic(edges, wave, s_obs, polarization='VV',
         raise ValueError(f"未知极化 {polarization!r}; 可用 {list(_POL_BASIS)}")
 
     truncated = (algorithm == 'michaeli_mec_truncated')
+    truncated_general = (algorithm == 'michaeli_mec_truncated_general')
+    truncated_general_raw = (algorithm == 'michaeli_mec_truncated_general_raw')
+    raw_mode = algorithm in ('michaeli_mec_raw', 'michaeli_mec_truncated_general_raw')
     s_obs = np.asarray(s_obs, dtype=float)
     s_obs = s_obs / np.linalg.norm(s_obs)
     mono = bool(np.allclose(s_obs, -wave.k_dir, atol=1e-12))
@@ -171,26 +196,64 @@ def assemble_bistatic(edges, wave, s_obs, polarization='VV',
             t, y1, x1, k_dot_t = fr
             beta_p, phi_p = _incidence_angles(t, y1, x1, k_dir)
             N = seg.alpha / np.pi
-            if phi_p > N * np.pi:          # 入射落在阴影区, 该段不照亮
-                continue
+            if phi_p > N * np.pi:
+                # 入射落在 (Face A 自身投影的) 阴影区, 即源方向在导体楔内 (局部).
+                # 旧逻辑直接跳过该段; 但对 Johansen truncated_general / raw, 当几何
+                # 不是单边受照的简单情形 (例如三角柱顶点, 两邻面都局部 shadow),
+                # 跳过会丢失整条棱的贡献. Johansen 1996 公式本身允许 φ_0 > Nπ 时
+                # U(π-φ_0)=0 (Face A PO 自动为 0), 公式给出截断+二阶差等贡献.
+                if algorithm not in ('michaeli_mec_truncated_general',
+                                     'michaeli_mec_truncated_general_raw',
+                                     'michaeli_mec_raw'):
+                    continue
 
             E0z = complex(np.dot(e_t, t))
             H0z = complex(np.dot(H0_vec, t))
 
-            # --- 非截断 EEC (Michaeli 1986), 整支 conj 翻到 e^{-iωt} ---
-            If_m, Mf_m = compute_total_fringe_currents(
-                beta_p, phi_p, N, E0z, H0z, k, Z)
+            # --- 观察角 (mono 时 = π-β'/φ', 双站时由 s_obs 独立投影) ---
+            beta_o, phi_o = _observation_angles(
+                t, y1, x1, s_obs, beta_p, phi_p, mono)
+
+            # --- 非截断 EEC: 双站通式 Michaeli 1986 Eq.4-7, 整支 conj 到 e^{-iωt} ---
+            if raw_mode:
+                # raw: 无奇点平滑, 保留 Ufimtsev 奇点 (用于 Johansen Fig.4 复现,
+                # 以及与 _raw 截断修正配对让 M_UT - M_cor 自然抵消奇点)
+                If_m, Mf_m = compute_total_fringe_currents_bistatic_raw(
+                    beta_p, phi_p, beta_o, phi_o, N, E0z, H0z, k, Z)
+            elif mono:
+                # 单站特化 (生产路径), ~1.15x 加速
+                If_m, Mf_m = compute_total_fringe_currents(
+                    beta_p, phi_p, N, E0z, H0z, k, Z)
+            else:
+                If_m, Mf_m = compute_total_fringe_currents_bistatic(
+                    beta_p, phi_p, beta_o, phi_o, N, E0z, H0z, k, Z)
             If = np.conj(If_m)
             Mf = np.conj(Mf_m)
 
-            # --- 截断修正 (Johansen), 同样整支 conj; 观察角按 mono/bistatic ---
+            # --- 截断修正 (Johansen), 同样整支 conj ---
             if truncated:
+                # N=2 半平面闭式 (Eq.26/27); 仅对薄板有效, 任意 N 用 general 分支
                 l_A = getattr(seg, 'l_A', None)
                 if l_A is not None and np.isfinite(l_A) and l_A > 1e-12:
-                    beta_o, phi_o = _observation_angles(
-                        t, y1, x1, s_obs, beta_p, phi_p, mono)
                     Mc_m, Ic_m = compute_correction_currents(
                         beta_p, phi_p, beta_o, phi_o, l_A, E0z, H0z, k, Z)
+                    If = If - np.conj(Ic_m)
+                    Mf = Mf - np.conj(Mc_m)
+            elif truncated_general or truncated_general_raw:
+                # 任意 N (Johansen Eq.21/22 + Face B 替换), Face A 与 B 用不同截断长度
+                l_A = getattr(seg, 'l_A', None)
+                l_B = getattr(seg, 'l_B', l_A)   # 缺省: l_B = l_A
+                if (l_A is not None and np.isfinite(l_A) and l_A > 1e-12
+                        and l_B is not None and np.isfinite(l_B) and l_B > 1e-12):
+                    if truncated_general_raw:
+                        # 与 raw 模式 M_UT 同口径, 让 M_UT - M_cor 在奇点处自然抵消
+                        Mc_m, Ic_m = compute_total_correction_general_raw(
+                            beta_p, phi_p, beta_o, phi_o, N,
+                            l_A, l_B, E0z, H0z, k, Z)
+                    else:
+                        Mc_m, Ic_m = compute_total_correction_general(
+                            beta_p, phi_p, beta_o, phi_o, N,
+                            l_A, l_B, E0z, H0z, k, Z)
                     If = If - np.conj(Ic_m)
                     Mf = Mf - np.conj(Mc_m)
 

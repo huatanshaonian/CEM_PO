@@ -379,6 +379,9 @@ class ComparisonManager:
         metrics = self._sim_vs_analytical_metrics(datasets)
         ax.set_title(f"RCS Comparison{metrics}")
         ax.grid(True, linestyle='--', alpha=0.5)
+        ymin, ymax = self._cbar_range(None, None)
+        if ymin is not None and ymax is not None:
+            ax.set_ylim(ymin, ymax)
         handles, labels = ax.get_legend_handles_labels()
         if handles:
             ax.legend()
@@ -528,6 +531,9 @@ class ComparisonManager:
     def _parse_csv_1d(self, item):
         """Parse CSV as 1D RCS. Returns (angle_1d, rcs_total, name, rcs_po, rcs_ptd) or None.
 
+        若 CSV 同时含 theta 与 phi 列（2D 数据），按 combo_slice_axis / spin_slice_angle
+        取切片并返回；否则按原生 1D 格式解析。
+
         angle column: first column containing 'theta' or 'phi'.
         rcs_total: first column containing 'total', or first 'dbsm' column.
         rcs_po:    column containing 'po' and 'dbsm' (or None).
@@ -535,6 +541,13 @@ class ComparisonManager:
         """
         df = item['data']
         cols_lower = [c.lower() for c in df.columns]
+
+        has_theta = any('theta' in c for c in cols_lower)
+        has_phi   = any('phi'   in c for c in cols_lower)
+        if has_theta and has_phi:
+            sliced = self._slice_2d_csv(item)
+            if sliced is not None:
+                return sliced
 
         angle_col = next((df.columns[i] for i, c in enumerate(cols_lower)
                           if 'theta' in c or 'phi' in c), None)
@@ -563,6 +576,38 @@ class ComparisonManager:
             return angle, total, item['name'], po, ptd
         except Exception:
             return None
+
+    def _slice_2d_csv(self, item):
+        """对 2D CSV 按 slice_axis / spin_slice_angle 切一条 1D 曲线。
+
+        Returns (angle_1d, rcs_total, name, rcs_po, rcs_ptd) 或 None。
+        - axis="Phi"  → 固定 phi，沿 theta 扫描，横轴为 theta
+        - axis="Theta"→ 固定 theta，沿 phi   扫描，横轴为 phi
+        """
+        full = self._parse_csv_2d(item)
+        if not full:
+            return None
+        theta_1d, phi_1d, rcs_2d, name, po_2d, ptd_2d = full
+        if len(theta_1d) < 1 or len(phi_1d) < 1:
+            return None
+
+        axis  = self.w.combo_slice_axis.currentText()
+        angle = self.w.spin_slice_angle.value()
+
+        if axis == "Phi":
+            idx = int(np.argmin(np.abs(phi_1d - angle)))
+            tag = f"{name} (φ={phi_1d[idx]:.1f}°)"
+            total = rcs_2d[:, idx]
+            po    = po_2d[:,  idx] if po_2d  is not None else None
+            ptd   = ptd_2d[:, idx] if ptd_2d is not None else None
+            return theta_1d, total, tag, po, ptd
+
+        idx = int(np.argmin(np.abs(theta_1d - angle)))
+        tag = f"{name} (θ={theta_1d[idx]:.1f}°)"
+        total = rcs_2d[idx, :]
+        po    = po_2d[idx,  :] if po_2d  is not None else None
+        ptd   = ptd_2d[idx, :] if ptd_2d is not None else None
+        return phi_1d, total, tag, po, ptd
 
     def _parse_csv_2d(self, item):
         """Parse a loaded CSV as 2D RCS data (flat/long format with Theta, Phi, RCS columns).

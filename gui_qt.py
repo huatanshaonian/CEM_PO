@@ -43,6 +43,7 @@ from ui.workers import CalculationWorker, MeshStatsWorker, LogBridge, FreqSweepW
 from ui.styles import LIGHT_STYLE
 from ui.comparison_panel import ComparisonManager
 from ui.config_manager import save_config, load_config
+from ui.surface_current_view import SurfaceCurrentView
 
 class CEMPoQtWindow(QMainWindow):
     def __init__(self):
@@ -106,6 +107,7 @@ class CEMPoQtWindow(QMainWindow):
         self.config_tab_bar.addTab("Solver")
         self.config_tab_bar.addTab("Post-processing")
         self.config_tab_bar.addTab("Imaging")
+        self.config_tab_bar.addTab("Surface Current")
         self.config_tab_bar.setExpanding(False)
         self.config_tab_bar.setDrawBase(False)
         main_layout.addWidget(self.config_tab_bar)
@@ -136,6 +138,7 @@ class CEMPoQtWindow(QMainWindow):
         self.view_tab_bar.addTab("RCS Patterns")
         self.view_tab_bar.addTab("Statistics")
         self.view_tab_bar.addTab("Radar Imaging")
+        self.view_tab_bar.addTab("Surface Current")
         self.view_tab_bar.setExpanding(False)
         self.view_tab_bar.setDrawBase(False)
         right_layout.addWidget(self.view_tab_bar)
@@ -266,6 +269,10 @@ class CEMPoQtWindow(QMainWindow):
         img_export_layout.addWidget(self.btn_export_range_csv)
         imaging_layout.addLayout(img_export_layout)
         self.tabs.addTab(self.imaging_frame, "Radar Imaging")
+
+        # Tab 6: Surface Current
+        self.surface_current_view = SurfaceCurrentView()
+        self.tabs.addTab(self.surface_current_view, "Surface Current")
 
         # Log Area
         log_widget = QWidget()
@@ -888,6 +895,43 @@ class CEMPoQtWindow(QMainWindow):
 
         layout_imaging.addStretch()
         self.param_tabs.addTab(self.tab_imaging, "Imaging")
+
+        # === Tab 5: Surface Current ===
+        self.tab_surface_current = QWidget()
+        layout_sc = QVBoxLayout(self.tab_surface_current)
+
+        group_sc_angle = QGroupBox("Incident Angle")
+        l_sc_a = QFormLayout()
+        self.sc_theta = QLineEdit("0.0")
+        self.sc_phi = QLineEdit("0.0")
+        l_sc_a.addRow("θ (deg):", self.sc_theta)
+        l_sc_a.addRow("φ (deg):", self.sc_phi)
+        group_sc_angle.setLayout(l_sc_a)
+        layout_sc.addWidget(group_sc_angle)
+
+        group_sc_pol = QGroupBox("Polarization")
+        l_sc_p = QFormLayout()
+        self.sc_pol = QComboBox()
+        self.sc_pol.addItems(["V (E along θ̂)", "H (E along φ̂)"])
+        l_sc_p.addRow("Incident:", self.sc_pol)
+        group_sc_pol.setLayout(l_sc_p)
+        layout_sc.addWidget(group_sc_pol)
+
+        group_sc_run = QGroupBox("Compute")
+        l_sc_r = QVBoxLayout()
+        self.btn_sc_compute = QPushButton("Compute && Show")
+        self.btn_sc_compute.setStyleSheet("background-color: #4CAF50; color: white; border: 1px solid #388E3C; padding: 6px;")
+        self.btn_sc_compute.clicked.connect(self.on_compute_surface_current)
+        l_sc_r.addWidget(self.btn_sc_compute)
+        self.lbl_sc_status = QLabel("Build geometry first, then click Compute.")
+        self.lbl_sc_status.setStyleSheet("color: #555;")
+        self.lbl_sc_status.setWordWrap(True)
+        l_sc_r.addWidget(self.lbl_sc_status)
+        group_sc_run.setLayout(l_sc_r)
+        layout_sc.addWidget(group_sc_run)
+
+        layout_sc.addStretch()
+        self.param_tabs.addTab(self.tab_surface_current, "Surface Current")
 
         self.update_geo_inputs("Cylinder")
 
@@ -1803,6 +1847,65 @@ class CEMPoQtWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
             self.log(f"<font color='red'>Mesh Error: {e}</font>")
             traceback.print_exc()
+
+    def on_compute_surface_current(self):
+        """计算并在右侧 Surface Current 视图中显示 PO 表面电流分布。"""
+        if not self.current_geo:
+            self.on_preview()
+            if not self.current_geo:
+                self.lbl_sc_status.setText("<font color='red'>请先 Build Geometry。</font>")
+                return
+
+        algo_id = self.algo_combo.currentData() or ''
+        if 'discrete_po' not in algo_id:
+            self.lbl_sc_status.setText(
+                "<font color='red'>表面电流仅支持 Discrete PO 类算法。请在 Solver 栏选择对应算法。</font>")
+            return
+
+        try:
+            theta_deg = float(self.sc_theta.text())
+            phi_deg = float(self.sc_phi.text())
+            pol_code = self.sc_pol.currentText().split(' ', 1)[0]  # 'V' or 'H'
+            params = {
+                'frequency': float(self.freq_input.text()) * 1e6,
+                'algorithm': algo_id,
+                'mesh': {
+                    'density': float(self.mesh_density.text()),
+                    'min_points': int(self.min_points.text()),
+                    'use_degenerate': self.degen_mesh.isChecked(),
+                },
+            }
+        except Exception as e:
+            self.lbl_sc_status.setText(f"<font color='red'>参数错误: {e}</font>")
+            return
+
+        self.btn_sc_compute.setEnabled(False)
+        self.lbl_sc_status.setText("Computing...")
+        try:
+            fields = self.bridge.compute_surface_current(
+                self.current_geo, params, theta_deg, phi_deg, polarization=pol_code)
+            meta = {
+                'frequency': params['frequency'],
+                'theta_deg': theta_deg,
+                'phi_deg': phi_deg,
+                'polarization': pol_code,
+            }
+            self.surface_current_view.set_fields(fields, meta=meta)
+            # 切换到 Surface Current view
+            sc_idx = self.tabs.indexOf(self.surface_current_view)
+            if sc_idx >= 0:
+                self.tabs.setCurrentIndex(sc_idx)
+            n_lit = sum(int(np.sum(f.lit_mask)) for f in fields)
+            n_tot = sum(int(f.lit_mask.size) for f in fields)
+            self.lbl_sc_status.setText(
+                f"Done: {len(fields)} surfaces, lit {n_lit}/{n_tot} cells.")
+            self.log(f"[Surface Current] θ={theta_deg}°, φ={phi_deg}°, pol={pol_code}, "
+                     f"lit {n_lit}/{n_tot} cells")
+        except Exception as e:
+            traceback.print_exc()
+            self.lbl_sc_status.setText(f"<font color='red'>计算失败: {e}</font>")
+        finally:
+            self.btn_sc_compute.setEnabled(True)
 
     def on_generate_mesh_stats(self):
         """Generate mesh with statistics (similar to tk version's generate_mesh_stats)"""
