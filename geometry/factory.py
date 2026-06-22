@@ -113,14 +113,14 @@ class GeometryFactory:
                 raise ValueError("IGES File: no file specified (need 'files' list or 'file_path')")
 
             surfaces = []
-            for spec in files:
+            for file_idx, spec in enumerate(files, start=1):
                 fpath = spec.get('path')
                 if not fpath or not os.path.exists(fpath):
                     raise ValueError(f"IGES file not found: {fpath}")
 
                 scale = unit_to_scale.get(spec.get('unit', 'mm'), 1.0)
 
-                print(f"\n=== Loading {os.path.basename(fpath)} ===")
+                print(f"\n=== Loading [{file_idx}] {os.path.basename(fpath)} ===")
                 file_surfaces = load_iges_file(
                     fpath,
                     scale=scale,
@@ -129,6 +129,9 @@ class GeometryFactory:
                     mirror_plane=spec.get('mirror_plane'),
                     rotation=spec.get('rotation'),
                 )
+                # 给每个面打上"导入序号"，便于 UI 显示和高亮匹配（不依赖文件名，避免重名冲突）
+                for s in file_surfaces:
+                    s.file_index = file_idx
                 surfaces.extend(file_surfaces)
 
             return surfaces
