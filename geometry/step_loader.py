@@ -264,10 +264,13 @@ def load_iges_file(filename, max_param_range=100, scale=1.0,
     deleted = 0
     valid_idx = 0
 
+    src_name = os.path.basename(filename)
     print(f"  --- Face Info ({len(faces)} faces) ---")
     for face_idx, face in enumerate(faces):
         surf = OCCFaceSurface(face, scale=scale, invert_normal=False)
         surf.step_id = face_idx
+        surf.source_file = src_name
+        surf.local_index = face_idx
 
         edge_exp = TopExp_Explorer(face, TopAbs_EDGE)
         edge_count = 0
@@ -314,6 +317,9 @@ def load_iges_file(filename, max_param_range=100, scale=1.0,
         for surf in surfaces[:n_orig]:
             try:
                 mirrored = _mirror_face(surf.face, mirror_plane, scale)
+                mirrored.source_file = getattr(surf, 'source_file', src_name)
+                mirrored.local_index = getattr(surf, 'local_index', -1)
+                mirrored.is_mirrored = True
                 surfaces.append(mirrored)
             except Exception as e:
                 print(f"  Warning: mirror failed for face: {e}")
@@ -324,8 +330,12 @@ def load_iges_file(filename, max_param_range=100, scale=1.0,
         all_faces = [s.face for s in surfaces]
         rotated_faces = _rotate_faces(all_faces, rotation)
         for i, rf in enumerate(rotated_faces):
-            inv = surfaces[i].invert_normal
+            old = surfaces[i]
+            inv = old.invert_normal
             surfaces[i] = OCCFaceSurface(rf, scale=scale, invert_normal=inv)
+            surfaces[i].source_file = getattr(old, 'source_file', src_name)
+            surfaces[i].local_index = getattr(old, 'local_index', i)
+            surfaces[i].is_mirrored = getattr(old, 'is_mirrored', False)
         print(f"  Rotated all {len(surfaces)} faces by ({rotation[0]}, {rotation[1]}, {rotation[2]}) deg")
 
     # 翻转法向量：基于最终面列表的索引（所有几何操作完成后）

@@ -54,7 +54,9 @@ class CEMPoQtWindow(QMainWindow):
         self.bridge = SolverBridge()
         self.current_geo = None
         self.step_file_path = ""
-        self.iges_file_path = ""
+        self.iges_files = []           # list of dicts: {path, unit, invert_indices, delete_indices, mirror_plane, rotation}
+        self._iges_selected_idx = -1   # 当前在列表中选中的文件下标
+        self._iges_loading = False     # 抑制程序化更新字段时回写
         self.last_result = None
         self.last_freq_sweep_result = None
         self.imaging_datasets = []   # list of {'name': str, 'result': dict}
@@ -91,6 +93,12 @@ class CEMPoQtWindow(QMainWindow):
     def closeEvent(self, event):
         save_config(self)
         sys.stdout = sys.__stdout__
+        # 关闭所有 VTK QtInteractor，避免 Qt 销毁子部件后 VTK 还在 finalize
+        # 时调用 wglMakeCurrent 失败（顺序：先子 plotter，再主 plotter）。
+        try:
+            self.surface_current_view.plotter.close()
+        except Exception:
+            pass
         try:
             self.plotter.close()
         except Exception:
@@ -1255,9 +1263,13 @@ class CEMPoQtWindow(QMainWindow):
         )
 
     def _cache_dynamic_inputs(self):
-        """Save current dynamic widget values before they are destroyed."""
+        """Save current dynamic widget values before they are destroyed.
+
+        注：IGES 字段不在此缓存，它们的状态直接存在 self.iges_files 列表里，
+        随面板重建从 _rebuild_iges_list_widget 重新灌入。
+        """
         # Combo boxes
-        for attr in ('step_unit_combo', 'iges_unit_combo', 'iges_mirror_plane_combo'):
+        for attr in ('step_unit_combo',):
             w = getattr(self, attr, None)
             if w is not None:
                 try:
@@ -1265,8 +1277,7 @@ class CEMPoQtWindow(QMainWindow):
                 except RuntimeError:
                     pass  # C++ object already deleted
         # Line edits
-        for attr in ('invert_indices_input', 'step_max_param_input',
-                     'iges_invert_indices_input', 'iges_delete_indices_input', 'iges_rotation_input'):
+        for attr in ('invert_indices_input', 'step_max_param_input'):
             w = getattr(self, attr, None)
             if w is not None:
                 try:
@@ -1336,50 +1347,53 @@ class CEMPoQtWindow(QMainWindow):
                 self.lbl_step.setText(os.path.basename(self.step_file_path))
 
         elif gtype == "IGES File":
-            btn = QPushButton("Select IGES...")
-            btn.clicked.connect(self.pick_iges_file)
-            self.geo_dynamic_layout.addRow("File:", btn)
-            self.lbl_iges = QLabel("No file selected")
-            self.lbl_iges.setWordWrap(True)
-            self.geo_dynamic_layout.addRow(self.lbl_iges)
+            btn_add = QPushButton("Add IGES...")
+            btn_add.clicked.connect(self.add_iges_files)
+            btn_remove = QPushButton("Remove Selected")
+            btn_remove.clicked.connect(self.remove_iges_file)
+            btn_row = QHBoxLayout()
+            btn_row.addWidget(btn_add)
+            btn_row.addWidget(btn_remove)
+            btn_row_widget = QWidget()
+            btn_row_widget.setLayout(btn_row)
+            self.geo_dynamic_layout.addRow("Files:", btn_row_widget)
+
+            self.iges_file_list = QListWidget()
+            self.iges_file_list.setMaximumHeight(120)
+            self.iges_file_list.currentRowChanged.connect(self._on_iges_selection_changed)
+            self.geo_dynamic_layout.addRow(self.iges_file_list)
 
             self.iges_unit_combo = QComboBox()
             self.iges_unit_combo.addItems(["mm", "cm", "m"])
+            self.iges_unit_combo.currentTextChanged.connect(self._save_current_iges_edits)
             self.geo_dynamic_layout.addRow("Unit:", self.iges_unit_combo)
 
             self.iges_invert_indices_input = QLineEdit("")
-            self.iges_invert_indices_input.setPlaceholderText("e.g. 0,1,3,5")
+            self.iges_invert_indices_input.setPlaceholderText("e.g. 0,1,3,5  (per-file face index)")
+            self.iges_invert_indices_input.textChanged.connect(self._save_current_iges_edits)
             self.geo_dynamic_layout.addRow("Invert Normals:", self.iges_invert_indices_input)
 
             self.iges_delete_indices_input = QLineEdit("")
-            self.iges_delete_indices_input.setPlaceholderText("e.g. 1,3")
+            self.iges_delete_indices_input.setPlaceholderText("e.g. 1,3  (per-file face index)")
+            self.iges_delete_indices_input.textChanged.connect(self._save_current_iges_edits)
             self.geo_dynamic_layout.addRow("Delete Faces:", self.iges_delete_indices_input)
 
             self.iges_mirror_plane_combo = QComboBox()
             self.iges_mirror_plane_combo.addItems(["None", "X=0", "Y=0", "Z=0"])
+            self.iges_mirror_plane_combo.currentTextChanged.connect(self._save_current_iges_edits)
             self.geo_dynamic_layout.addRow("Mirror Plane:", self.iges_mirror_plane_combo)
 
             self.iges_rotation_input = QLineEdit("")
             self.iges_rotation_input.setPlaceholderText("rx, ry, rz (deg), e.g. 90,0,0")
+            self.iges_rotation_input.textChanged.connect(self._save_current_iges_edits)
             self.geo_dynamic_layout.addRow("Rotation:", self.iges_rotation_input)
 
-            btn_save = QPushButton("Save As IGES...")
+            btn_save = QPushButton("Save As IGES (Merged)...")
             btn_save.clicked.connect(self.save_iges_as)
             self.geo_dynamic_layout.addRow("Export:", btn_save)
 
-            # Restore cached values
-            if 'iges_unit_combo' in self._input_cache:
-                self.iges_unit_combo.setCurrentText(self._input_cache['iges_unit_combo'])
-            if 'iges_invert_indices_input' in self._input_cache:
-                self.iges_invert_indices_input.setText(self._input_cache['iges_invert_indices_input'])
-            if 'iges_delete_indices_input' in self._input_cache:
-                self.iges_delete_indices_input.setText(self._input_cache['iges_delete_indices_input'])
-            if 'iges_mirror_plane_combo' in self._input_cache:
-                self.iges_mirror_plane_combo.setCurrentText(self._input_cache['iges_mirror_plane_combo'])
-            if 'iges_rotation_input' in self._input_cache:
-                self.iges_rotation_input.setText(self._input_cache['iges_rotation_input'])
-            if self.iges_file_path and hasattr(self, 'lbl_iges'):
-                self.lbl_iges.setText(os.path.basename(self.iges_file_path))
+            # 从持久化的 self.iges_files 重建列表
+            self._rebuild_iges_list_widget()
 
     def add_input(self, label, default, key):
         le = QLineEdit(default)
@@ -1392,25 +1406,123 @@ class CEMPoQtWindow(QMainWindow):
             self.step_file_path = path
             self.lbl_step.setText(os.path.basename(path))
 
-    def pick_iges_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open IGES", "", "IGES Files (*.iges *.igs)")
-        if path:
-            self.iges_file_path = path
-            self.lbl_iges.setText(os.path.basename(path))
+    # ---------- 多文件 IGES 辅助方法 ----------
 
-    def save_iges_as(self):
-        """将当前编辑参数应用后，另存为新的 IGES 文件。"""
-        if not getattr(self, 'iges_file_path', ''):
-            self.log("<font color='red'>Error: Please select an IGES source file first.</font>")
+    def _new_iges_entry(self, path):
+        """构造一个 IGES 文件配置项，所有变换参数为默认值。"""
+        return {
+            'path': path,
+            'unit': 'mm',
+            'invert_indices': '',
+            'delete_indices': '',
+            'mirror_plane': 'None',
+            'rotation': '',
+        }
+
+    def _rebuild_iges_list_widget(self):
+        """根据 self.iges_files 重建列表控件并刷新编辑区。"""
+        if not hasattr(self, 'iges_file_list'):
             return
+        self._iges_loading = True
+        try:
+            self.iges_file_list.clear()
+            for entry in self.iges_files:
+                self.iges_file_list.addItem(os.path.basename(entry['path']))
+            n = len(self.iges_files)
+            if n == 0:
+                self._iges_selected_idx = -1
+            else:
+                idx = self._iges_selected_idx
+                if idx < 0 or idx >= n:
+                    idx = 0
+                self.iges_file_list.setCurrentRow(idx)
+                self._iges_selected_idx = idx
+        finally:
+            self._iges_loading = False
+        self._load_iges_entry_into_fields()
 
-        # 收集当前编辑参数（与 get_geo_params 逻辑一致）
-        unit = self.iges_unit_combo.currentText() if hasattr(self, 'iges_unit_combo') else 'mm'
-        unit_scale = {'mm': 1.0, 'cm': 0.01, 'm': 0.001}.get(unit, 1.0)
+    def _load_iges_entry_into_fields(self):
+        """把当前选中文件的参数灌进编辑字段。无选中则清空。"""
+        if not hasattr(self, 'iges_unit_combo'):
+            return
+        self._iges_loading = True
+        try:
+            idx = self._iges_selected_idx
+            if 0 <= idx < len(self.iges_files):
+                e = self.iges_files[idx]
+                self.iges_unit_combo.setCurrentText(e.get('unit', 'mm'))
+                self.iges_invert_indices_input.setText(e.get('invert_indices', ''))
+                self.iges_delete_indices_input.setText(e.get('delete_indices', ''))
+                self.iges_mirror_plane_combo.setCurrentText(e.get('mirror_plane', 'None'))
+                self.iges_rotation_input.setText(e.get('rotation', ''))
+                enabled = True
+            else:
+                self.iges_unit_combo.setCurrentText('mm')
+                self.iges_invert_indices_input.setText('')
+                self.iges_delete_indices_input.setText('')
+                self.iges_mirror_plane_combo.setCurrentText('None')
+                self.iges_rotation_input.setText('')
+                enabled = False
+            for w in (self.iges_unit_combo, self.iges_invert_indices_input,
+                      self.iges_delete_indices_input, self.iges_mirror_plane_combo,
+                      self.iges_rotation_input):
+                w.setEnabled(enabled)
+        finally:
+            self._iges_loading = False
 
-        def parse_indices(attr):
-            text = getattr(self, attr, None)
-            text = text.text().strip() if text else ""
+    def _on_iges_selection_changed(self, row):
+        """列表选中行变化：切换编辑区到对应文件。"""
+        if self._iges_loading:
+            return
+        self._iges_selected_idx = row
+        self._load_iges_entry_into_fields()
+
+    def _save_current_iges_edits(self, *args):
+        """编辑字段变更时回写到当前选中文件的 dict。"""
+        if self._iges_loading:
+            return
+        idx = self._iges_selected_idx
+        if not (0 <= idx < len(self.iges_files)):
+            return
+        e = self.iges_files[idx]
+        e['unit'] = self.iges_unit_combo.currentText()
+        e['invert_indices'] = self.iges_invert_indices_input.text()
+        e['delete_indices'] = self.iges_delete_indices_input.text()
+        e['mirror_plane'] = self.iges_mirror_plane_combo.currentText()
+        e['rotation'] = self.iges_rotation_input.text()
+
+    def add_iges_files(self):
+        """打开多选对话框，将选中文件追加到 self.iges_files。"""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Open IGES (multi-select)", "", "IGES Files (*.iges *.igs)"
+        )
+        if not paths:
+            return
+        for p in paths:
+            self.iges_files.append(self._new_iges_entry(p))
+        self._iges_selected_idx = len(self.iges_files) - 1
+        self._rebuild_iges_list_widget()
+        self.log(f"Added {len(paths)} IGES file(s); total: {len(self.iges_files)}")
+
+    def remove_iges_file(self):
+        """移除当前选中的 IGES 文件。"""
+        idx = self._iges_selected_idx
+        if not (0 <= idx < len(self.iges_files)):
+            return
+        removed = self.iges_files.pop(idx)
+        if self.iges_files:
+            self._iges_selected_idx = max(0, idx - 1)
+        else:
+            self._iges_selected_idx = -1
+        self._rebuild_iges_list_widget()
+        self.log(f"Removed: {os.path.basename(removed['path'])}")
+
+    def _parse_iges_entry_to_kwargs(self, entry):
+        """把一个 IGES dict 解析为 load_iges_file 的 kwargs。"""
+        unit_scale = {'mm': 0.001, 'cm': 0.01, 'm': 1.0}.get(entry.get('unit', 'mm'), 1.0)
+
+        def parse_indices(text):
+            text = (text or '').strip()
             if not text:
                 return []
             try:
@@ -1418,14 +1530,8 @@ class CEMPoQtWindow(QMainWindow):
             except ValueError:
                 return []
 
-        invert_indices = parse_indices('iges_invert_indices_input')
-        delete_indices = parse_indices('iges_delete_indices_input')
-
-        mp = self.iges_mirror_plane_combo.currentText() if hasattr(self, 'iges_mirror_plane_combo') else "None"
-        mirror_plane = mp if mp != "None" else None
-
         rotation = None
-        rot_str = self.iges_rotation_input.text().strip() if hasattr(self, 'iges_rotation_input') else ""
+        rot_str = (entry.get('rotation') or '').strip()
         if rot_str:
             try:
                 parts = [float(x.strip()) for x in rot_str.split(',')]
@@ -1434,27 +1540,38 @@ class CEMPoQtWindow(QMainWindow):
             except ValueError:
                 pass
 
-        # 选择保存路径
-        default_name = os.path.splitext(self.iges_file_path)[0] + "_edited.igs"
+        mp = entry.get('mirror_plane', 'None')
+        return {
+            'scale': unit_scale,
+            'invert_indices': parse_indices(entry.get('invert_indices', '')),
+            'delete_indices': parse_indices(entry.get('delete_indices', '')),
+            'mirror_plane': mp if mp and mp != 'None' else None,
+            'rotation': rotation,
+        }
+
+    def save_iges_as(self):
+        """把所有 IGES 文件应用各自的变换后合并，另存为单个 IGES。"""
+        if not self.iges_files:
+            self.log("<font color='red'>Error: No IGES file imported.</font>")
+            return
+
+        first_path = self.iges_files[0]['path']
+        default_name = os.path.splitext(first_path)[0] + "_merged.igs"
         out_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Edited IGES As", default_name, "IGES Files (*.igs *.iges)"
+            self, "Save Merged IGES As", default_name, "IGES Files (*.igs *.iges)"
         )
         if not out_path:
             return
 
-        self.log("Applying edits and saving IGES...")
+        self.log(f"Merging {len(self.iges_files)} IGES file(s) and saving...")
         try:
             from geometry.step_loader import load_iges_file, save_iges_file
-            surfaces = load_iges_file(
-                self.iges_file_path,
-                scale=unit_scale,
-                invert_indices=invert_indices,
-                delete_indices=delete_indices,
-                mirror_plane=mirror_plane,
-                rotation=rotation,
-            )
-            save_iges_file(surfaces, out_path)
-            self.log(f"<font color='green'>Saved {len(surfaces)} faces to: {os.path.basename(out_path)}</font>")
+            merged = []
+            for entry in self.iges_files:
+                kwargs = self._parse_iges_entry_to_kwargs(entry)
+                merged.extend(load_iges_file(entry['path'], **kwargs))
+            save_iges_file(merged, out_path)
+            self.log(f"<font color='green'>Saved {len(merged)} faces to: {os.path.basename(out_path)}</font>")
         except Exception as e:
             self.log(f"<font color='red'>Save failed: {e}</font>")
 
@@ -1509,32 +1626,19 @@ class CEMPoQtWindow(QMainWindow):
             except (ValueError, AttributeError):
                 params['max_param_range'] = 1e9
         elif self.geo_type_combo.currentText() == "IGES File":
-            params['file_path'] = getattr(self, 'iges_file_path', '')
-            params['unit'] = self.iges_unit_combo.currentText() if hasattr(self, 'iges_unit_combo') else 'mm'
-            # Parse index lists (invert / delete)
-            for attr, key in [('iges_invert_indices_input', 'invert_indices'),
-                              ('iges_delete_indices_input', 'delete_indices')]:
-                text = getattr(self, attr, None)
-                text = text.text().strip() if text else ""
-                if text:
-                    try:
-                        params[key] = [int(x.strip()) for x in text.split(',') if x.strip()]
-                    except ValueError:
-                        params[key] = []
-                else:
-                    params[key] = []
-            # Mirror plane
-            mp = self.iges_mirror_plane_combo.currentText() if hasattr(self, 'iges_mirror_plane_combo') else "None"
-            params['mirror_plane'] = mp if mp != "None" else None
-            # Rotation
-            rot_str = self.iges_rotation_input.text().strip() if hasattr(self, 'iges_rotation_input') else ""
-            if rot_str:
-                try:
-                    parts = [float(x.strip()) for x in rot_str.split(',')]
-                    if len(parts) == 3:
-                        params['rotation'] = tuple(parts)
-                except ValueError:
-                    pass
+            files = []
+            for entry in self.iges_files:
+                kwargs = self._parse_iges_entry_to_kwargs(entry)
+                # 把 scale 反推回 unit 字段（factory 自己会再换算一次），更直观
+                files.append({
+                    'path': entry['path'],
+                    'unit': entry.get('unit', 'mm'),
+                    'invert_indices': kwargs['invert_indices'],
+                    'delete_indices': kwargs['delete_indices'],
+                    'mirror_plane': kwargs['mirror_plane'],
+                    'rotation': kwargs['rotation'],
+                })
+            params['files'] = files
         return params
 
     def tessellate_surface(self, surface, resolution=30):
@@ -1585,8 +1689,8 @@ class CEMPoQtWindow(QMainWindow):
         if gtype == "STEP File" and not params.get('file_path'):
             self.log("<font color='red'>Error: Please select a STEP file first.</font>")
             return
-        if gtype == "IGES File" and not params.get('file_path'):
-            self.log("<font color='red'>Error: Please select an IGES file first.</font>")
+        if gtype == "IGES File" and not params.get('files'):
+            self.log("<font color='red'>Error: Please add at least one IGES file first.</font>")
             return
 
         self.log(f"Updating preview for {gtype}...")

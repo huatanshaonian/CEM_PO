@@ -28,11 +28,6 @@ def save_config(window):
 
         step_unit        = cached_val(window, 'step_unit_combo')
         invert_indices   = cached_val(window, 'invert_indices_input')
-        iges_unit        = cached_val(window, 'iges_unit_combo')
-        iges_invert_indices = cached_val(window, 'iges_invert_indices_input')
-        iges_delete_indices = cached_val(window, 'iges_delete_indices_input')
-        iges_mirror_plane   = cached_val(window, 'iges_mirror_plane_combo', 'None')
-        iges_rotation    = cached_val(window, 'iges_rotation_input')
 
         cfg = {
             "geo_type":   window.geo_type_combo.currentText(),
@@ -42,12 +37,9 @@ def save_config(window):
             "step_unit":      step_unit,
             "invert_indices": invert_indices,
 
-            "iges_file_path":        window.iges_file_path,
-            "iges_unit":             iges_unit,
-            "iges_invert_indices":   iges_invert_indices,
-            "iges_delete_indices":   iges_delete_indices,
-            "iges_mirror_plane":     iges_mirror_plane,
-            "iges_rotation":         iges_rotation,
+            # IGES 多文件：直接序列化 self.iges_files 列表
+            "iges_files":           list(getattr(window, 'iges_files', [])),
+            "iges_selected_idx":    getattr(window, '_iges_selected_idx', -1),
 
             "freq":          window.freq_input.text(),
             "mesh_density":  window.mesh_density.text(),
@@ -120,25 +112,25 @@ def load_config(window):
         if hasattr(window, 'invert_indices_input'):
             window.invert_indices_input.setText(cfg.get("invert_indices", ""))
 
-        # IGES — 同上
-        window.iges_file_path = cfg.get("iges_file_path", "")
-        window._input_cache['iges_unit_combo']          = cfg.get("iges_unit", "mm")
-        window._input_cache['iges_invert_indices_input'] = cfg.get("iges_invert_indices", "")
-        window._input_cache['iges_delete_indices_input'] = cfg.get("iges_delete_indices", "")
-        window._input_cache['iges_mirror_plane_combo']   = cfg.get("iges_mirror_plane", "None")
-        window._input_cache['iges_rotation_input']       = cfg.get("iges_rotation", "")
-        if window.iges_file_path and hasattr(window, 'lbl_iges'):
-            window.lbl_iges.setText(os.path.basename(window.iges_file_path))
-        if hasattr(window, 'iges_unit_combo'):
-            window.iges_unit_combo.setCurrentText(cfg.get("iges_unit", "mm"))
-        if hasattr(window, 'iges_invert_indices_input'):
-            window.iges_invert_indices_input.setText(cfg.get("iges_invert_indices", ""))
-        if hasattr(window, 'iges_delete_indices_input'):
-            window.iges_delete_indices_input.setText(cfg.get("iges_delete_indices", ""))
-        if hasattr(window, 'iges_mirror_plane_combo'):
-            window.iges_mirror_plane_combo.setCurrentText(cfg.get("iges_mirror_plane", "None"))
-        if hasattr(window, 'iges_rotation_input'):
-            window.iges_rotation_input.setText(cfg.get("iges_rotation", ""))
+        # IGES 多文件：优先读 iges_files 列表；若没有则从老版单文件字段迁移
+        iges_files = cfg.get("iges_files")
+        if iges_files is None:
+            old_path = cfg.get("iges_file_path", "")
+            if old_path:
+                iges_files = [{
+                    'path': old_path,
+                    'unit': cfg.get("iges_unit", "mm"),
+                    'invert_indices': cfg.get("iges_invert_indices", ""),
+                    'delete_indices': cfg.get("iges_delete_indices", ""),
+                    'mirror_plane': cfg.get("iges_mirror_plane", "None"),
+                    'rotation': cfg.get("iges_rotation", ""),
+                }]
+            else:
+                iges_files = []
+        window.iges_files = iges_files
+        window._iges_selected_idx = cfg.get("iges_selected_idx", 0 if iges_files else -1)
+        if hasattr(window, 'iges_file_list'):
+            window._rebuild_iges_list_widget()
 
         # Physics
         window.freq_input.setText(str(cfg.get("freq", "3000.0")))

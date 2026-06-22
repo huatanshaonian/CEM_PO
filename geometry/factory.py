@@ -94,27 +94,42 @@ class GeometryFactory:
             return surfaces
 
         elif geo_type == "IGES File":
-            file_path = params.get('file_path')
-            if not file_path or not os.path.exists(file_path):
-                raise ValueError(f"IGES file not found: {file_path}")
+            unit_to_scale = {'mm': 0.001, 'cm': 0.01, 'm': 1.0}
 
-            unit = params.get('unit', 'mm')
-            scale = 1.0
-            if unit == 'mm':
-                scale = 0.001
-            elif unit == 'cm':
-                scale = 0.01
+            files = params.get('files')
+            if not files:
+                file_path = params.get('file_path')
+                if file_path:
+                    files = [{
+                        'path': file_path,
+                        'unit': params.get('unit', 'mm'),
+                        'invert_indices': params.get('invert_indices', []),
+                        'delete_indices': params.get('delete_indices', []),
+                        'mirror_plane': params.get('mirror_plane'),
+                        'rotation': params.get('rotation'),
+                    }]
 
-            invert_indices = params.get('invert_indices', [])
-            delete_indices = params.get('delete_indices', [])
-            mirror_plane = params.get('mirror_plane')
-            rotation = params.get('rotation')
+            if not files:
+                raise ValueError("IGES File: no file specified (need 'files' list or 'file_path')")
 
-            surfaces = load_iges_file(
-                file_path, scale=scale, invert_indices=invert_indices,
-                delete_indices=delete_indices, mirror_plane=mirror_plane,
-                rotation=rotation
-            )
+            surfaces = []
+            for spec in files:
+                fpath = spec.get('path')
+                if not fpath or not os.path.exists(fpath):
+                    raise ValueError(f"IGES file not found: {fpath}")
+
+                scale = unit_to_scale.get(spec.get('unit', 'mm'), 1.0)
+
+                print(f"\n=== Loading {os.path.basename(fpath)} ===")
+                file_surfaces = load_iges_file(
+                    fpath,
+                    scale=scale,
+                    invert_indices=spec.get('invert_indices', []),
+                    delete_indices=spec.get('delete_indices', []),
+                    mirror_plane=spec.get('mirror_plane'),
+                    rotation=spec.get('rotation'),
+                )
+                surfaces.extend(file_surfaces)
 
             return surfaces
 
