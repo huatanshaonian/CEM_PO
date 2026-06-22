@@ -107,6 +107,42 @@
       }
     },
     {
+      "name": "IGES_MultiFile_Merged",
+      "description": "多个 IGES 文件合并为单一几何，每个文件可独立设置单位/镜像/旋转/翻面/删面。invert_indices 和 delete_indices 是该文件内的局部面索引。",
+      "geometry": {
+        "type": "IGES File",
+        "params": {
+          "files": [
+            {
+              "path": "models/wing.igs",
+              "unit": "mm",
+              "invert_indices": [1],
+              "delete_indices": [],
+              "mirror_plane": "Y=0",
+              "rotation": null
+            },
+            {
+              "path": "models/fuselage.igs",
+              "unit": "mm",
+              "invert_indices": [],
+              "delete_indices": [3, 4],
+              "mirror_plane": null,
+              "rotation": [0, 0, 90]
+            }
+          ]
+        }
+      },
+      "solver": {
+        "frequency_mhz": 1500.0,
+        "algorithm": "gauss_ribbon",
+        "use_gpu": true
+      },
+      "scan": {
+        "theta": [0, 360, 361],
+        "phi": [0, 0, 1]
+      }
+    },
+    {
       "name": "Batch_Folder_Scan",
       "description": "自动遍历文件夹下所有的 IGES 和 STEP 模型并批量执行",
       "geometry": {
