@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget,
                                QCheckBox, QPushButton, QTextEdit, QLabel, QProgressBar,
                                QSplitter, QFrame, QGroupBox, QScrollArea, QFileDialog, QTabWidget,
                                QListWidget, QAbstractItemView, QListWidgetItem,
-                               QDoubleSpinBox, QSizePolicy, QTabBar)
+                               QDoubleSpinBox, QSizePolicy, QTabBar, QMenu)
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize
 from PySide6.QtGui import QAction, QIcon, QFont, QColor, QPalette
 
@@ -1347,10 +1347,12 @@ class CEMPoQtWindow(QMainWindow):
                 self.lbl_step.setText(os.path.basename(self.step_file_path))
 
         elif gtype == "IGES File":
-            btn_add = QPushButton("Add IGES...")
+            btn_add = QPushButton("Load")
+            btn_add.setToolTip("Add one or more IGES files to the merge list.")
             btn_add.clicked.connect(self.add_iges_files)
-            btn_remove = QPushButton("Remove Selected")
-            btn_remove.clicked.connect(self.remove_iges_file)
+            btn_remove = QPushButton("Delete")
+            btn_remove.setToolTip("Remove the currently selected file from the list.")
+            btn_remove.clicked.connect(lambda: self.remove_iges_file())
             btn_row = QHBoxLayout()
             btn_row.addWidget(btn_add)
             btn_row.addWidget(btn_remove)
@@ -1361,6 +1363,9 @@ class CEMPoQtWindow(QMainWindow):
             self.iges_file_list = QListWidget()
             self.iges_file_list.setMaximumHeight(120)
             self.iges_file_list.currentRowChanged.connect(self._on_iges_selection_changed)
+            # 右键菜单：直接删除当前项
+            self.iges_file_list.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.iges_file_list.customContextMenuRequested.connect(self._on_iges_list_context_menu)
             self.geo_dynamic_layout.addRow(self.iges_file_list)
 
             self.iges_unit_combo = QComboBox()
@@ -1504,18 +1509,31 @@ class CEMPoQtWindow(QMainWindow):
         self._rebuild_iges_list_widget()
         self.log(f"Added {len(paths)} IGES file(s); total: {len(self.iges_files)}")
 
-    def remove_iges_file(self):
-        """移除当前选中的 IGES 文件。"""
-        idx = self._iges_selected_idx
+    def remove_iges_file(self, idx=None):
+        """移除指定下标（默认当前选中行）的 IGES 文件。"""
+        if idx is None:
+            idx = self._iges_selected_idx
         if not (0 <= idx < len(self.iges_files)):
             return
         removed = self.iges_files.pop(idx)
         if self.iges_files:
-            self._iges_selected_idx = max(0, idx - 1)
+            self._iges_selected_idx = min(max(0, idx - 1), len(self.iges_files) - 1)
         else:
             self._iges_selected_idx = -1
         self._rebuild_iges_list_widget()
         self.log(f"Removed: {os.path.basename(removed['path'])}")
+
+    def _on_iges_list_context_menu(self, pos):
+        """在 IGES 文件列表上右键，弹出删除菜单（对鼠标指向的那一项操作）。"""
+        item = self.iges_file_list.itemAt(pos)
+        if item is None:
+            return
+        idx = self.iges_file_list.row(item)
+        menu = QMenu(self.iges_file_list)
+        act_remove = menu.addAction(f"Remove {item.text()}")
+        chosen = menu.exec(self.iges_file_list.viewport().mapToGlobal(pos))
+        if chosen == act_remove:
+            self.remove_iges_file(idx)
 
     def _parse_iges_entry_to_kwargs(self, entry):
         """把一个 IGES dict 解析为 load_iges_file 的 kwargs。"""
