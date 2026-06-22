@@ -1476,11 +1476,24 @@ class CEMPoQtWindow(QMainWindow):
             self._iges_loading = False
 
     def _on_iges_selection_changed(self, row):
-        """列表选中行变化：切换编辑区到对应文件。"""
+        """列表选中行变化：切换编辑区到对应文件，并在 3D 视图中高亮该文件所有面。"""
         if self._iges_loading:
             return
         self._iges_selected_idx = row
         self._load_iges_entry_into_fields()
+        self._highlight_iges_file_in_3d(row)
+
+    def _highlight_iges_file_in_3d(self, row):
+        """在 3D 视图中高亮指定 IGES 文件对应的所有 Surface。"""
+        if not (0 <= row < len(self.iges_files)):
+            return
+        if not self.current_geo or not self._surface_actors:
+            return  # 还没预览，没有 actor 可高亮
+        src = os.path.basename(self.iges_files[row]['path'])
+        indices = {i for i, s in enumerate(self.current_geo)
+                   if getattr(s, 'source_file', '') == src}
+        if indices:
+            self._highlight_surfaces_3d(indices)
 
     def _save_current_iges_edits(self, *args):
         """编辑字段变更时回写到当前选中文件的 dict。"""
@@ -2425,7 +2438,14 @@ class CEMPoQtWindow(QMainWindow):
         self.surface_list.clear()
         if not self.current_geo: return
         for i, surf in enumerate(self.current_geo):
-            item = QListWidgetItem(f"Surface {i}")
+            src = getattr(surf, 'source_file', None)
+            local = getattr(surf, 'local_index', None)
+            if src and local is not None and local >= 0:
+                mirror_tag = " mirror" if getattr(surf, 'is_mirrored', False) else ""
+                label = f"Surface {i}  [{src} #{local}{mirror_tag}]"
+            else:
+                label = f"Surface {i}"
+            item = QListWidgetItem(label)
             self.surface_list.addItem(item)
 
     # ---- 3D pick-to-highlight ----
