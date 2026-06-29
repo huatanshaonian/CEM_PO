@@ -73,11 +73,18 @@ class CachedMeshData:
         self.du = du  # 标量或数组 (N,)
         self.dv = dv  # 标量或数组 (N,)
         self.direct_derivatives = False # 标记是否直接从几何体获取了导数
+        # FP32 / FP64 预 cast 缓存, 见 po_kernel._flatten_mesh
+        # key = (device_id, real_dtype_name), value = (pts,nrm,w_base,dpdu,dpdv,dus,dvs)
+        self._precision_views = {}
+
+    def _invalidate_precision_cache(self):
+        self._precision_views = {}
 
     def to_gpu(self):
         """将数据迁移到 GPU"""
         if not HAS_GPU:
             return self
+        self._invalidate_precision_cache()
         self.points = cp.asarray(self.points)
         self.normals = cp.asarray(self.normals)
         self.jacobians = cp.asarray(self.jacobians)
@@ -96,6 +103,7 @@ class CachedMeshData:
     def to_cpu(self):
         """将数据迁移回 CPU"""
         if hasattr(self.points, 'get'):
+            self._invalidate_precision_cache()
             self.points = self.points.get()
             self.normals = self.normals.get()
             self.jacobians = self.jacobians.get()
