@@ -3,13 +3,15 @@ import sys
 
 from core.env import HAS_GPU, cp
 from core.mesh_data import CachedMeshData, MergedMeshData, detect_degenerate_edge
+from .po_kernel import po_integrate
 
 class DiscretePOIntegrator:
     """
     离散物理光学 (PO) 积分器，支持多种 sinc 校正模式
     """
 
-    def __init__(self, nu=None, nv=None, samples_per_lambda=10, sinc_mode='dual', min_points=18):
+    def __init__(self, nu=None, nv=None, samples_per_lambda=10, sinc_mode='dual',
+                 min_points=18, precision='double'):
         self.nu_manual = nu
         self.nv_manual = nv
         self.default_samples_per_lambda = samples_per_lambda
@@ -17,6 +19,9 @@ class DiscretePOIntegrator:
         if sinc_mode not in ('none', 'u_only', 'dual'):
             raise ValueError(f"sinc_mode 必须是 'none', 'u_only' 或 'dual'，收到: {sinc_mode}")
         self.sinc_mode = sinc_mode
+        if precision not in ('double', 'mixed', 'single'):
+            raise ValueError(f"precision 必须是 'double'/'mixed'/'single'，收到: {precision}")
+        self.precision = precision
 
     def _estimate_mesh_density(self, surface, wavelength, samples_per_lambda):
         if self.nu_manual is not None and self.nv_manual is not None:
@@ -175,162 +180,36 @@ class DiscretePOIntegrator:
         res.layer_sizes = layer_sizes  # 用于可视化
         return res
 
-    def integrate_cached(self, cached_data, wave):
+    def integrate_cached(self, cached_data, wave, precision=None):
+        """统一 PO 积分入口, 调 po_kernel.po_integrate.
+
+        参数:
+            cached_data: 单个 CachedMeshData 或 list[CachedMeshData]
+                         (传 MergedMeshData 会 raise TypeError, 该类已不再生产)
+            wave:        IncidentWave 实例
+            precision:   None → 用 self.precision; 否则覆盖
+
+        返回:
+            complex —— 该 mesh(列表) 在此入射方向下的 PO 散射积分.
         """
-        使用预计算的 CachedMeshData 或 MergedMeshData 进行积分。
-        """
-        # --- 分支 1: 处理合并的大批次网格 (GPU 极速模式) ---
         if isinstance(cached_data, MergedMeshData):
-            xp = cp.get_array_module(cached_data.points) if HAS_GPU else np
-            
-            points = cached_data.points
-            normals = cached_data.normals
-            weights = cached_data.weights # 包含了 jac * du * dv
-            
-            k_vec = wave.k_vector
-            k_dir = wave.k_dir
+            raise TypeError(
+                "MergedMeshData 已不再被 PO kernel 接受; "
+                "请直接传 list[CachedMeshData] (上层 SolverBridge 已停止合并). "
+                "如果还需要合并优化, 在 po_kernel 内实现 segmented reduction.")
 
-            # 确保波矢量在正确的设备上
-            if xp is not np:
-                k_vec_xp = cp.asarray(k_vec)
-                k_dir_xp = cp.asarray(k_dir)
-            else:
-                k_vec_xp = k_vec
-                k_dir_xp = k_dir
+        prec = precision if precision is not None else self.precision
+        mesh_list = cached_data if isinstance(cached_data, list) else [cached_data]
+        k_mags = np.array([2.0 * np.pi / wave.wavelength])
+        I = po_integrate(mesh_list, wave.k_dir, k_mags,
+                         sinc_mode=self.sinc_mode, precision=prec)
+        return complex(I[0])
 
-            ref_point = points[0]
-            phase_ref = 2.0 * xp.sum(ref_point * k_vec_xp)
-            phase_local = 2.0 * xp.sum((points - ref_point) * k_vec_xp, axis=-1)
-
-            # 照射检测
-            n_dot_k = xp.sum(normals * k_dir_xp, axis=-1)
-            illumination_factor = xp.maximum(-n_dot_k, 0.0)
-
-            # Sinc 校正
-            sinc_factor = 1.0
-            if self.sinc_mode != 'none' and cached_data.has_derivs:
-                dP_du = cached_data.dP_du
-                du = cached_data.du
-                alpha = 2.0 * xp.sum(dP_du * k_vec_xp, axis=-1)
-                
-                if self.sinc_mode == 'u_only':
-                    sinc_factor = xp.sinc(alpha * du / (2.0 * xp.pi))
-                else: # dual
-                    dP_dv = cached_data.dP_dv
-                    dv = cached_data.dv
-                    beta = 2.0 * xp.sum(dP_dv * k_vec_xp, axis=-1)
-                    sinc_u = xp.sinc(alpha * du / (2.0 * xp.pi))
-                    sinc_v = xp.sinc(beta * dv / (2.0 * xp.pi))
-                    sinc_factor = sinc_u * sinc_v
-
-            lit_indices = illumination_factor > 1e-6
-            
-            if xp.any(lit_indices):
-                # 只计算亮区
-                lit_illum = illumination_factor[lit_indices]
-                lit_weights = weights[lit_indices]
-                lit_phase = phase_local[lit_indices]
-                
-                if isinstance(sinc_factor, float):
-                    lit_sinc = sinc_factor
-                else:
-                    lit_sinc = sinc_factor[lit_indices]
-
-                contributions = (lit_illum * lit_weights * 
-                                xp.exp(1j * lit_phase) * 
-                                lit_sinc)
-                
-                result = xp.sum(contributions) * xp.exp(1j * phase_ref)
-            else:
-                result = 0.0 + 0.0j
-
-            if hasattr(result, 'get'):
-                return complex(result.get())
-            return complex(result)
-
-        # --- 分支 2: 原始逐个曲面处理逻辑 ---
-        points = cached_data.points
-        normals = cached_data.normals
-        jacobians = cached_data.jacobians
-        dP_du = cached_data.dP_du
-        dP_dv = cached_data.dP_dv
-        du = cached_data.du
-        dv = cached_data.dv
-
-        # 自动选择 numpy 或 cupy
-        xp = np
-        if HAS_GPU:
-            xp = cp.get_array_module(points)
-
-        k_vec = wave.k_vector
-        k_dir = wave.k_dir
-
-        # 判断是否为退化网格（一维数组）
-        is_degenerate = (points.ndim == 2)  # (N, 3) vs (nv, nu, 3)
-
-        # 相位稳定化
-        if is_degenerate:
-            ref_point = points[len(points) // 2]
-        else:
-            nv, nu = points.shape[:2]
-            ref_point = points[nv // 2, nu // 2]
-
-        if xp is not np:
-            k_vec_xp = cp.asarray(k_vec)
-            k_dir_xp = cp.asarray(k_dir)
-        else:
-            k_vec_xp = k_vec
-            k_dir_xp = k_dir
-
-        phase_ref = 2.0 * xp.sum(ref_point * k_vec_xp)
-        phase_local = 2.0 * xp.sum((points - ref_point) * k_vec_xp, axis=-1)
-
-        # 照射检测
-        n_dot_k = xp.sum(normals * k_dir_xp, axis=-1)
-        lit_mask = n_dot_k < 0
-        illumination_factor = -n_dot_k
-
-        # sinc 校正步长：优先使用逐单元步长，其次平均步长
-        if is_degenerate and hasattr(cached_data, 'sinc_du'):
-            # 逐单元 sinc 步长（精度更高）
-            sinc_du = cached_data.sinc_du
-            sinc_dv = cached_data.sinc_dv
-        elif is_degenerate and hasattr(cached_data, 'avg_du'):
-            # 兼容旧版：平均步长
-            sinc_du = cached_data.avg_du
-            sinc_dv = cached_data.avg_dv
-        else:
-            sinc_du = du if np.isscalar(du) else np.mean(du)
-            sinc_dv = dv if np.isscalar(dv) else np.mean(dv)
-
-        if self.sinc_mode == 'none':
-            sinc_factor = 1.0
-        elif self.sinc_mode == 'u_only':
-            alpha = 2.0 * xp.sum(dP_du * k_vec_xp, axis=-1)
-            sinc_factor = xp.sinc(alpha * sinc_du / (2.0 * xp.pi))
-        else:  # 'dual'
-            alpha = 2.0 * xp.sum(dP_du * k_vec_xp, axis=-1)
-            beta = 2.0 * xp.sum(dP_dv * k_vec_xp, axis=-1)
-            sinc_u = xp.sinc(alpha * sinc_du / (2.0 * xp.pi))
-            sinc_v = xp.sinc(beta * sinc_dv / (2.0 * xp.pi))
-            sinc_factor = sinc_u * sinc_v
-
-        # du * dv 可能是标量或数组，numpy 会自动广播
-        contributions = (illumination_factor * jacobians *
-                        xp.exp(1j * phase_local) *
-                        sinc_factor *
-                        du * dv)
-
-        result = xp.sum(contributions[lit_mask]) * xp.exp(1j * phase_ref)
-
-        if hasattr(result, 'get'):
-            return complex(result.get())
-        return complex(result)
-
-    def integrate_surface(self, surface, wave, samples_per_lambda=None):
-        """(旧接口) 直接计算，不缓存"""
+    def integrate_surface(self, surface, wave, samples_per_lambda=None,
+                          precision=None):
+        """(旧接口) 直接计算, 不缓存. 现在统一走 kernel."""
         mesh_data = self.precompute_mesh(surface, wave.wavelength, samples_per_lambda)
-        return self.integrate_cached(mesh_data, wave)
+        return self.integrate_cached(mesh_data, wave, precision=precision)
 
     def get_mesh_data(self, surface, wave, samples_per_lambda=None):
         spl = samples_per_lambda if samples_per_lambda is not None else self.default_samples_per_lambda

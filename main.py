@@ -122,7 +122,8 @@ def build_sim_params(task_cfg, global_overrides):
         'compute': {
             'gpu': use_gpu,
             'parallel': not use_gpu, # Typically disable parallel if GPU is on
-            'workers': n_workers
+            'workers': n_workers,
+            'precision': solver_cfg.get('po_precision', 'double'),
         }
     }
     return params

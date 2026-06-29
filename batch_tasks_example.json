@@ -19,6 +19,7 @@
       "solver": {
         "frequency_mhz": 1000.0,
         "algorithm": "discrete_po_sinc_dual",
+        "po_precision": "double",
         "mesh_density": 10.0,
         "use_degenerate": true,
         "polarization": "VV"
@@ -66,6 +67,7 @@
       },
       "solver": {
         "algorithm": "discrete_po_sinc_dual",
+        "po_precision": "mixed",
         "polarization": "VV"
       },
       "scan": {
