@@ -5,7 +5,6 @@ from physics.constants import C0
 from physics.wave import IncidentWave
 from solvers.api import get_integrator, AVAILABLE_ALGORITHMS
 from solvers.rcs_analyzer import RCSAnalyzer
-from core.mesh_data import merge_meshes
 from core.freq_sweep import compute_po_freq_sweep, compute_ptd_freq_sweep, compute_range_profile
 
 class SolverBridge:
@@ -50,6 +49,7 @@ class SolverBridge:
             use_gpu = compute_params.get('gpu', False)
             parallel = compute_params.get('parallel', False)
             n_workers = compute_params.get('workers', 4)
+            precision = compute_params.get('precision', 'double')
             
             enable_ptd = ptd_params.get('enabled', False)
             ptd_only = ptd_params.get('ptd_only', False) and enable_ptd
@@ -83,7 +83,8 @@ class SolverBridge:
             # --- 4. 初始化求解器 ---
             # Only pass min_points to discrete_po algorithms
             if 'discrete_po' in algo_id:
-                solver = get_integrator(algo_id, min_points=min_points)
+                solver = get_integrator(algo_id, min_points=min_points,
+                                        precision=precision)
             else:
                 solver = get_integrator(algo_id)
             analyzer = RCSAnalyzer(solver)
@@ -258,18 +259,11 @@ class SolverBridge:
         
         cached_mesh = None
         if check_params == self.cached_mesh_params and self.cached_mesh_data is not None:
-             cached_mesh = self.cached_mesh_data
-             if callback: callback(0, 0, "Optimization: Using pre-calculated mesh.")
-             
-             # GPU 合并优化
-             if use_gpu:
-                 if isinstance(cached_mesh, list):
-                     try:
-                         if callback: callback(0, 0, "GPU Batching: Merging meshes...")
-                         cached_mesh = merge_meshes(cached_mesh, to_gpu=True)
-                     except Exception as e:
-                         print(f"Merge failed: {e}")
-        
+            cached_mesh = self.cached_mesh_data
+            if callback: callback(0, 0, "Optimization: Using pre-calculated mesh.")
+            # GPU 迁移由 RCSAnalyzer._prepare_geometry 统一处理 (mesh.to_gpu())
+            # 不再做 MergedMeshData 合并 (kernel 内部按曲面循环, 不需要)
+
         return cached_mesh
 
     def update_mesh_cache(self, mesh_data, params):
@@ -323,6 +317,7 @@ class SolverBridge:
             min_points = mesh_params.get('min_points', 18)
             use_degen  = mesh_params.get('use_degenerate', False)
             use_gpu    = compute_params.get('gpu', False)
+            precision  = compute_params.get('precision', 'double')
 
             enable_ptd    = ptd_params.get('enabled', False)
             ptd_edges_str = ptd_params.get('edges', '')
@@ -415,7 +410,9 @@ class SolverBridge:
                 wave  = IncidentWave(f_max, th_rad, ph_rad)
                 k_dir = wave.k_dir
 
-                I_po = compute_po_freq_sweep(mesh_list, k_dir, frequencies, sinc_mode, use_gpu)
+                I_po = compute_po_freq_sweep(mesh_list, k_dir, frequencies,
+                                              sinc_mode, use_gpu,
+                                              precision=precision)
                 I_po_matrix[i] = I_po
 
                 if enable_ptd and ptd_edges:

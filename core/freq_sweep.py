@@ -10,126 +10,36 @@ import numpy as np
 from scipy.signal.windows import chebwin, taylor
 from physics.constants import C0
 from core.env import HAS_GPU, cp
+from solvers.po_kernel import po_integrate
 
 
-def compute_po_freq_sweep(mesh_list, k_dir, frequencies, sinc_mode='dual', use_gpu=False):
-    """
-    PO 相位旋转法频率扫描（固定入射方向，扫频率）。
+def compute_po_freq_sweep(mesh_list, k_dir, frequencies, sinc_mode='dual',
+                          use_gpu=False, precision='double'):
+    """PO 相位旋转法频率扫描 (固定入射方向, 扫频率).
+
+    现已退化为 po_kernel.po_integrate 的薄包装. use_gpu 由调用方在
+    mesh.to_gpu() 时决定; 此处保留为兼容参数, 若传 True 且 mesh 还在 CPU
+    则就地迁移.
 
     参数:
-        mesh_list:   list[CachedMeshData]，每个面的预计算网格
-        k_dir:       ndarray (3,)，入射方向单位向量（频率无关）
-        frequencies: ndarray (Nf,)，频率数组 (Hz)
+        mesh_list:   list[CachedMeshData], CPU 或 GPU 均可
+        k_dir:       (3,) 入射方向单位向量
+        frequencies: (Nf,) 频率数组 (Hz)
         sinc_mode:   'none' | 'u_only' | 'dual'
-        use_gpu:     是否使用 GPU (CuPy)
+        use_gpu:     若为 True 且 mesh 在 CPU, 调用前迁移到 GPU
+        precision:   'double' | 'mixed' | 'single'
 
     返回:
-        I_po: ndarray complex128 (Nf,)，各频率的 PO 散射积分（始终 CPU 数组）
+        I_po: (Nf,) complex128 (始终 CPU)
     """
-    xp = cp if (use_gpu and HAS_GPU) else np
-    k_values_cpu = 2.0 * np.pi * np.asarray(frequencies) / C0  # (Nf,) CPU
-    Nf = len(k_values_cpu)
-    I_total = np.zeros(Nf, dtype=np.complex128)
+    if use_gpu and HAS_GPU:
+        for m in mesh_list:
+            if cp.get_array_module(m.points) is not cp:
+                m.to_gpu()
 
-    k_values_xp = xp.asarray(k_values_cpu)  # (Nf,) on device
-
-    for cached in mesh_list:
-        # --- 确保所有网格数据在 CPU numpy ---
-        pts  = np.asarray(cached.points)
-        nrm  = np.asarray(cached.normals)
-        jac  = np.asarray(cached.jacobians)
-        dpdu = np.asarray(cached.dP_du)
-        dpdv = np.asarray(cached.dP_dv)
-
-        is_degen = (pts.ndim == 2)
-
-        if not is_degen:
-            # 规则网格：(nv, nu, 3) → (N, 3)
-            pts  = pts.reshape(-1, 3)
-            nrm  = nrm.reshape(-1, 3)
-            jac  = jac.reshape(-1)
-            dpdu = dpdu.reshape(-1, 3)
-            dpdv = dpdv.reshape(-1, 3)
-            du_scalar = float(cached.du)
-            dv_scalar = float(cached.dv)
-            weights_base = jac * du_scalar * dv_scalar  # (N,)
-            # sinc 校正步长
-            N = len(pts)
-            du_sinc = np.full(N, du_scalar)
-            dv_sinc = np.full(N, dv_scalar)
-        else:
-            # 退化网格：(N, 3)
-            du_arr = np.asarray(cached.du)   # cell_areas
-            dv_arr = np.asarray(cached.dv)   # ones
-            weights_base = jac * du_arr * dv_arr  # (N,)
-            N = len(pts)
-            if hasattr(cached, 'sinc_du'):
-                du_sinc = np.asarray(cached.sinc_du)
-                dv_sinc = np.asarray(cached.sinc_dv)
-            elif hasattr(cached, 'avg_du'):
-                du_sinc = np.full(N, cached.avg_du)
-                dv_sinc = np.full(N, cached.avg_dv)
-            else:
-                du_sinc = np.full(N, float(np.mean(du_arr)))
-                dv_sinc = np.full(N, 1.0)
-
-        # --- 照射检测（与频率无关）---
-        n_dot_k = np.einsum('ij,j->i', nrm, k_dir)  # (N,)
-        lit_mask = n_dot_k < -1e-6
-        if not np.any(lit_mask):
-            continue
-
-        pts_lit   = pts[lit_mask]
-        dpdu_lit  = dpdu[lit_mask]
-        dpdv_lit  = dpdv[lit_mask]
-        illum_lit = -n_dot_k[lit_mask]                # (N_lit,) > 0
-        w_lit     = weights_base[lit_mask] * illum_lit  # (N_lit,)
-        du_sinc_lit = du_sinc[lit_mask]
-        dv_sinc_lit = dv_sinc[lit_mask]
-
-        # --- 参考点相位稳定化 ---
-        mid_idx = len(pts_lit) // 2
-        ref_point = pts_lit[mid_idx]
-        d_lit = np.einsum('ij,j->i', pts_lit - ref_point, k_dir)  # (N_lit,)
-        r_ref_proj = float(np.dot(ref_point, k_dir))
-
-        # --- 迁移到 xp ---
-        d_xp = xp.asarray(d_lit)       # (N_lit,)
-        w_xp = xp.asarray(w_lit)       # (N_lit,)
-
-        # phase_mat[i, n] = 2 * k[i] * d[n]  →  shape (Nf, N_lit)
-        phase_mat = 2.0 * xp.outer(k_values_xp, d_xp)
-        phase_ref = 2.0 * k_values_xp * r_ref_proj  # (Nf,)
-
-        if sinc_mode == 'none':
-            # 无 sinc 校正
-            contrib_mat = xp.exp(1j * phase_mat)          # (Nf, N_lit)
-        else:
-            # alpha_base[n] = dP_du[n] · k_dir  （频率无关）
-            alpha_base = np.einsum('ij,j->i', dpdu_lit, k_dir)  # (N_lit,)
-            alpha_xp   = xp.asarray(alpha_base * du_sinc_lit)    # (N_lit,)
-            # sinc_u_arg[i,n] = k[i] * alpha[n] / π
-            sinc_u_arg = xp.outer(k_values_xp / xp.pi, alpha_xp)  # (Nf, N_lit)
-            sinc_mat   = xp.sinc(sinc_u_arg)
-
-            if sinc_mode != 'u_only':  # dual
-                beta_base  = np.einsum('ij,j->i', dpdv_lit, k_dir)  # (N_lit,)
-                beta_xp    = xp.asarray(beta_base * dv_sinc_lit)
-                sinc_v_arg = xp.outer(k_values_xp / xp.pi, beta_xp)
-                sinc_mat   = sinc_mat * xp.sinc(sinc_v_arg)
-
-            contrib_mat = sinc_mat * xp.exp(1j * phase_mat)    # (Nf, N_lit)
-
-        I_surf = contrib_mat @ w_xp                              # (Nf,)
-        I_surf = I_surf * xp.exp(1j * phase_ref)
-
-        # 拉回 CPU 累加
-        if HAS_GPU and use_gpu and hasattr(I_surf, 'get'):
-            I_total += I_surf.get()
-        else:
-            I_total += np.asarray(I_surf)
-
-    return I_total
+    k_values = 2.0 * np.pi * np.asarray(frequencies) / C0
+    return po_integrate(mesh_list, k_dir, k_values,
+                        sinc_mode=sinc_mode, precision=precision)
 
 
 def _compute_ptd_freq_sweep_mec(ptd_edges, k_dir, frequencies, polarization, abort_event):
