@@ -31,7 +31,18 @@ def _xp_of(arr):
 
 
 def _flatten_mesh(cached, xp, real_dtype):
-    """从 CachedMeshData 抽出扁平的 (N,)/(N,3) 数组, 已 cast 到目标 dtype."""
+    """从 CachedMeshData 抽出扁平的 (N,)/(N,3) 数组, 已 cast 到目标 dtype.
+
+    带缓存: 同一 (设备, 精度) 组合下网格只 flatten + cast 一次, 后续 1801 次扫角
+    全部命中. mesh.to_gpu/to_cpu 时缓存自动失效 (见 CachedMeshData).
+    """
+    # 缓存命中检测: (device_id, real_dtype name)
+    cache = getattr(cached, '_precision_views', None)
+    if cache is not None:
+        key = (id(xp), np.dtype(real_dtype).name)
+        if key in cache:
+            return cache[key]
+
     pts  = xp.asarray(cached.points)
     nrm  = xp.asarray(cached.normals)
     jac  = xp.asarray(cached.jacobians)
@@ -76,7 +87,11 @@ def _flatten_mesh(cached, xp, real_dtype):
     dpdv_x = dpdv.astype(real_dtype, copy=False)
     dus_x  = du_sinc.astype(real_dtype, copy=False)
     dvs_x  = dv_sinc.astype(real_dtype, copy=False)
-    return pts_x, nrm_x, w_x, dpdu_x, dpdv_x, dus_x, dvs_x
+    result = (pts_x, nrm_x, w_x, dpdu_x, dpdv_x, dus_x, dvs_x)
+
+    if cache is not None:
+        cache[key] = result
+    return result
 
 
 def _to_cpu_complex128(arr, xp):
@@ -113,6 +128,10 @@ def po_integrate(mesh_list, k_dir, k_mags, sinc_mode='dual',
     Nf = k_mags_cpu.size
     I_total = np.zeros(Nf, dtype=np.complex128)
 
+    # 用目标 dtype 的虚数单位, 避免 `1j * float32` 强制 promote 到 complex128
+    op_j     = op_cdtype(1j)
+    accum_j  = accum_cdtype(1j)
+
     for cached in mesh_list:
         xp = _xp_of(cached.points)
         (pts, nrm, weights_base, dpdu, dpdv,
@@ -135,32 +154,33 @@ def po_integrate(mesh_list, k_dir, k_mags, sinc_mode='dual',
         d_local  = (pts - ref_point) @ k_dir_x                     # (N,)
         ref_proj_x = ref_point @ k_dir_x                           # scalar xp
 
-        # (Nf, N) outer + (Nf,) ref
-        phase_mat = (2.0 * k_mags_x)[:, None] * d_local[None, :]   # (Nf, N)
-        phase_ref = 2.0 * k_mags_x * ref_proj_x                    # (Nf,)
+        # 把 2k * 1j_op 预乘成 op_cdtype, 避免中间 phase_mat 实数 → complex 转换的
+        # 临时分配 (旧版 `1j * phase_mat` 产生 complex128 中间结果, FP32 模式下浪费)
+        two_jk = (2.0 * k_mags_x).astype(op_cdtype) * op_j         # (Nf,) op_cdtype
 
-        # sinc 因子 (Nf, N)
+        # (Nf, N) op_cdtype: 直接构造 complex 相位
+        phase_arg_c = two_jk[:, None] * d_local.astype(op_cdtype)[None, :]
+        phase_exp = xp.exp(phase_arg_c)                            # (Nf, N) op_cdtype
+
         if sinc_mode == 'none':
-            phase_exp = xp.exp((1j * phase_mat).astype(op_cdtype))
             contrib = phase_exp
         else:
-            alpha = (dpdu @ k_dir_x) * du_sinc                     # (N,)
-            sinc_u = xp.sinc(k_mags_x[:, None] / pi_x * alpha[None, :])
+            alpha = (dpdu @ k_dir_x) * du_sinc                     # (N,) real
+            sinc_u = xp.sinc(k_mags_x[:, None] / pi_x * alpha[None, :])  # (Nf,N) real
             if sinc_mode == 'dual':
                 beta = (dpdv @ k_dir_x) * dv_sinc
                 sinc_v = xp.sinc(k_mags_x[:, None] / pi_x * beta[None, :])
                 sinc_mat = sinc_u * sinc_v
             else:
                 sinc_mat = sinc_u
-            phase_exp = xp.exp((1j * phase_mat).astype(op_cdtype))
-            contrib = sinc_mat.astype(op_cdtype) * phase_exp        # (Nf, N)
+            contrib = sinc_mat.astype(op_cdtype) * phase_exp       # (Nf, N) op_cdtype
 
         w_op = w.astype(op_cdtype)
-        I_surf = contrib @ w_op                                     # (Nf,) op_cdtype
+        I_surf = contrib @ w_op                                    # (Nf,) op_cdtype
 
         # 升精度做 ref-phase 旋转, 累加成 complex128 CPU
-        I_surf_ac = I_surf.astype(accum_cdtype) * xp.exp(
-            (1j * phase_ref).astype(accum_cdtype))                  # (Nf,)
+        ref_phase_c = (2.0 * k_mags_x * ref_proj_x).astype(accum_cdtype) * accum_j
+        I_surf_ac = I_surf.astype(accum_cdtype) * xp.exp(ref_phase_c)
         I_total += _to_cpu_complex128(I_surf_ac, xp)
 
     return I_total
