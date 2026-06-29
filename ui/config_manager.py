@@ -56,6 +56,7 @@ def save_config(window):
             "use_degen":     window.degen_mesh.isChecked(),
 
             "algorithm":   window.algo_combo.currentData(),
+            "po_precision": window.po_precision_combo.currentText(),
             "theta_start": window.theta_start.text(),
             "theta_end":   window.theta_end.text(),
             "theta_n":     window.theta_n.text(),
@@ -152,6 +153,7 @@ def load_config(window):
         idx = window.algo_combo.findData(algo)
         if idx >= 0:
             window.algo_combo.setCurrentIndex(idx)
+        window.po_precision_combo.setCurrentText(cfg.get("po_precision", "double"))
 
         window.theta_start.setText(str(cfg.get("theta_start", "-90")))
         window.theta_end.setText(str(cfg.get("theta_end", "90")))

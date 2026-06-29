@@ -6,7 +6,6 @@ import logging
 from physics.constants import C0
 from physics.wave import IncidentWave
 from core.env import HAS_GPU
-from core.mesh_data import MergedMeshData
 from .ptd import PTDProcessor
 
 logger = logging.getLogger("CEM-PO.Analyzer")
@@ -89,12 +88,9 @@ class RCSAnalyzer:
             is_cached = False
 
         if gpu and is_cached:
-            if isinstance(geometry_data, MergedMeshData):
-                if show_progress: print("  [GPU Batching] Merged mesh ready.")
-            else:
-                if show_progress: print("  正在将几何数据迁移到 GPU...")
-                for mesh in geometry_data:
-                    mesh.to_gpu()
+            if show_progress: print("  正在将几何数据迁移到 GPU...")
+            for mesh in geometry_data:
+                mesh.to_gpu()
 
         return geometry_data, is_cached, ptd_edges, k_mag, gpu
 
@@ -117,9 +113,8 @@ class RCSAnalyzer:
 
         wave = IncidentWave(wave_params['frequency'], theta, wave_params['phi'])
 
-        total_I_po = 0j
-        for mesh_data in cached_surfaces:
-            total_I_po += self.solver.integrate_cached(mesh_data, wave)
+        # cached_surfaces 一定是 list[CachedMeshData], kernel 一次处理
+        total_I_po = self.solver.integrate_cached(cached_surfaces, wave)
 
         total_I_ptd = 0j
         if ptd_edges:
@@ -199,8 +194,6 @@ class RCSAnalyzer:
                     'total_c': [], 'po_c': [], 'ptd_c': []}
         n_angles = len(angles)
 
-        is_merged = isinstance(geometry_data, MergedMeshData)
-
         # PTD 预计算：在 GPU PO 之前把所有角度的 PTD 算完
         ptd_precomputed = None
         if ptd_edges and ptd_precompute:
@@ -233,16 +226,14 @@ class RCSAnalyzer:
 
             wave = self._make_wave(wave_params['frequency'], theta, wave_params['phi'])
 
-            total_I_po = 0j
-
-            if is_merged:
+            if is_cached:
+                # geometry_data 是 list[CachedMeshData], kernel 一次性处理
                 total_I_po = self.solver.integrate_cached(geometry_data, wave)
             else:
+                # 非缓存路径 (ribbon / analytic 等), 逐曲面串行
+                total_I_po = 0j
                 for obj in geometry_data:
-                    if is_cached:
-                        total_I_po += self.solver.integrate_cached(obj, wave)
-                    else:
-                        total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
+                    total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
 
             total_I_ptd = 0j
             if ptd_edges:
@@ -418,7 +409,6 @@ class RCSAnalyzer:
             'ptd_c':   np.zeros((n_theta, n_phi), dtype=complex),
         }
 
-        is_merged = isinstance(geometry_data, MergedMeshData)
         computed = 0
 
         for i, theta in enumerate(theta_array):
@@ -428,15 +418,12 @@ class RCSAnalyzer:
             for j, phi in enumerate(phi_array):
                 wave = self._make_wave(frequency, theta, phi)
 
-                total_I_po = 0j
-                if is_merged:
+                if is_cached:
                     total_I_po = self.solver.integrate_cached(geometry_data, wave)
                 else:
+                    total_I_po = 0j
                     for obj in geometry_data:
-                        if is_cached:
-                            total_I_po += self.solver.integrate_cached(obj, wave)
-                        else:
-                            total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
+                        total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
 
                 total_I_ptd = 0j
                 if ptd_edges:

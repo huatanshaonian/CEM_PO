@@ -422,6 +422,17 @@ class CEMPoQtWindow(QMainWindow):
         idx = self.algo_combo.findData('discrete_po_sinc_dual')
         if idx >= 0: self.algo_combo.setCurrentIndex(idx)
         l_algo.addRow(self.algo_combo)
+
+        # PO 精度模式 (仅 discrete_po 类算法生效)
+        self.po_precision_combo = QComboBox()
+        self.po_precision_combo.addItems(["double", "mixed", "single"])
+        self.po_precision_combo.setToolTip(
+            "double: FP64 全程 (默认, 基准)\n"
+            "mixed: FP32 算子 + FP64 累加 (速度~1.7x, 精度接近 double)\n"
+            "single: FP32 全程 (最快, 大模型可能积累精度损失)"
+        )
+        l_algo.addRow("PO Precision:", self.po_precision_combo)
+
         group_algo.setLayout(l_algo)
         layout_solver.addWidget(group_algo)
         
@@ -867,6 +878,7 @@ class CEMPoQtWindow(QMainWindow):
                 "solver": {
                     "frequency_mhz": float(self.freq_input.text()),
                     "algorithm": self.algo_combo.currentData(),
+                    "po_precision": self.po_precision_combo.currentText(),
                     "polarization": self.ptd_pol.currentText(),
                     "mesh_density": float(self.mesh_density.text()),
                     "min_points": int(self.min_points.text()),
@@ -1791,7 +1803,8 @@ class CEMPoQtWindow(QMainWindow):
                 'compute': {
                     'gpu': self.use_gpu.isChecked(),
                     'parallel': self.use_parallel.isChecked(),
-                    'workers': int(self.cpu_workers.text())
+                    'workers': int(self.cpu_workers.text()),
+                    'precision': self.po_precision_combo.currentText(),
                 }
             }
         except Exception as e:
@@ -1981,6 +1994,7 @@ class CEMPoQtWindow(QMainWindow):
                 writer.writerow(["# PTD Edges",         ptd_p.get('edges', '')])
                 writer.writerow(["# Polarization",      ptd_p.get('polarization', '')])
                 writer.writerow(["# GPU",               cmp_p.get('gpu', False)])
+                writer.writerow(["# PO Precision",      cmp_p.get('precision', 'double')])
                 writer.writerow(["# Elapsed Time (s)",  f"{res.get('elapsed_time', 0):.3f}"])
                 writer.writerow([])
                 
@@ -2269,9 +2283,10 @@ class CEMPoQtWindow(QMainWindow):
                     'seg_angle_deg': float(self.ptd_seg_angle.text() or '2.0'),
                 },
                 'compute': {
-                    'gpu':      self.use_gpu.isChecked(),
-                    'parallel': self.use_parallel.isChecked(),
-                    'workers':  int(self.cpu_workers.text()),
+                    'gpu':       self.use_gpu.isChecked(),
+                    'parallel':  self.use_parallel.isChecked(),
+                    'workers':   int(self.cpu_workers.text()),
+                    'precision': self.po_precision_combo.currentText(),
                 },
             }
             freq_sweep_params = {
