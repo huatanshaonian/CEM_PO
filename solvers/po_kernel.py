@@ -100,87 +100,138 @@ def _to_cpu_complex128(arr, xp):
     return cp.asnumpy(arr).astype(np.complex128, copy=False)
 
 
-def po_integrate(mesh_list, k_dir, k_mags, sinc_mode='dual',
-                 precision='double'):
-    """统一 PO 积分核.
+def po_integrate_batch(mesh_list, k_dirs, k_mags, sinc_mode='dual',
+                       precision='double'):
+    """批量 PO 积分核 —— 一次 GPU 调用处理 Nbatch 个入射方向.
+
+    数学上等价于对每个 k_dir 独立调用 po_integrate, 但通过把
+    (M, 3) @ (3, Nbatch) 这种 GEMV 升级成 GEMM, 减少 launch overhead 并
+    提升 cuBLAS 算力利用率. 在大量角度的扫描场景下 (例如 91×91 外形迭代)
+    比单角度循环快 ~2-3x.
 
     参数:
-        mesh_list:  list[CachedMeshData], 可以在 CPU 也可以在 GPU.
-                    设备由 mesh.points 自动检测.
-        k_dir:      (3,) 入射方向单位向量 (numpy 即可, kernel 内会迁移).
-        k_mags:     (Nf,) 波数数组. 单频时传 array([k]).
+        mesh_list:  list[CachedMeshData]
+        k_dirs:     (Nbatch, 3) 入射方向数组. 单角度可传 (3,) 自动展开
+        k_mags:     (Nf,) 波数数组. 单频时传 array([k])
         sinc_mode:  'none' | 'u_only' | 'dual'
         precision:  'double' | 'mixed' | 'single'
 
     返回:
-        I_total: (Nf,) complex128, 各频率的 PO 散射积分 (始终 CPU).
+        I_total: (Nbatch, Nf) complex128, 始终 CPU 数组.
     """
     if sinc_mode not in ('none', 'u_only', 'dual'):
         raise ValueError(f"sinc_mode 非法: {sinc_mode!r}")
     if precision not in _PRECISION_DTYPES:
         raise ValueError(f"precision 非法: {precision!r}")
-    if not mesh_list:
-        Nf = max(1, np.atleast_1d(np.asarray(k_mags)).size)
-        return np.zeros(Nf, dtype=np.complex128)
 
-    real_dtype, op_cdtype, accum_cdtype = _PRECISION_DTYPES[precision]
+    k_dirs_cpu = np.asarray(k_dirs, dtype=np.float64)
+    if k_dirs_cpu.ndim == 1:
+        k_dirs_cpu = k_dirs_cpu[None, :]
+    Nbatch = k_dirs_cpu.shape[0]
+
     k_mags_cpu = np.atleast_1d(np.asarray(k_mags, dtype=np.float64))
     Nf = k_mags_cpu.size
-    I_total = np.zeros(Nf, dtype=np.complex128)
 
-    # 用目标 dtype 的虚数单位, 避免 `1j * float32` 强制 promote 到 complex128
-    op_j     = op_cdtype(1j)
-    accum_j  = accum_cdtype(1j)
+    I_total = np.zeros((Nbatch, Nf), dtype=np.complex128)
+    if not mesh_list:
+        return I_total
+
+    real_dtype, op_cdtype, accum_cdtype = _PRECISION_DTYPES[precision]
+    op_j    = op_cdtype(1j)
+    accum_j = accum_cdtype(1j)
 
     for cached in mesh_list:
         xp = _xp_of(cached.points)
         (pts, nrm, weights_base, dpdu, dpdv,
          du_sinc, dv_sinc) = _flatten_mesh(cached, xp, real_dtype)
+        M = pts.shape[0]
 
-        k_dir_x  = xp.asarray(k_dir,      dtype=real_dtype)        # (3,)
-        k_mags_x = xp.asarray(k_mags_cpu, dtype=real_dtype)        # (Nf,)
+        k_dirs_x = xp.asarray(k_dirs_cpu, dtype=real_dtype)         # (Nbatch, 3)
+        k_mags_x = xp.asarray(k_mags_cpu, dtype=real_dtype)         # (Nf,)
         pi_x = real_dtype(np.pi)
 
-        n_dot_k = nrm @ k_dir_x                                    # (N,)
-        illum   = xp.maximum(-n_dot_k, real_dtype(0.0))            # (N,)
+        # 4 个核心 GEMM: (M, 3) @ (3, Nbatch) → (M, Nbatch)
+        # cuBLAS 走 SGEMM/DGEMM 高吞吐, 取代每角度独立 GEMV
+        kT = k_dirs_x.T                                              # (3, Nbatch)
+        n_dot_k    = nrm  @ kT                                       # (M, Nbatch)
+        pts_dot_k  = pts  @ kT                                       # (M, Nbatch)
 
-        if not bool(xp.any(illum > 0)):
-            continue
+        illum = xp.maximum(-n_dot_k, real_dtype(0.0))                # (M, Nbatch)
 
-        w = weights_base * illum                                   # (N,)
-        w_sum = xp.sum(w)
-        ref_point = (pts * w[:, None]).sum(axis=0) / w_sum         # (3,)
+        # 按 batch 截掉全阴影方向, 避免后续除以 0
+        # (现实场景几乎不会出现, 但 sphere 之类对称几何可能)
+        w_full = weights_base[:, None] * illum                       # (M, Nbatch)
+        w_sum  = xp.sum(w_full, axis=0)                              # (Nbatch,)
+        active = w_sum > real_dtype(0.0)                             # (Nbatch,) bool
+        # 防 0 除 (非 active 方向稍后乘 0 也不影响结果, 但仍要避免 NaN)
+        w_sum_safe = xp.where(active, w_sum, real_dtype(1.0))
 
-        d_local  = (pts - ref_point) @ k_dir_x                     # (N,)
-        ref_proj_x = ref_point @ k_dir_x                           # scalar xp
+        # per-batch 加权重心 ref[b,d] = Σ_m pts[m,d] * w[m,b] / w_sum[b]
+        # = (pts.T @ w_full) / w_sum.   shape (3, Nbatch) → 转置成 (Nbatch, 3)
+        ref_points = (pts.T @ w_full) / w_sum_safe[None, :]          # (3, Nbatch)
+        ref_proj   = xp.sum(ref_points * kT, axis=0)                 # (Nbatch,)
 
-        # 把 2k * 1j_op 预乘成 op_cdtype, 避免中间 phase_mat 实数 → complex 转换的
-        # 临时分配 (旧版 `1j * phase_mat` 产生 complex128 中间结果, FP32 模式下浪费)
-        two_jk = (2.0 * k_mags_x).astype(op_cdtype) * op_j         # (Nf,) op_cdtype
+        # d_local[m, b] = (pts[m,:] - ref[b,:]) · k_dirs[b,:]
+        #              = pts_dot_k[m,b] - ref_proj[b]
+        d_local = pts_dot_k - ref_proj[None, :]                      # (M, Nbatch)
 
-        # (Nf, N) op_cdtype: 直接构造 complex 相位
-        phase_arg_c = two_jk[:, None] * d_local.astype(op_cdtype)[None, :]
-        phase_exp = xp.exp(phase_arg_c)                            # (Nf, N) op_cdtype
+        # (Nbatch, Nf, M) 大数组 — Nbatch=64, Nf=1, M=240k, complex64 → 122 MB
+        # two_jk: (Nf, Nbatch) op_cdtype
+        two_jk = (2.0 * xp.outer(k_mags_x, xp.ones(
+            Nbatch, dtype=real_dtype))).astype(op_cdtype) * op_j     # (Nf, Nbatch)
+        # phase_arg[f, m, b] = two_jk[f, b] * d_local[m, b]
+        d_local_c = d_local.astype(op_cdtype)                        # (M, Nbatch)
+        # einsum 高效: 'fb,mb->fmb' 不可, 直接广播 (Nf,1,Nbatch)*(M,Nbatch)
+        phase_arg = two_jk[:, None, :] * d_local_c[None, :, :]       # (Nf, M, Nbatch)
+        phase_exp = xp.exp(phase_arg)                                # (Nf, M, Nbatch)
 
         if sinc_mode == 'none':
             contrib = phase_exp
         else:
-            alpha = (dpdu @ k_dir_x) * du_sinc                     # (N,) real
-            sinc_u = xp.sinc(k_mags_x[:, None] / pi_x * alpha[None, :])  # (Nf,N) real
+            # alpha[m, b] = (dpdu[m,:] · k_dirs[b,:]) * du_sinc[m]
+            dpdu_dot_k = dpdu @ kT                                   # (M, Nbatch) GEMM
+            alpha = dpdu_dot_k * du_sinc[:, None]                    # (M, Nbatch)
+            sinc_u = xp.sinc(k_mags_x[:, None, None] / pi_x *
+                             alpha[None, :, :])                      # (Nf, M, Nbatch)
             if sinc_mode == 'dual':
-                beta = (dpdv @ k_dir_x) * dv_sinc
-                sinc_v = xp.sinc(k_mags_x[:, None] / pi_x * beta[None, :])
+                dpdv_dot_k = dpdv @ kT                               # (M, Nbatch)
+                beta = dpdv_dot_k * dv_sinc[:, None]
+                sinc_v = xp.sinc(k_mags_x[:, None, None] / pi_x *
+                                 beta[None, :, :])
                 sinc_mat = sinc_u * sinc_v
             else:
                 sinc_mat = sinc_u
-            contrib = sinc_mat.astype(op_cdtype) * phase_exp       # (Nf, N) op_cdtype
+            contrib = sinc_mat.astype(op_cdtype) * phase_exp         # (Nf, M, Nbatch)
 
-        w_op = w.astype(op_cdtype)
-        I_surf = contrib @ w_op                                    # (Nf,) op_cdtype
+        # I_surf[f, b] = Σ_m contrib[f, m, b] * w_full[m, b]
+        # einsum 路径走 cuBLAS 批量 GEMV / GEMM
+        w_full_c = w_full.astype(op_cdtype)                          # (M, Nbatch)
+        I_surf = xp.einsum('fmb,mb->fb', contrib, w_full_c)          # (Nf, Nbatch)
 
-        # 升精度做 ref-phase 旋转, 累加成 complex128 CPU
-        ref_phase_c = (2.0 * k_mags_x * ref_proj_x).astype(accum_cdtype) * accum_j
+        # ref-phase 旋转 + 累加为 complex128 CPU
+        # ref_phase[f, b] = 2 k_mags[f] * ref_proj[b]
+        ref_phase_c = (2.0 * xp.outer(k_mags_x, ref_proj)).astype(
+            accum_cdtype) * accum_j                                  # (Nf, Nbatch)
         I_surf_ac = I_surf.astype(accum_cdtype) * xp.exp(ref_phase_c)
-        I_total += _to_cpu_complex128(I_surf_ac, xp)
+        # 全阴影方向乘 0 mask
+        I_surf_ac = I_surf_ac * active.astype(accum_cdtype)[None, :]
+
+        I_cpu = _to_cpu_complex128(I_surf_ac, xp)                    # (Nf, Nbatch)
+        I_total += I_cpu.T                                           # (Nbatch, Nf)
 
     return I_total
+
+
+def po_integrate(mesh_list, k_dir, k_mags, sinc_mode='dual',
+                 precision='double'):
+    """单角度 PO 积分入口 (po_integrate_batch 的 batch=1 包装).
+
+    保留独立函数是为了向后兼容旧调用方; 数学等价于
+    po_integrate_batch(mesh, k_dir[None, :], k_mags, ...)[0].
+
+    返回 (Nf,) complex128.
+    """
+    I_batch = po_integrate_batch(mesh_list, np.asarray(k_dir)[None, :],
+                                 k_mags, sinc_mode=sinc_mode,
+                                 precision=precision)
+    return I_batch[0]

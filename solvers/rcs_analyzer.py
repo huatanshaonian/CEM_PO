@@ -8,6 +8,8 @@ from physics.wave import IncidentWave
 from core.env import HAS_GPU
 from .ptd import PTDProcessor
 
+PO_BATCH_SIZE = 64   # 角度批量化 chunk 大小: GPU 上 8281 角度 7-8x 加速
+
 logger = logging.getLogger("CEM-PO.Analyzer")
 
 
@@ -186,6 +188,29 @@ class RCSAnalyzer:
             ptd_precompute=ptd_precompute, abort_event=abort_event
         )
 
+    def _batch_compute_po(self, geometry_data, frequency, k_dirs,
+                          abort_event=None, progress_callback=None,
+                          progress_label='PO batch'):
+        """对 (N, 3) k_dirs 用 PO_BATCH_SIZE 分块批量计算, 返回 (N,) complex.
+
+        只用于 is_cached + discrete_po 路径 (kernel 支持 batch).
+        """
+        from physics.constants import C0
+        N = k_dirs.shape[0]
+        I_po = np.zeros(N, dtype=np.complex128)
+        wavelength = C0 / frequency
+        for start in range(0, N, PO_BATCH_SIZE):
+            end = min(start + PO_BATCH_SIZE, N)
+            if abort_event and abort_event.is_set():
+                from ui.workers import SimulationAborted
+                raise SimulationAborted("用户终止仿真")
+            I_batch = self.solver.integrate_cached_batch(
+                geometry_data, k_dirs[start:end], wavelength=wavelength)
+            I_po[start:end] = I_batch[:, 0]
+            if progress_callback and (end % max(1, N // 20) == 0 or end == N):
+                progress_callback(end, N, f'{progress_label}: {end}/{N}')
+        return I_po
+
     def _compute_serial(self, geometry_data, wave_params, angles,
                         samples_per_lambda, k_mag, show_progress, progress_callback=None,
                         ptd_edges=None, polarization='VV', is_cached=False, ptd_workers=None,
@@ -193,6 +218,21 @@ class RCSAnalyzer:
         rcs_list = {'total': [], 'po': [], 'ptd': [],
                     'total_c': [], 'po_c': [], 'ptd_c': []}
         n_angles = len(angles)
+        freq = wave_params['frequency']
+        phi  = wave_params['phi']
+
+        # 批量 PO 预计算 (is_cached + 非 ptd_only 时启用, 大量角度场景下 GPU ~7x 加速)
+        po_precomputed = None
+        if is_cached and not ptd_only:
+            k_dirs = np.stack([
+                self._make_wave(freq, t, phi).k_dir for t in angles
+            ])
+            if show_progress:
+                logger.info(f"PO 批量预计算: {n_angles} 角度, batch={PO_BATCH_SIZE}")
+            po_precomputed = self._batch_compute_po(
+                geometry_data, freq, k_dirs,
+                abort_event=abort_event, progress_callback=progress_callback,
+                progress_label='PO batch')
 
         # PTD 预计算：在 GPU PO 之前把所有角度的 PTD 算完
         ptd_precomputed = None
@@ -226,8 +266,11 @@ class RCSAnalyzer:
 
             wave = self._make_wave(wave_params['frequency'], theta, wave_params['phi'])
 
-            if is_cached:
-                # geometry_data 是 list[CachedMeshData], kernel 一次性处理
+            if po_precomputed is not None:
+                # PO 已批量预算完毕
+                total_I_po = complex(po_precomputed[i])
+            elif is_cached:
+                # fallback
                 total_I_po = self.solver.integrate_cached(geometry_data, wave)
             else:
                 # 非缓存路径 (ribbon / analytic 等), 逐曲面串行
@@ -399,7 +442,23 @@ class RCSAnalyzer:
                 if progress_callback: progress_callback(0, total_points, msg)
                 ptd_precomputed = [_ptd_angle_task(a) for a in args_list]
 
-        # ── 主循环（PO 在 GPU 上，PTD 已预算或在循环内串行计算） ──
+        # ── PO 批量预计算 (is_cached 且非 ptd_only 时) ──
+        # 把 (theta, phi) 笛卡尔积 flatten 成 (total_points, 3) k_dirs
+        po_precomputed_2d = None
+        if is_cached and not ptd_only:
+            k_dirs_2d = np.zeros((total_points, 3))
+            for i, theta in enumerate(theta_array):
+                for j, phi in enumerate(phi_array):
+                    k_dirs_2d[i * n_phi + j] = self._make_wave(frequency, theta, phi).k_dir
+            if show_progress:
+                logger.info(f"PO 2D 批量预计算: {total_points} 点, batch={PO_BATCH_SIZE}")
+            po_flat = self._batch_compute_po(
+                geometry_data, frequency, k_dirs_2d,
+                abort_event=abort_event, progress_callback=progress_callback,
+                progress_label='PO 2D batch')
+            po_precomputed_2d = po_flat.reshape(n_theta, n_phi)
+
+        # ── 主循环（PO 已预算 / PTD 已预算或循环内串行计算） ──
         rcs_2d = {
             'total': np.zeros((n_theta, n_phi)),
             'po':    np.zeros((n_theta, n_phi)),
@@ -418,9 +477,12 @@ class RCSAnalyzer:
             for j, phi in enumerate(phi_array):
                 wave = self._make_wave(frequency, theta, phi)
 
-                if is_cached:
+                if po_precomputed_2d is not None:
+                    total_I_po = complex(po_precomputed_2d[i, j])
+                elif is_cached:
                     total_I_po = self.solver.integrate_cached(geometry_data, wave)
                 else:
+                    # 非缓存路径 (ribbon / analytic 等)
                     total_I_po = 0j
                     for obj in geometry_data:
                         total_I_po += self.solver.integrate_surface(obj, wave, samples_per_lambda=samples_per_lambda)
