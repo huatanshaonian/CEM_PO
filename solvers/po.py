@@ -3,7 +3,7 @@ import sys
 
 from core.env import HAS_GPU, cp
 from core.mesh_data import CachedMeshData, MergedMeshData, detect_degenerate_edge
-from .po_kernel import po_integrate
+from .po_kernel import po_integrate, po_integrate_batch
 
 class DiscretePOIntegrator:
     """
@@ -204,6 +204,31 @@ class DiscretePOIntegrator:
         I = po_integrate(mesh_list, wave.k_dir, k_mags,
                          sinc_mode=self.sinc_mode, precision=prec)
         return complex(I[0])
+
+    def integrate_cached_batch(self, cached_data, k_dirs, k_mags=None,
+                                wavelength=None, precision=None):
+        """批量 PO 积分: 一次 kernel 调用处理 Nbatch 个入射方向.
+
+        参数:
+            cached_data: 单个 CachedMeshData 或 list[CachedMeshData]
+            k_dirs:      (Nbatch, 3) 入射方向数组
+            k_mags:      (Nf,) 波数. 也可只传 wavelength 让本函数算
+            wavelength:  单频时可不传 k_mags, 传 wavelength
+            precision:   None → 用 self.precision; 否则覆盖
+
+        返回:
+            (Nbatch, Nf) complex128
+        """
+        if isinstance(cached_data, MergedMeshData):
+            raise TypeError("MergedMeshData 已不再被 PO kernel 接受")
+        if k_mags is None:
+            if wavelength is None:
+                raise ValueError("integrate_cached_batch 需要 k_mags 或 wavelength")
+            k_mags = np.array([2.0 * np.pi / wavelength])
+        prec = precision if precision is not None else self.precision
+        mesh_list = cached_data if isinstance(cached_data, list) else [cached_data]
+        return po_integrate_batch(mesh_list, k_dirs, k_mags,
+                                  sinc_mode=self.sinc_mode, precision=prec)
 
     def integrate_surface(self, surface, wave, samples_per_lambda=None,
                           precision=None):
